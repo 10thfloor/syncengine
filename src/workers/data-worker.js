@@ -1,5 +1,5 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import initDBSP, { DbspEngine } from 'dbsp-engine';
+import { DbspEngine } from 'dbsp-engine';
 
 // ── Shared lib imports (eliminates duplication) ─────────────────────────────
 // HLC and migration logic live in src/lib/ and are the single source of truth.
@@ -17,7 +17,7 @@ import {
 
 let db;
 let dbsp;
-let tablesMeta = {};
+const tablesMeta = {};
 let initialized = false;
 const pendingMessages = [];
 let schemaTables = [];
@@ -385,7 +385,7 @@ function startPeerAckTimer() {
         if (!nats.config || !nats.conn || nats.conn.isClosed()) return;
         const url = `${authority.restateUrl}/workspace/${nats.config.workspaceId}/reportPeerSeq`;
         const headers = { 'Content-Type': 'application/json' };
-        if (nats.config.authToken) headers['Authorization'] = `Bearer ${nats.config.authToken}`;
+        if (nats.config.authToken) headers.Authorization = `Bearer ${nats.config.authToken}`;
         fetch(url, {
             method: 'POST',
             headers,
@@ -402,7 +402,7 @@ function startPeerAckTimer() {
 
 async function watchDisconnect() {
     const err = await nats.conn.closed();
-    console.log(`[nats] connection closed`, err || '');
+    console.log('[nats] connection closed', err || '');
     setConnectionStatus('disconnected');
     nats.conn = null;
     nats.sub = null;
@@ -420,7 +420,7 @@ function sendToAuthority(viewName, deltas) {
 
     const url = `${authority.restateUrl}/workspace/${nats.config.workspaceId}/authority`;
     const headers = { 'Content-Type': 'application/json' };
-    if (nats.config.authToken) headers['Authorization'] = `Bearer ${nats.config.authToken}`;
+    if (nats.config.authToken) headers.Authorization = `Bearer ${nats.config.authToken}`;
 
     fetch(url, {
         method: 'POST',
@@ -509,7 +509,7 @@ function runMigrations(targetVersion, migrations) {
     db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
 
     const rows = db.exec("SELECT value FROM _dbsp_meta WHERE key = 'schema_version'", { rowMode: 'array' });
-    const currentVersion = rows.length > 0 ? parseInt(rows[0][0], 10) : 0;
+    const currentVersion = rows.length > 0 ? Number.parseInt(rows[0][0], 10) : 0;
 
     if (currentVersion >= targetVersion) {
         console.log(`[migrations] schema at v${currentVersion}, target v${targetVersion} — no migrations needed`);
@@ -621,7 +621,6 @@ async function handleInit(data) {
     const { schema } = data;
 
     // 1. DBSP Engine
-    await initDBSP();
     dbsp = new DbspEngine(
         schema.views.map(v => ({
             name: v.name,
@@ -774,12 +773,19 @@ function handleReset() {
 // ── Message router ──────────────────────────────────────────────────────────
 
 self.onmessage = async (event) => {
-    if (!initialized && event.data.type !== 'INIT') {
-        pendingMessages.push(event.data);
-        return;
+    try {
+        if (!initialized && event.data.type !== 'INIT') {
+            pendingMessages.push(event.data);
+            return;
+        }
+        await handleMessage(event.data);
+    } catch (err) {
+        console.error('[worker] FATAL:', err);
     }
-    await handleMessage(event.data);
 };
+
+// Signal to the main thread that the module has loaded and onmessage is set.
+self.postMessage({ type: 'WORKER_LOADED' });
 
 async function handleMessage(data) {
     // Queue local mutations during replay — but always allow RESET through

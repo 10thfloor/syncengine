@@ -53,6 +53,7 @@ export interface ConflictRecord {
 }
 
 type WorkerOutMessage =
+    | { type: 'WORKER_LOADED' }
     | { type: 'READY' }
     | { type: 'VIEW_UPDATE'; viewName: string; deltas: Array<{ record: Record<string, unknown>; weight: number }> }
     | { type: 'FULL_SYNC'; snapshots: Record<string, Record<string, unknown>[]> }
@@ -204,6 +205,18 @@ export function store(config: StoreConfig): Store {
         worker.onmessage = (event: MessageEvent<WorkerOutMessage>) => {
             const msg = event.data;
 
+            // Handshake: wait for the worker module to finish loading
+            // before sending INIT. Module workers with top-level await
+            // may drop messages posted before evaluation completes.
+            if (msg.type === 'WORKER_LOADED') {
+                const initMsg: InitMessage = { type: 'INIT', schema: schemaPayload };
+                if (config.sync) initMsg.sync = config.sync;
+                if (config.schemaVersion) initMsg.schemaVersion = config.schemaVersion;
+                if (config.migrations) initMsg.migrations = config.migrations;
+                worker!.postMessage(initMsg);
+                return;
+            }
+
             switch (msg.type) {
                 case 'READY':
                     ready = true;
@@ -279,11 +292,6 @@ export function store(config: StoreConfig): Store {
             }
         };
 
-        const initMsg: InitMessage = { type: 'INIT', schema: schemaPayload };
-        if (config.sync) initMsg.sync = config.sync;
-        if (config.schemaVersion) initMsg.schemaVersion = config.schemaVersion;
-        if (config.migrations) initMsg.migrations = config.migrations;
-        worker.postMessage(initMsg);
         return worker;
     }
 

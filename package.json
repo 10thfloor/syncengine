@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:wasm": "cd dbsp-engine && wasm-pack build --target bundler --out-dir pkg",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",

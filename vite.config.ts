@@ -1,14 +1,22 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import wasm from 'vite-plugin-wasm';
+import topLevelAwait from 'vite-plugin-top-level-await';
 
 export default defineConfig({
   plugins: [
+    wasm(),
+    topLevelAwait(),
     react({
       exclude: [/workers\//, /\.worker\./],
     }),
   ],
+  worker: {
+    format: 'es',
+    plugins: () => [wasm(), topLevelAwait()],
+  },
   build: {
-    target: 'esnext' // This natively enables top-level await
+    target: 'esnext',
   },
   server: {
     headers: {
@@ -17,6 +25,6 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ['dbsp-engine', '@sqlite.org/sqlite-wasm'] 
-  }
+    exclude: ['@sqlite.org/sqlite-wasm'],
+  },
 });
