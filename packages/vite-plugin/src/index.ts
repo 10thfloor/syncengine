@@ -28,6 +28,8 @@ import { fileURLToPath } from 'node:url';
 
 import type { Plugin, ViteDevServer } from 'vite';
 
+import { actorsPlugin, type ActorsPluginOptions } from './actors.ts';
+
 // ── Virtual module ids ────────────────────────────────────────────────────
 
 /** The import specifier consumers (e.g. `@syncengine/client`) use. */
@@ -59,9 +61,24 @@ export interface SyncenginePluginOptions {
      * `pnpm-workspace.yaml`.
      */
     runtimeConfigPath?: string;
+    /**
+     * Options forwarded to the actors sub-plugin (`.actor.ts` discovery,
+     * `server({...})` stripping, `/__syncengine/rpc` middleware).
+     */
+    actors?: ActorsPluginOptions;
 }
 
-export default function syncengine(opts: SyncenginePluginOptions = {}): Plugin {
+/**
+ * Default export: returns an array of plugins so Vite can treat each
+ * concern independently (runtime-config virtual module + actors
+ * discovery/stripping/middleware). This stays a single user-facing
+ * import: `syncengine()` in vite.config.ts.
+ */
+export default function syncengine(opts: SyncenginePluginOptions = {}): Plugin[] {
+    return [runtimeConfigPlugin(opts), actorsPlugin(opts.actors ?? {})];
+}
+
+function runtimeConfigPlugin(opts: SyncenginePluginOptions): Plugin {
     let server: ViteDevServer | null = null;
     let runtimeConfigPath: string | null = null;
 

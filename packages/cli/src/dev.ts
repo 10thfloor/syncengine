@@ -192,10 +192,10 @@ async function boot(
     banner('starting workspace service');
     const serverDir = join(repoRoot, 'packages', 'server');
     const tsxBin = join(serverDir, 'node_modules', '.bin', 'tsx');
-    // Phase 4: tell the server where to find the user's entity definitions.
-    // Convention is `apps/example/src/entities.ts` (or whatever app dir);
-    // missing file is OK — the server runs without entities.
-    const entitiesPath = resolveEntitiesPath(repoRoot);
+    // PLAN Phase 4: tell the server the user's app directory so it can
+    // glob `src/**/*.actor.ts` on startup. Missing dir is OK — the
+    // server runs without entities.
+    const appDir = resolveAppDir(repoRoot);
     const workspace = spawnManaged(tsxBin, ['watch', 'src/index.ts'], {
         name: 'workspace',
         cwd: serverDir,
@@ -203,11 +203,11 @@ async function boot(
             ...process.env,
             PORT: String(ports.workspace),
             NATS_URL: `nats://127.0.0.1:${ports.natsClient}`,
-            ...(entitiesPath ? { SYNCENGINE_ENTITIES_PATH: entitiesPath } : {}),
+            ...(appDir ? { SYNCENGINE_APP_DIR: appDir } : {}),
         },
     });
     processes.push(workspace);
-    if (entitiesPath) note(`entities → ${entitiesPath.replace(repoRoot + sep, '')}`);
+    if (appDir) note(`entities → ${appDir.replace(repoRoot + sep, '')}/src/**/*.actor.ts`);
     // Restate services speak HTTP/2 cleartext — Node's fetch can't probe
     // them directly, so we use a TCP-level readiness check.
     await waitForTcp(ports.workspace, { label: 'workspace service', timeoutMs: 30_000 });
@@ -279,27 +279,16 @@ function isSafeStateDirToWipe(stateDir: string, repoRoot: string): boolean {
 }
 
 /**
- * Locate the user's entity definitions file. Convention:
- *   apps/{app}/src/entities.ts
+ * Locate the user's app directory. Convention:
+ *   apps/{app}
  *
- * The CLI doesn't know which app the user runs (apps/example today, but
- * the framework will support multiple apps), so we scan apps/* for the
- * first src/entities.ts that exists. Returning `null` is fine — the
- * server treats entities as optional.
+ * The server walks `src/**\/*.actor.ts` relative to this path on startup
+ * (PLAN.md Phase 4). apps/example is the only app today; if/when
+ * multi-app lands the resolver can scan `apps/*` dynamically.
  */
-function resolveEntitiesPath(repoRoot: string): string | null {
-    const appsDir = join(repoRoot, 'apps');
-    if (!existsSync(appsDir)) return null;
-    // Avoid pulling in fs.readdirSync just for this — apps/example is the
-    // only app today, so check it directly. If/when multi-app lands the
-    // resolver can scan dynamically.
-    const candidates = [
-        join(appsDir, 'example', 'src', 'entities.ts'),
-    ];
-    for (const path of candidates) {
-        if (existsSync(path)) return path;
-    }
-    return null;
+function resolveAppDir(repoRoot: string): string | null {
+    const candidate = join(repoRoot, 'apps', 'example');
+    return existsSync(candidate) ? candidate : null;
 }
 
 function buildPidsSnapshot(processes: ManagedProcess[]): Pids {

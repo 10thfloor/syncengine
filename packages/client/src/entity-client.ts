@@ -54,7 +54,6 @@ import {
 import {
     workspaceId as runtimeWorkspaceId,
     natsUrl as runtimeNatsUrl,
-    restateUrl as runtimeRestateUrl,
     authToken as runtimeAuthToken,
     // eslint-disable-next-line import/no-unresolved
 } from 'virtual:syncengine/runtime-config';
@@ -262,13 +261,19 @@ function notify(sub: EntitySubscription): void {
     for (const fn of sub.listeners) fn();
 }
 
-// ── Restate POST helper ────────────────────────────────────────────────────
+// ── RPC helper (PLAN Phase 4 — via dev middleware) ────────────────────────
 
 /**
- * Invoke a Restate object handler. Returns the parsed `state` envelope
- * from the entity-runtime's `HandlerResult`. Args are sent as a JSON
- * array; an empty list serializes to `[]`. Bearer token is attached if
- * the runtime config provided one.
+ * Invoke a handler via the framework's RPC transport. In dev, this POSTs
+ * to `/__syncengine/rpc/<entity>/<key>/<handler>` — a same-origin URL
+ * that the `@syncengine/vite-plugin` dev middleware forwards to the
+ * framework's Restate entity runtime. The browser never needs to know
+ * the Restate URL.
+ *
+ * Returns the parsed `state` envelope from the entity-runtime's
+ * `HandlerResult`. Args are sent as a JSON array; an empty list
+ * serializes to `[]`. Bearer token is attached if the runtime config
+ * provided one (future: workspace token).
  */
 async function invokeHandler(
     entity: AnyEntity,
@@ -277,8 +282,8 @@ async function invokeHandler(
     args: readonly unknown[],
 ): Promise<Record<string, unknown>> {
     const url =
-        `${runtimeRestateUrl}/entity_${entity.$name}` +
-        `/${encodeURIComponent(`${runtimeWorkspaceId}/${key}`)}` +
+        `/__syncengine/rpc/${entity.$name}` +
+        `/${encodeURIComponent(key)}` +
         `/${handlerName}`;
 
     const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -440,22 +445,28 @@ function buildActionProxy<TState, THandlers>(
 
     for (const name of handlerNames) {
         proxy[name] = async (...args: unknown[]): Promise<TState> => {
-            // ── Phase 1: run locally for fast-fail + optimistic update ──
+            // ── Phase 1: run locally for optimistic rebase (best effort) ──
             //
-            // Use the current optimistic state as the base (i.e., fold on
-            // top of any earlier still-pending calls). If applyHandler
-            // throws, the local check decided the operation is invalid;
-            // reject immediately. If confirmed is null (still loading),
-            // skip the local run — we can't safely guess.
+            // When the client has a copy of the handler code (pure-state
+            // entities, my Phase 4b latency comp), running the handler
+            // against the current optimistic base gives us an instant
+            // preview that the subsequent POST will reconcile.
+            //
+            // When the handler body has been stripped by the Vite plugin
+            // (PLAN Phase 4 server-only actors), the stub is a no-op that
+            // returns the state unchanged — harmless. If, for some reason,
+            // the local call throws (e.g., an older stub form, or a real
+            // server-only validation error), we swallow it and proceed to
+            // the POST path. In a server-only world the authoritative
+            // decision is always the server's, so a local throw is not
+            // enough to reject the caller.
             if (sub.confirmed !== null) {
                 const base = sub.optimistic ?? sub.confirmed;
                 try {
                     applyHandler(entity, name, base, args);
-                } catch (err) {
-                    const error = err instanceof Error ? err : new Error(String(err));
-                    sub.error = error;
-                    notify(sub);
-                    throw error;
+                } catch {
+                    // Local run failed — no optimistic preview is possible.
+                    // Proceed to the POST path; the server decides.
                 }
             }
 

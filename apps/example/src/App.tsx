@@ -5,7 +5,7 @@ import {
     useStore, useEntity,
     type ConflictRecord, type SyncStatus, type ConnectionStatus, type Migration,
 } from '@syncengine/client';
-import { budgetLock } from './entities';
+import { budgetLock } from './entities/budget-lock.actor';
 import './App.css';
 
 // Stable per-tab identity for the actor model lock holder field. One tab

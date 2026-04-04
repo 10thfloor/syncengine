@@ -296,6 +296,32 @@ export function isEntity(x: unknown): x is AnyEntity {
     return typeof x === 'object' && x !== null && (x as { $tag?: string }).$tag === 'entity';
 }
 
+// ── server() — handler marker for client/server splitting ─────────────────
+//
+// `server({ ... })` is a marker the Vite plugin uses to identify the
+// handler bag in a `.actor.ts` file so it can strip handler BODIES from
+// the client bundle while preserving handler NAMES for the typed action
+// proxy. At runtime on the server, `server(handlers)` is the identity
+// function — it just returns its argument unchanged. In the client
+// bundle the plugin replaces the entire call expression with a stub
+// object that maps each handler name to a function that throws (or,
+// in a future phase, routes to the RPC middleware as a fetch proxy).
+//
+// The purpose is purely transport: keeping server-only code out of the
+// browser bundle. It has no effect on server-side execution.
+//
+//     export const counter = defineEntity('counter', {
+//         state: { value: integer() },
+//         handlers: server({
+//             increment(state, by: number) { ... },
+//             reset() { ... },
+//         }),
+//     });
+
+export function server<T>(handlers: T): T {
+    return handlers;
+}
+
 // ── Pure handler execution ─────────────────────────────────────────────────
 //
 // `applyHandler` runs one handler on a current state, validates the result,

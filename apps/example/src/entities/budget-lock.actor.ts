@@ -1,37 +1,31 @@
-// ── User entity definitions (Phase 4 demo) ──────────────────────────────────
+// ── budgetLock entity (PLAN Phase 4 demo) ──────────────────────────────────
 //
-// Entities live in `src/entities.ts` by convention. Both the React client
-// and the framework's server import this file:
+// Per-category budget editing lock. Demonstrates the actor model's
+// single-writer guarantee: while the CRDT `budgets` table replicates
+// freely across every client, this lock is a Restate-backed virtual
+// object with serialized `acquire`/`release` handlers. Two tabs racing
+// to claim the same category see a deterministic winner; the loser
+// gets a clear error from the server.
 //
-//   - Client: `useEntity(budgetLock, 'Food')` — typed React hook over the
-//     entity's state and handler proxies.
-//   - Server: at startup, `@syncengine/server` dynamic-imports this file
-//     (path passed via SYNCENGINE_ENTITIES_PATH from the dev orchestrator)
-//     and registers each exported `defineEntity` result as a Restate
-//     virtual object.
+// ── File discovery (PLAN Phase 4) ──────────────────────────────────────────
 //
-// Stay SSR-safe: no React, no DOM, no browser-only APIs. Just pure
-// state shape + pure-functional handlers.
+// This file lives at `src/**/*.actor.ts` so the Vite plugin's file
+// walker picks it up during `buildStart`. The framework's server
+// (`@syncengine/server`, run under tsx) uses its own glob + dynamic
+// import to register the entity with Restate.
+//
+// ── Client/server split (PLAN Phase 4) ─────────────────────────────────────
+//
+// The handler bag is wrapped in `server({...})` so the Vite plugin's
+// `transform` hook can strip handler bodies from the client bundle
+// while preserving handler names for the typed action proxy. On the
+// server, `server()` is the identity function — the original handlers
+// run as Restate virtual-object methods.
 
 import { defineEntity, integer, text } from '@syncengine/core';
 
 const CATEGORIES = ['Food', 'Travel', 'Software', 'Office', 'Entertainment'] as const;
 
-/**
- * Per-category budget editing lock.
- *
- * Demonstrates the actor model's single-writer guarantee. The CRDT
- * `budgets` table can't model "only one tab can edit Food's budget at a
- * time" because every replica is allowed to write. By making the lock a
- * Restate-backed entity, every `acquire` call is serialized — concurrent
- * tabs see a deterministic winner and the loser gets a clear error.
- *
- * Each category gets its own instance: `useEntity(budgetLock, 'Food')`,
- * `useEntity(budgetLock, 'Travel')`, etc. Lock holders are identified
- * by a string passed in by the caller (the demo uses a per-tab uuid).
- * Locks auto-expire after 30s so a crashed tab doesn't hold a category
- * hostage forever.
- */
 export const budgetLock = defineEntity('budgetLock', {
     state: {
         category: text({ enum: CATEGORIES }),
