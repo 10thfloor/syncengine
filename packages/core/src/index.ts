@@ -58,7 +58,13 @@ export { generateNatsPermissions } from './nats-acl';
 export type { RoleSpec, Roles, NatsPermissions } from './nats-acl';
 
 // ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
-export { defineEntity, isEntity, validateEntityState } from './entity';
+export {
+    defineEntity,
+    isEntity,
+    validateEntityState,
+    applyHandler,
+    rebase,
+} from './entity';
 export type {
     EntityDef,
     AnyEntity,
@@ -68,6 +74,8 @@ export type {
     EntityHandlerMap,
     EntityRecord,
     EntityHandlers,
+    PendingActionLike,
+    RebaseResult,
 } from './entity';
 
 // ── HLC ─────────────────────────────────────────────────────────────────────

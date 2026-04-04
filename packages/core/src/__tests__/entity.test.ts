@@ -3,6 +3,8 @@ import {
     defineEntity,
     isEntity,
     validateEntityState,
+    applyHandler,
+    rebase,
     type EntityRecord,
     type EntityHandlers,
 } from '../entity';
@@ -249,6 +251,161 @@ describe('defineEntity (Phase 4)', () => {
         it('EntityHandlers<typeof cart> exposes the handler map', () => {
             const handlers: EntityHandlers<typeof cart> = cart.$handlers;
             expect(Object.keys(handlers)).toEqual(['addItem', 'pay']);
+        });
+    });
+
+    // ── applyHandler (moved to core from entity-runtime) ────────────────────
+    describe('applyHandler', () => {
+        const counter = defineEntity('counter', {
+            state: { value: integer() },
+            handlers: {
+                increment(state, by: number) {
+                    return { value: state.value + by };
+                },
+                reset() {
+                    return { value: 0 };
+                },
+                bad() {
+                    return { value: 'oops' as unknown as number };
+                },
+            },
+        });
+
+        it('runs against null state by seeding initial state', () => {
+            expect(applyHandler(counter, 'increment', null, [3])).toEqual({ value: 3 });
+        });
+
+        it('runs against an existing state', () => {
+            expect(applyHandler(counter, 'increment', { value: 5 }, [10])).toEqual({ value: 15 });
+        });
+
+        it('throws on unknown handler name', () => {
+            expect(() => applyHandler(counter, 'nope', { value: 0 }, [])).toThrow(
+                /no handler named 'nope'/,
+            );
+        });
+
+        it('wraps user-thrown errors with entity context', () => {
+            const lock = defineEntity('lock', {
+                state: { holder: text() },
+                handlers: {
+                    acquire(state, who: string) {
+                        if (state.holder && state.holder !== who) throw new Error('locked');
+                        return { holder: who };
+                    },
+                },
+            });
+            expect(() => applyHandler(lock, 'acquire', { holder: 'alice' }, ['bob'])).toThrow(
+                /'lock' handler 'acquire' rejected: locked/,
+            );
+        });
+
+        it('rejects handler outputs that fail state validation', () => {
+            expect(() => applyHandler(counter, 'bad', { value: 0 }, [])).toThrow(
+                /column 'value' expects number/,
+            );
+        });
+    });
+
+    // ── rebase (latency compensation) ───────────────────────────────────────
+    describe('rebase', () => {
+        const counter = defineEntity('counter', {
+            state: { value: integer() },
+            handlers: {
+                increment(state, by: number) {
+                    return { value: state.value + by };
+                },
+                mustBePositive(state) {
+                    if (state.value <= 0) throw new Error('non-positive');
+                    return { value: state.value * 2 };
+                },
+            },
+        });
+
+        it('returns null state when confirmed is null', () => {
+            const result = rebase(counter, null, []);
+            expect(result.state).toBeNull();
+            expect(result.failed).toEqual([]);
+        });
+
+        it('returns the confirmed state when pending is empty', () => {
+            const result = rebase(counter, { value: 42 }, []);
+            expect(result.state).toEqual({ value: 42 });
+            expect(result.failed).toEqual([]);
+        });
+
+        it('folds a single pending action over the confirmed base', () => {
+            const result = rebase(counter, { value: 10 }, [
+                { handlerName: 'increment', args: [5] },
+            ]);
+            expect(result.state).toEqual({ value: 15 });
+            expect(result.failed).toEqual([]);
+        });
+
+        it('folds multiple pending actions in order', () => {
+            const result = rebase(counter, { value: 0 }, [
+                { handlerName: 'increment', args: [1] },
+                { handlerName: 'increment', args: [2] },
+                { handlerName: 'increment', args: [3] },
+            ]);
+            expect(result.state).toEqual({ value: 6 });
+            expect(result.failed).toEqual([]);
+        });
+
+        it('re-running on a different confirmed produces the right answer (concurrent write case)', () => {
+            // My original pending: [+5]. If confirmed is 10 → optimistic is 15.
+            // A remote client also did +3 → new confirmed is 13.
+            // Rebasing my pending on the new confirmed should give 18.
+            const pending = [{ handlerName: 'increment', args: [5] }];
+            const before = rebase(counter, { value: 10 }, pending);
+            expect(before.state).toEqual({ value: 15 });
+            const after = rebase(counter, { value: 13 }, pending);
+            expect(after.state).toEqual({ value: 18 });
+        });
+
+        it('drops actions that throw during rebase and reports their indices', () => {
+            // mustBePositive throws on non-positive state. If the confirmed
+            // state is 5 → mustBePositive → 10 (ok). If confirmed is 0 →
+            // mustBePositive throws → drop from chain → subsequent actions
+            // continue from the un-doubled state.
+            const pending = [
+                { handlerName: 'mustBePositive', args: [] },
+                { handlerName: 'increment', args: [7] },
+            ];
+            const ok = rebase(counter, { value: 5 }, pending);
+            expect(ok.state).toEqual({ value: 17 }); // (5*2)+7
+            expect(ok.failed).toEqual([]);
+
+            const bad = rebase(counter, { value: 0 }, pending);
+            expect(bad.state).toEqual({ value: 7 }); // mustBePositive dropped, then 0+7
+            expect(bad.failed).toEqual([0]);
+        });
+
+        it('pending actions are immutable inputs — rebase does not mutate them', () => {
+            const pending = [
+                { handlerName: 'increment', args: [1] },
+                { handlerName: 'increment', args: [2] },
+            ] as const;
+            const result1 = rebase(counter, { value: 10 }, pending);
+            const result2 = rebase(counter, { value: 100 }, pending);
+            expect(result1.state).toEqual({ value: 13 });
+            expect(result2.state).toEqual({ value: 103 });
+        });
+
+        it('partial-state handler returns still merge into confirmed', () => {
+            // addItem returns { items } (partial), not a full state.
+            const cart = defineEntity('cart', {
+                state: { items: integer(), total: integer() },
+                handlers: {
+                    addItem(state, qty: number) {
+                        return { items: state.items + qty };
+                    },
+                },
+            });
+            const result = rebase(cart, { items: 0, total: 100 }, [
+                { handlerName: 'addItem', args: [3] },
+            ]);
+            expect(result.state).toEqual({ items: 3, total: 100 });
         });
     });
 });

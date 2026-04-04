@@ -1,37 +1,55 @@
 /// <reference path="./runtime-config.d.ts" />
 
-// ── Entity Client (Phase 4) ─────────────────────────────────────────────────
+// ── Entity Client (Phase 4 + 4b) ────────────────────────────────────────────
 //
 // `useEntity(def, key)` is the React surface for an entity instance. It:
 //
 //   1. POSTs to Restate's `_read` handler on first mount to fetch the
-//      current state of the entity, seeded from `def.$initialState` if
-//      Restate has no record yet.
+//      current state, seeded from `def.$initialState` if Restate has no
+//      record yet.
 //   2. Subscribes to the per-instance NATS subject
 //      `ws.{workspaceId}.entity.{name}.{key}.state` for live updates
 //      published whenever any client invokes a handler.
-//   3. Exposes `actions.{handlerName}(...args)` proxies that POST to
-//      Restate, returning a promise that resolves with the new state.
+//   3. Exposes `actions.{handlerName}(...args)` proxies that run the
+//      handler LOCALLY first (optimistic UI), queue it as pending, POST
+//      to Restate, and reconcile with the confirmed server state when the
+//      response (or a NATS broadcast) arrives.
 //   4. Shares one subscription per `(entityType, entityKey)` across every
-//      hook in the same tab. The first `useEntity(cart, 'k')` opens the
-//      Restate read + NATS subscription; subsequent mounts on the same
-//      key reuse the cached state and the live subscription. Last hook
-//      to unmount tears them down.
+//      hook in the same tab. Last listener to unmount tears it down.
 //
-// Single NATS WS connection per tab, opened lazily on the first useEntity
-// call. The connection lives for the tab lifetime — there's no reconnect
-// strategy yet (Phase 4b polish). On a connection drop, in-flight handler
-// promises still resolve via the HTTP response, but state updates from
-// other clients won't reach this tab until the page is reloaded.
+// ── Latency compensation (Phase 4b) ────────────────────────────────────────
+//
+// Each subscription carries three layers:
+//
+//   confirmed    — the last server-authoritative state (from _read or a NATS
+//                  broadcast)
+//   pending      — queue of in-flight { handlerName, args } actions fired by
+//                  this tab but not yet confirmed by the server
+//   optimistic   — `confirmed` with every pending action re-run on top, in
+//                  order (via the shared `rebase` helper from core)
+//
+// The hook returns `optimistic`. Whenever `confirmed` changes (NATS update
+// or our own POST response) or `pending` is edited, we rebase — which
+// re-runs every still-pending handler against the new confirmed state.
+// That handles the concurrent-write case cleanly: if a remote mutation
+// arrives via NATS while your own action is in flight, the rebase folds
+// your handler over the NEW confirmed state, not the stale guess.
+//
+// Pure functional handlers (the defineEntity contract) make this safe:
+// the same code runs on the client and the server, so the optimistic
+// guess matches the authoritative result modulo concurrent writes.
 
 import { useEffect, useRef, useSyncExternalStore } from 'react';
-import type {
-    AnyEntity,
-    EntityDef,
-    EntityState,
-    EntityStateShape,
-    EntityHandlerMap,
-    EntityHandler,
+import {
+    applyHandler,
+    rebase,
+    type AnyEntity,
+    type EntityDef,
+    type EntityState,
+    type EntityStateShape,
+    type EntityHandlerMap,
+    type EntityHandler,
+    type PendingActionLike,
 } from '@syncengine/core';
 import {
     workspaceId as runtimeWorkspaceId,
@@ -45,15 +63,23 @@ import {
 
 /** What `useEntity(def, key)` returns. */
 export interface UseEntityResult<TState, THandlers> {
-    /** Current entity state. `null` until the first read completes. */
+    /**
+     * Current optimistic state — `confirmed` with every in-flight local
+     * action re-run on top. `null` until the first read completes.
+     * Under zero pending actions this equals the server-confirmed state.
+     */
     readonly state: TState | null;
-    /** Per-handler invocation proxies. Each method posts to Restate and
-     *  resolves with the new state (or rejects on handler failure). */
+    /** Per-handler invocation proxies. Each method runs the handler
+     *  locally for instant UI, POSTs to Restate, and resolves with the
+     *  confirmed state (or rejects on local/server failure). */
     readonly actions: ActionMap<TState, THandlers>;
     /** True after the initial read has completed. */
     readonly ready: boolean;
     /** Last handler error, if any. Cleared on the next successful call. */
     readonly error: Error | null;
+    /** Number of in-flight local actions that haven't been confirmed yet.
+     *  Useful for showing a "saving" indicator in the UI. */
+    readonly pending: number;
 }
 
 /**
@@ -69,11 +95,26 @@ export type ActionMap<TState, THandlers> = {
 
 // ── Subscription registry (one per (entityName, entityKey)) ────────────────
 
+interface PendingAction extends PendingActionLike {
+    readonly id: number;
+}
+
 interface EntitySubscription {
-    state: Record<string, unknown> | null;
+    /** The last server-authoritative state (initial read or NATS broadcast). */
+    confirmed: Record<string, unknown> | null;
+    /** `confirmed` with every pending action folded on top. Returned by
+     *  the hook so the UI is always optimistic. */
+    optimistic: Record<string, unknown> | null;
+    /** In-flight local actions that have been fired against this
+     *  subscription but not yet confirmed by the server. Rebased on every
+     *  confirmed-state change. */
+    pending: PendingAction[];
     error: Error | null;
     ready: boolean;
     listeners: Set<() => void>;
+    /** Monotonic id for tagging pending actions. Restart-safe because
+     *  entity subscriptions are per-tab and per-(type, key). */
+    nextActionId: number;
     /** Disposal: close the NATS subscription and forget the entry. */
     dispose: () => void;
 }
@@ -110,20 +151,24 @@ function getOrCreateSubscription(
     if (existing) return existing;
 
     const sub: EntitySubscription = {
-        state: null,
+        confirmed: null,
+        optimistic: null,
+        pending: [],
         error: null,
         ready: false,
         listeners: new Set(),
+        nextActionId: 1,
         dispose: () => {},
     };
     subscriptions.set(subKey, sub);
 
-    // 1. Initial read via Restate POST `_read`. The result seeds the
-    //    cache so the first render after mount has data without waiting
-    //    for any NATS traffic.
+    // 1. Initial read via Restate POST `_read`. The result seeds
+    //    `confirmed` so the first render has authoritative data; any
+    //    actions already queued (rare — would require a synchronous
+    //    dispatch during the mount) get rebased on top.
     void invokeHandler(entity, key, '_read', [])
         .then((state) => {
-            sub.state = state;
+            setConfirmed(sub, entity, state);
             sub.ready = true;
             notify(sub);
         })
@@ -133,9 +178,9 @@ function getOrCreateSubscription(
             notify(sub);
         });
 
-    // 2. Subscribe to the per-instance NATS subject for live updates.
-    //    We close over `subscription` so the message handler always
-    //    notifies the same listener set even as listeners come and go.
+    // 2. Subscribe to the per-instance NATS subject for live updates
+    //    from other clients. Each arriving state update replaces our
+    //    `confirmed` base and triggers a rebase of still-pending actions.
     let natsSub: { unsubscribe(): void } | null = null;
     (async () => {
         try {
@@ -153,7 +198,7 @@ function getOrCreateSubscription(
                             state?: Record<string, unknown>;
                         };
                         if (decoded.type === 'ENTITY_STATE' && decoded.state) {
-                            sub.state = decoded.state;
+                            setConfirmed(sub, entity, decoded.state);
                             sub.ready = true;
                             sub.error = null;
                             notify(sub);
@@ -178,6 +223,39 @@ function getOrCreateSubscription(
     };
 
     return sub;
+}
+
+/** Atomically replace the confirmed state and rebase any pending actions
+ *  on top of it. Also prunes any pending actions that fail the rebase
+ *  (they'll be resolved/rejected by their in-flight server response). */
+function setConfirmed(
+    sub: EntitySubscription,
+    entity: AnyEntity,
+    next: Record<string, unknown>,
+): void {
+    sub.confirmed = next;
+    const result = rebase(entity, sub.confirmed, sub.pending);
+    sub.optimistic = result.state;
+    // If any pending actions failed during rebase, drop them from the
+    // queue. The in-flight POST for each still carries the authoritative
+    // verdict — dropping from the optimistic chain just means the UI
+    // reflects the pre-action state until the server responds.
+    if (result.failed.length > 0) {
+        const failedSet = new Set(result.failed);
+        sub.pending = sub.pending.filter((_, i) => !failedSet.has(i));
+    }
+}
+
+/** Rebase after a pending action is added, removed, or after confirmed
+ *  changes. Separate from `setConfirmed` so callers can rebase without
+ *  replacing the base (e.g., after dequeueing a resolved action). */
+function rebaseSub(sub: EntitySubscription, entity: AnyEntity): void {
+    const result = rebase(entity, sub.confirmed, sub.pending);
+    sub.optimistic = result.state;
+    if (result.failed.length > 0) {
+        const failedSet = new Set(result.failed);
+        sub.pending = sub.pending.filter((_, i) => !failedSet.has(i));
+    }
 }
 
 function notify(sub: EntitySubscription): void {
@@ -278,12 +356,14 @@ export function useEntity<
         };
     }).current;
 
-    // Three separate selectors keep the snapshot stable so React's
-    // bailout-on-equal works correctly.
+    // Separate selectors keep snapshots stable so React's
+    // bailout-on-equal works correctly. We surface the OPTIMISTIC state
+    // (confirmed + pending actions folded on top) so callers see the
+    // latency-compensated view of the entity.
     const stateSnapshot = useSyncExternalStore(
         subscribe,
-        () => sub.state,
-        () => sub.state,
+        () => sub.optimistic,
+        () => sub.optimistic,
     );
     const readySnapshot = useSyncExternalStore(
         subscribe,
@@ -294,6 +374,11 @@ export function useEntity<
         subscribe,
         () => sub.error,
         () => sub.error,
+    );
+    const pendingSnapshot = useSyncExternalStore(
+        subscribe,
+        () => sub.pending.length,
+        () => sub.pending.length,
     );
 
     // Build the typed action proxy. We rebuild on every render — the
@@ -320,9 +405,31 @@ export function useEntity<
         actions,
         ready: readySnapshot,
         error: errorSnapshot,
+        pending: pendingSnapshot,
     };
 }
 
+/**
+ * Build the typed action proxy for a subscription. Each proxy method
+ * performs the three-phase latency-compensated flow:
+ *
+ *   1. Run the handler LOCALLY on the current optimistic state. If it
+ *      throws, reject immediately — client state is our best estimate
+ *      of what the server will do, and a deterministic local failure
+ *      saves a round-trip.
+ *   2. Push the call to `pending`, rebase to update `optimistic`, and
+ *      notify React. The UI shows the new state instantly.
+ *   3. POST to Restate in the background. On success, drop our pending
+ *      entry, set `confirmed` to the server response, rebase, notify,
+ *      and resolve. On failure, drop our pending entry, rebase (so the
+ *      UI rolls back), notify, and reject with the server error.
+ *
+ * The shared `rebase` helper from core handles the tricky case where a
+ * NATS broadcast from another client arrives while our POST is in
+ * flight: on each incoming `confirmed` change we re-run still-pending
+ * handlers on the new base, so our optimistic view stays consistent
+ * with what the server will ultimately compute.
+ */
 function buildActionProxy<TState, THandlers>(
     entity: AnyEntity,
     key: string,
@@ -330,19 +437,54 @@ function buildActionProxy<TState, THandlers>(
 ): ActionMap<TState, THandlers> {
     const handlerNames = Object.keys(entity.$handlers);
     const proxy: Record<string, (...args: unknown[]) => Promise<TState>> = {};
+
     for (const name of handlerNames) {
         proxy[name] = async (...args: unknown[]): Promise<TState> => {
+            // ── Phase 1: run locally for fast-fail + optimistic update ──
+            //
+            // Use the current optimistic state as the base (i.e., fold on
+            // top of any earlier still-pending calls). If applyHandler
+            // throws, the local check decided the operation is invalid;
+            // reject immediately. If confirmed is null (still loading),
+            // skip the local run — we can't safely guess.
+            if (sub.confirmed !== null) {
+                const base = sub.optimistic ?? sub.confirmed;
+                try {
+                    applyHandler(entity, name, base, args);
+                } catch (err) {
+                    const error = err instanceof Error ? err : new Error(String(err));
+                    sub.error = error;
+                    notify(sub);
+                    throw error;
+                }
+            }
+
+            // ── Phase 2: enqueue, rebase, notify ─────────────────────────
+            const action: PendingAction = {
+                id: sub.nextActionId++,
+                handlerName: name,
+                args,
+            };
+            sub.pending.push(action);
+            rebaseSub(sub, entity);
+            sub.error = null;
+            notify(sub);
+
+            // ── Phase 3: POST to Restate, reconcile on response ──────────
             try {
-                const state = await invokeHandler(entity, key, name, args);
-                // The NATS broadcast also delivers this state, but we
-                // optimistically apply the response to avoid a render
-                // gap on slow networks. Idempotent.
-                sub.state = state;
-                sub.error = null;
+                const confirmedState = await invokeHandler(entity, key, name, args);
+                // Drop our entry from pending before rebasing — otherwise
+                // it would get double-applied on top of the new confirmed.
+                sub.pending = sub.pending.filter((a) => a.id !== action.id);
+                setConfirmed(sub, entity, confirmedState);
                 sub.ready = true;
                 notify(sub);
-                return state as TState;
+                return confirmedState as TState;
             } catch (err) {
+                // Drop the failed action; rebase so optimistic reflects
+                // the remaining pending chain on top of unchanged confirmed.
+                sub.pending = sub.pending.filter((a) => a.id !== action.id);
+                rebaseSub(sub, entity);
                 const error = err instanceof Error ? err : new Error(String(err));
                 sub.error = error;
                 notify(sub);
@@ -350,5 +492,6 @@ function buildActionProxy<TState, THandlers>(
             }
         };
     }
+
     return proxy as ActionMap<TState, THandlers>;
 }

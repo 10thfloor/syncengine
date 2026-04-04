@@ -29,9 +29,8 @@
 import * as restate from "@restatedev/restate-sdk";
 import {
     isEntity,
-    validateEntityState,
+    applyHandler,
     type AnyEntity,
-    type EntityHandler,
 } from "@syncengine/core";
 
 const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
@@ -57,50 +56,6 @@ export function splitObjectKey(objKey: string): { workspaceId: string; entityKey
         workspaceId: objKey.slice(0, idx),
         entityKey: objKey.slice(idx + 1),
     };
-}
-
-/**
- * Apply one handler to a current state, validate the result, and return
- * the new state. Pure: no Restate context, no NATS, no I/O. Used by
- * `runHandler` for the actual server path AND by unit tests for the
- * entity-runtime so they don't need a Restate runtime to verify the
- * load → user-fn → merge → validate pipeline.
- *
- * Throws a plain Error on user-fn rejection or validation failure.
- * The caller is responsible for translating to a `restate.TerminalError`
- * if running inside a Restate handler.
- */
-export function applyHandler(
-    entity: AnyEntity,
-    handlerName: string,
-    currentState: Record<string, unknown> | null,
-    args: readonly unknown[],
-): Record<string, unknown> {
-    const handlerFn = entity.$handlers[handlerName] as
-        | EntityHandler<Record<string, unknown>, readonly unknown[]>
-        | undefined;
-    if (!handlerFn) {
-        throw new Error(
-            `entity '${entity.$name}': no handler named '${handlerName}'.`,
-        );
-    }
-
-    const base = currentState ?? (entity.$initialState as Record<string, unknown>);
-
-    let next: Record<string, unknown>;
-    try {
-        const result = handlerFn(base, ...args);
-        // Allow handlers to return a partial state — merge into the current
-        // record. Returning the full state also works (the spread is a no-op).
-        next = { ...base, ...result };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(
-            `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
-        );
-    }
-
-    return validateEntityState(entity.$state, next, entity.$name) as Record<string, unknown>;
 }
 
 /** Run a user handler on the current state, persist the result, and

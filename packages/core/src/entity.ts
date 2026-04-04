@@ -296,6 +296,117 @@ export function isEntity(x: unknown): x is AnyEntity {
     return typeof x === 'object' && x !== null && (x as { $tag?: string }).$tag === 'entity';
 }
 
+// ── Pure handler execution ─────────────────────────────────────────────────
+//
+// `applyHandler` runs one handler on a current state, validates the result,
+// and returns the new state. It is PURE — no Restate context, no NATS, no
+// I/O — which is what lets the framework reuse the exact same code on both
+// the server (wrapped with ctx.get/set/publish by the entity-runtime) and
+// the client (as the engine behind `useEntity`'s latency compensation, so
+// the optimistic UI result matches whatever the server will compute).
+//
+// Throws a plain Error on unknown handler, user-thrown rejection, or state
+// validation failure. The caller is responsible for translating the error
+// to its transport's native error shape (TerminalError on the server,
+// Promise rejection on the client).
+
+/**
+ * Apply one handler to a current state, validate the result, and return
+ * the new state.
+ *
+ * `currentState === null` is treated as "no stored state yet" — the
+ * entity's `$initialState` is used as the starting point. Handlers may
+ * return either the full next state or a `Partial<State>` that gets
+ * merged into the current record.
+ */
+export function applyHandler(
+    entity: AnyEntity,
+    handlerName: string,
+    currentState: Record<string, unknown> | null,
+    args: readonly unknown[],
+): Record<string, unknown> {
+    const handlerFn = entity.$handlers[handlerName] as
+        | EntityHandler<Record<string, unknown>, readonly unknown[]>
+        | undefined;
+    if (!handlerFn) {
+        throw new Error(
+            `entity '${entity.$name}': no handler named '${handlerName}'.`,
+        );
+    }
+
+    const base = currentState ?? (entity.$initialState as Record<string, unknown>);
+
+    let next: Record<string, unknown>;
+    try {
+        const result = handlerFn(base, ...args);
+        // Allow handlers to return a partial state — merge into the current
+        // record. Returning the full state also works (the spread is a no-op).
+        next = { ...base, ...result };
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(
+            `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
+        );
+    }
+
+    return validateEntityState(entity.$state, next, entity.$name) as Record<string, unknown>;
+}
+
+// ── Rebase (latency compensation) ──────────────────────────────────────────
+//
+// `rebase` takes a confirmed server state and a queue of pending local
+// actions, and computes the optimistic state by folding each pending
+// handler over the confirmed state in order. Used by the client's
+// `useEntity` hook: whenever the confirmed state changes (initial read,
+// NATS broadcast, or server response to our own action), we recompute
+// the optimistic layer by re-running every still-pending action.
+//
+// If a pending handler throws mid-rebase (e.g., a remote mutation changed
+// the state such that our local call is no longer valid), the handler is
+// DROPPED from the output chain and its index is recorded in `failed`.
+// The caller is responsible for deciding what to do with failures —
+// typically the useEntity hook waits for the in-flight server response
+// to deliver the authoritative verdict, since the server might succeed
+// or fail independently of our local check.
+
+export interface RebaseResult {
+    /** The optimistic state after folding valid pending actions over
+     *  the confirmed base. If `confirmed` is null, this is also null. */
+    readonly state: Record<string, unknown> | null;
+    /** Indices into the original pending array of actions that threw
+     *  during rebase. The caller may want to drop these from its queue
+     *  or mark them in the UI. */
+    readonly failed: readonly number[];
+}
+
+export interface PendingActionLike {
+    readonly handlerName: string;
+    readonly args: readonly unknown[];
+}
+
+export function rebase(
+    entity: AnyEntity,
+    confirmed: Record<string, unknown> | null,
+    pending: readonly PendingActionLike[],
+): RebaseResult {
+    if (confirmed === null) {
+        return { state: null, failed: [] };
+    }
+    let state = confirmed;
+    const failed: number[] = [];
+    for (let i = 0; i < pending.length; i++) {
+        const action = pending[i]!;
+        try {
+            state = applyHandler(entity, action.handlerName, state, action.args);
+        } catch {
+            // Rebase failed on this action — drop it from the chain but
+            // keep folding subsequent actions on the unchanged state.
+            failed.push(i);
+        }
+    }
+    return { state, failed };
+}
+
 /** Generic alias used in function signatures that accept any entity, the
  *  same way `AnyTable` is used for tables. We use `any` for the handler-map
  *  parameter because the constraint `EntityHandlerMap<EntityState<TShape>>`

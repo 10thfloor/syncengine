@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { defineEntity, integer, text, real } from '@syncengine/core';
-import { applyHandler, splitObjectKey } from '../entity-runtime';
+import { defineEntity, applyHandler, integer, text, real } from '@syncengine/core';
+import { splitObjectKey } from '../entity-runtime';
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
