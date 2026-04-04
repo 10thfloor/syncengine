@@ -31,6 +31,7 @@ import {
     registerShutdown,
     waitForHttp,
     waitForTcp,
+    canConnect,
     requirePortsFree,
     type ManagedProcess,
 } from './runner';
@@ -259,18 +260,28 @@ async function boot(
     //
     // This watcher sits in the CLI process (which knows the admin port
     // and the workspace service URI), debounces .actor.ts change events
-    // so tsx's own restart has time to settle, waits for the workspace
-    // service TCP port to be live again, and calls the admin API with
+    // so tsx's own restart has time to settle, waits for the tsx restart
+    // to actually cycle (port down THEN up — just waiting for "up" would
+    // race the old dying process), and calls the admin API with
     // `force: true` to trigger re-discovery. Entity state is keyed by
     // virtual-object id in Restate's persistent store, so it survives
     // the re-registration — the whole point of Phase 7.
+    //
+    // A re-entry guard serializes concurrent reload attempts: rapid
+    // saves during a reload cycle are coalesced into a single follow-up
+    // reload when the current one finishes, so we never have two
+    // `restateRegisterDeployment` calls in flight at once.
     if (appDir) {
-        watchActorFiles(appDir, async () => {
+        let reloadInFlight = false;
+        let reloadQueued = false;
+        const reload = async (): Promise<void> => {
+            if (reloadInFlight) {
+                reloadQueued = true;
+                return;
+            }
+            reloadInFlight = true;
             try {
-                await waitForTcp(ports.workspace, {
-                    label: 'workspace service',
-                    timeoutMs: 10_000,
-                });
+                await waitForWorkspaceRestart(ports.workspace);
                 await restateRegisterDeployment(
                     ports,
                     `http://127.0.0.1:${ports.workspace}`,
@@ -278,16 +289,59 @@ async function boot(
                 );
                 note('[hot-reload] re-registered workspace service with restate');
             } catch (err) {
-                process.stderr.write(
-                    `\x1b[33m[hot-reload] re-register failed: ${String((err as Error).message ?? err)}\x1b[0m\n`,
-                );
+                const msg = err instanceof Error ? err.message : String(err);
+                note(`[hot-reload] re-register failed: ${msg}`);
+            } finally {
+                reloadInFlight = false;
+                if (reloadQueued) {
+                    reloadQueued = false;
+                    void reload();
+                }
             }
-        });
+        };
+        watchActorFiles(appDir, () => { void reload(); });
     }
 
     if (!process.env.SYNCENGINE_DEV_QUIET) {
         printReadyBanner(ports);
     }
+}
+
+/**
+ * Wait for tsx to complete a restart cycle of the workspace service:
+ * first detect the TCP port going DOWN (the old process shutting down),
+ * then wait for it to come back UP. This is strictly stronger than
+ * `waitForTcp` alone, which would race the old dying process — the
+ * old tsx child may still accept connections for 100–500ms after tsx
+ * signals a restart, and if we call `restateRegisterDeployment` in
+ * that window Restate's admin API re-discovers against the old code.
+ *
+ * If the port never goes down within `downTimeoutMs`, we assume tsx
+ * did not actually restart (e.g., the file change only touched test
+ * fixtures in the same tree or tsx's dep-graph diff decided no rebuild
+ * was needed) and proceed directly to the re-register anyway — this
+ * is idempotent on Restate's side, so a spurious call is harmless.
+ */
+async function waitForWorkspaceRestart(port: number): Promise<void> {
+    const downDeadline = Date.now() + 3_000;
+    while (Date.now() < downDeadline) {
+        if (!(await canConnect(port, { timeoutMs: 200 }))) {
+            // Port has cycled down. Now wait for it to come back up.
+            await waitForTcp(port, {
+                label: 'workspace service (post-restart)',
+                timeoutMs: 15_000,
+            });
+            // A small settling delay so the new Node process has time
+            // to finish binding all Restate handlers after the port
+            // starts accepting connections.
+            await new Promise<void>((resolve) => setTimeout(resolve, 300));
+            return;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    // Port never went down. tsx may have decided not to restart. Still
+    // do the re-register (idempotent) so the user gets consistent
+    // behavior after every .actor.ts save.
 }
 
 /**
@@ -297,6 +351,11 @@ async function boot(
  * is supported on macOS and Linux (the only platforms the dev
  * orchestrator targets). On change, waits 400ms for tsx's own restart
  * to settle before firing.
+ *
+ * NOTE: on NFS / sshfs, inotify rename events may arrive with
+ * `filename === null`, which we currently filter out via `!filename`.
+ * Hot-reload is effectively disabled on those filesystems; there's
+ * no cross-platform fix short of polling the directory contents.
  */
 function watchActorFiles(appDir: string, onChange: () => void): void {
     const srcDir = join(appDir, 'src');
