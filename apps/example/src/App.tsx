@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-    table, id, real, text, view, store,
-    sum, count, avg, max,
-    useStore, useEntity,
-    type ConflictRecord, type SyncStatus, type ConnectionStatus, type Migration,
+    store, useStore, useEntity,
+    type ConflictRecord, type SyncStatus, type ConnectionStatus,
 } from '@syncengine/client';
+import {
+    expenses, budgets,
+    topExpenses, byCategory, totals, spendVsBudget,
+    CHANNELS, BUDGET_SEED, CATEGORIES, EMOJI, migrations,
+    type Category,
+} from './features/expenses.actor';
 import { budgetLock } from './entities/budget-lock.actor';
 import './App.css';
 
@@ -13,110 +17,21 @@ import './App.css';
 // as the lock holder. Reload generates a fresh id (= different "tab").
 const TAB_ID = crypto.randomUUID();
 
-// ── Schema ────────────────────────────────────────────────────────────────
-//
-// No `{ merge: 'lww' }` sprinkled on every column — it's the default.
-// No `_record`/`name` string keys — views use `expenses.amount` column refs.
-// Enum columns narrow the category value type to a string union.
-
-const CATEGORIES = ['Food', 'Travel', 'Software', 'Office', 'Entertainment'] as const;
-
-const expenses = table('expenses', {
-    id: id(),
-    amount: real(),
-    category: text({ enum: CATEGORIES }),
-    description: text(),
-    date: text(),
-});
-
-const budgets = table('budgets', {
-    id: id(),
-    category: text({ enum: CATEGORIES }),
-    budget: real(),
-});
-
-// ── Views — by ref, not by string ─────────────────────────────────────────
-
-const topExpenses = view(expenses).topN(expenses.amount, 5, 'desc');
-
-const byCategory = view(expenses).aggregate([expenses.category], {
-    total: sum(expenses.amount),
-    count: count(),
-    avg: avg(expenses.amount),
-});
-
-const totals = view(expenses).aggregate([], {
-    total: sum(expenses.amount),
-    count: count(),
-    avg: avg(expenses.amount),
-});
-
-const spendVsBudget = view(expenses)
-    .join(budgets, expenses.category, budgets.category)
-    .aggregate([expenses.category], {
-        spent: sum(expenses.amount),
-        budget: max(budgets.budget),
-        count: count(),
-    });
-
-// ── Migrations ────────────────────────────────────────────────────────────
-
-const migrations: readonly Migration[] = [
-    {
-        version: 2,
-        steps: [
-            { op: 'addColumn', table: 'expenses', column: 'tags', type: 'TEXT', default: '', nullable: false },
-        ],
-    },
-];
-
-// ── Channels — by Table reference, not string ────────────────────────────
-
-const CHANNELS = [
-    { name: 'config', tables: [budgets] },
-    { name: 'team', tables: [expenses] },
-] as const;
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-type Category = typeof CATEGORIES[number];
-
-const EMOJI: Record<Category, string> = {
-    Food: '🍔',
-    Travel: '✈️',
-    Software: '💻',
-    Office: '📦',
-    Entertainment: '🎬',
-};
-
-const BUDGET_LIMITS: Record<Category, number> = {
-    Food: 2000,
-    Travel: 5000,
-    Software: 3000,
-    Office: 4000,
-    Entertainment: 1500,
-};
-
 const fmt = (n: number) =>
     n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 
 // ── Store ─────────────────────────────────────────────────────────────────
 //
-// Typed seed: keys constrained to `'expenses' | 'budgets'`, row shapes
-// constrained to each table's record. Replayed automatically on ready /
-// phase=live / after actions.reset() — no manual useEffect chains.
+// PLAN Phase 6: schema lives in per-feature `.actor.ts` files. App.tsx
+// imports the handles and passes them to `store({...})` explicitly, so
+// the tuple types flow through and typed access like
+// `db.tables.expenses.insert({...})` still works end-to-end.
 
 export const db = store({
     tables: [expenses, budgets],
     views: [topExpenses, byCategory, totals, spendVsBudget],
     channels: CHANNELS,
-    seed: {
-        budgets: CATEGORIES.map((cat, i) => ({
-            id: i + 1,
-            category: cat,
-            budget: BUDGET_LIMITS[cat],
-        })),
-    },
+    seed: { budgets: BUDGET_SEED },
     schemaVersion: 1,
     migrations,
 });
