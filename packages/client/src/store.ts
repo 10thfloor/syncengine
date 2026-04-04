@@ -522,11 +522,14 @@ export function store<
                     if (Object.keys(msg.snapshots).length === 0) {
                         // Empty FULL_SYNC means the worker has wiped all
                         // snapshots — typically after RESET. Clear the
-                        // conflict log and allow seeds to re-apply on the
-                        // next phase=live transition.
+                        // conflict log and re-seed immediately, because the
+                        // worker doesn't re-enter the replay→live cycle after
+                        // a reset — phase=live won't fire again to trigger
+                        // the gated re-seed from the SYNC_STATUS branch.
                         conflictLog = [];
                         conflictSubscribers.forEach((fn) => fn());
                         seedsApplied = false;
+                        applySeeds();
                     }
                     break;
 
