@@ -18,3 +18,7 @@ export type {
 // ── React provider ───────────────────────────────────────────────────────
 export { StoreProvider, useStore } from './react';
 export type { StoreProviderProps } from './react';
+
+// ── Entity client (Phase 4 — actor model on Restate virtual objects) ─────
+export { useEntity } from './entity-client';
+export type { UseEntityResult, ActionMap } from './entity-client';

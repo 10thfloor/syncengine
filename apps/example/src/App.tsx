@@ -2,10 +2,16 @@ import { useState, useEffect, useCallback } from 'react';
 import {
     table, id, real, text, view, store,
     sum, count, avg, max,
-    useStore,
+    useStore, useEntity,
     type ConflictRecord, type SyncStatus, type ConnectionStatus, type Migration,
 } from '@syncengine/client';
+import { budgetLock } from './entities';
 import './App.css';
+
+// Stable per-tab identity for the actor model lock holder field. One tab
+// gets one uuid; every BudgetLockButton in this tab uses the same value
+// as the lock holder. Reload generates a fresh id (= different "tab").
+const TAB_ID = crypto.randomUUID();
 
 // ── Schema ────────────────────────────────────────────────────────────────
 //
@@ -131,6 +137,57 @@ function SyncBadge({ status, sync }: { status: ConnectionStatus; sync: SyncStatu
     }
     if (status === 'connecting') return <span className="badge yellow">Connecting</span>;
     return <span className="badge green">Synced</span>;
+}
+
+// ── Budget lock button (Phase 4 actor demo) ──────────────────────────────
+//
+// Each budget category gets its own `useEntity(budgetLock, category)`
+// instance — a Restate-backed actor that serializes acquire/release calls
+// across every tab in the workspace. The lock TYPE is one Restate object
+// (`entity_budgetLock`); each category KEY is a separate virtual-object
+// instance with its own state and serialized handler execution.
+//
+// Try it: click "Lock Food" in tab A, then try the same in tab B. Tab B
+// gets a clear "Locked by 'tab-A-uuid'" error. Release in tab A, click
+// in tab B — succeeds. State updates fan out via NATS so the visual
+// "locked / unlocked" badge updates without polling.
+
+function BudgetLockButton({ category }: { category: Category }) {
+    const { state, actions, ready, error } = useEntity(budgetLock, category);
+    const isHeldByMe = state?.holder === TAB_ID;
+    const isLocked = !!state?.holder;
+
+    const onClick = useCallback(async () => {
+        try {
+            if (isHeldByMe) {
+                await actions.release(TAB_ID);
+            } else {
+                await actions.acquire(TAB_ID, category, Date.now());
+            }
+        } catch {
+            // Error is exposed via the `error` field — no need to log here.
+        }
+    }, [actions, category, isHeldByMe]);
+
+    const label = !ready
+        ? '…'
+        : isHeldByMe
+            ? 'Unlock'
+            : isLocked
+                ? `🔒 ${(state?.holder ?? '').slice(0, 4)}`
+                : 'Lock';
+
+    return (
+        <button
+            type="button"
+            className={`btn btn-ghost btn-sm budget-lock${isHeldByMe ? ' held' : ''}${isLocked && !isHeldByMe ? ' contended' : ''}`}
+            onClick={onClick}
+            disabled={!ready || (isLocked && !isHeldByMe)}
+            title={error ? error.message : isHeldByMe ? 'You hold this lock' : isLocked ? `Held by ${state?.holder}` : 'Click to acquire'}
+        >
+            {label}
+        </button>
+    );
 }
 
 // ── Conflict panel ────────────────────────────────────────────────────────
@@ -398,6 +455,7 @@ export default function App() {
                                                 <span className="name">
                                                     {EMOJI[row.category] ?? '📁'} {row.category}
                                                 </span>
+                                                <BudgetLockButton category={row.category} />
                                                 <span className={`budget-amounts ${over ? 'over' : ''}`}>
                                                     {fmt(row.spent)} / {fmt(row.budget)}
                                                 </span>

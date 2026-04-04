@@ -1688,6 +1688,58 @@ mod tests {
         assert_eq!(last.record["budget"], 2000.0);
     }
 
+    /// Reproduces the fresh-client hydrate flow: budgets go in first as a
+    /// standalone batch (from SQLite), then expenses arrive one at a time
+    /// via NATS "live" mode. The join's right_index must survive the batch
+    /// boundary so subsequent expense deltas find matching budgets.
+    #[test]
+    fn test_join_then_aggregate_budgets_first_then_expenses_one_by_one() {
+        let mut view = make_view_with_source_id(
+            "spend_vs_budget",
+            "expenses",
+            "id",
+            "category",
+            vec![
+                Operator::Join {
+                    right_table: "budgets".to_string(),
+                    left_key: "category".to_string(),
+                    right_key: "category".to_string(),
+                },
+                Operator::Aggregate {
+                    group_by: vec!["category".to_string()],
+                    aggregates: [
+                        ("spent".to_string(), AggDef { func: "sum".to_string(), field: "amount".to_string() }),
+                        ("budget".to_string(), AggDef { func: "max".to_string(), field: "budget".to_string() }),
+                    ].iter().cloned().collect(),
+                },
+            ],
+        );
+
+        // Phase 1: 5 budgets as a single batch (simulates hydrateFromSQLite).
+        let budgets = vec![
+            make_delta("budgets", json!({"id": 1, "category": "Food",          "budget": 2000.0}), 1),
+            make_delta("budgets", json!({"id": 2, "category": "Travel",        "budget": 5000.0}), 1),
+            make_delta("budgets", json!({"id": 3, "category": "Software",      "budget": 3000.0}), 1),
+            make_delta("budgets", json!({"id": 4, "category": "Office",        "budget": 4000.0}), 1),
+            make_delta("budgets", json!({"id": 5, "category": "Entertainment", "budget": 1500.0}), 1),
+        ];
+        let phase1_out = process_view(&mut view, &budgets);
+        assert_eq!(phase1_out.len(), 0, "budgets alone should emit nothing (left_index empty)");
+        // The right_index must be populated after phase 1 for the test to be meaningful.
+        assert_eq!(view.right_index.len(), 5, "expected 5 categories in right_index after hydrate");
+
+        // Phase 2: expenses arrive one at a time (simulates live NATS messages).
+        let expense = make_delta("expenses", json!({"id": 10, "category": "Food", "amount": 100.0}), 1);
+        let out = process_view(&mut view, &[expense]);
+        let last = out
+            .iter()
+            .rev()
+            .find(|d| d.weight == 1 && d.record.get("category").map_or(false, |v| v == "Food"))
+            .expect("expense step should emit an aggregated Food row");
+        assert_eq!(last.record["spent"], 100.0);
+        assert_eq!(last.record["budget"], 2000.0);
+    }
+
     /// Same pattern, reversed insertion order: expenses first, budget last.
     /// This is the seed-after-replay case that hit the bug in the live app.
     #[test]

@@ -21,6 +21,7 @@ export type {
     TableMetadata,
     AnyTable,
     ColumnDef,
+    ColumnKind,
     ColumnRef,
     ViewBuilder,
     Operator,
@@ -55,6 +56,19 @@ export type {
 // ── NATS ACL (pure helper, no caller wired in Phase 2.5) ──────────────────
 export { generateNatsPermissions } from './nats-acl';
 export type { RoleSpec, Roles, NatsPermissions } from './nats-acl';
+
+// ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
+export { defineEntity, isEntity, validateEntityState } from './entity';
+export type {
+    EntityDef,
+    AnyEntity,
+    EntityState,
+    EntityStateShape,
+    EntityHandler,
+    EntityHandlerMap,
+    EntityRecord,
+    EntityHandlers,
+} from './entity';
 
 // ── HLC ─────────────────────────────────────────────────────────────────────
 export { hlcTick, hlcMerge, hlcPack, hlcCompare } from './hlc';

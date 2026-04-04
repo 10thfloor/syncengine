@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "pnpm --filter @syncengine/cli exec syncengine dev",
     "build": "pnpm --filter @syncengine/example build",
-    "build:wasm": "cd packages/dbsp-engine && wasm-pack build --target bundler --out-dir pkg --scope syncengine",
+    "build:wasm": "cd packages/dbsp-engine && wasm-pack build --target bundler --out-dir pkg --scope syncengine && node ../../scripts/sync-wasm.mjs",
     "postinstall": "test -f packages/dbsp-engine/pkg/dbsp_bg.wasm || pnpm build:wasm",
     "test": "pnpm --filter @syncengine/example test",
     "typecheck": "pnpm -r --if-present typecheck",

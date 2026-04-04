@@ -22,8 +22,15 @@ export type MergeStrategy = 'lww' | 'set_union' | 'max' | 'min' | 'add';
 
 // ── Column definitions ────────────────────────────────────────────────────
 
+export type ColumnKind = 'id' | 'integer' | 'real' | 'text' | 'boolean';
+
 export interface ColumnDef<T> {
     readonly $type: T;  // phantom — carries value type for inference only
+    /** Coarse-grained tag of the JS value type. Distinguishes booleans
+     *  from integers (both serialize to SQLite's INTEGER, so `sqlType`
+     *  alone can't recover the JS shape). Used by entity state validators
+     *  and any other consumer that needs the original constructor intent. */
+    readonly kind: ColumnKind;
     readonly sqlType: string;
     readonly nullable: boolean;
     readonly primaryKey: boolean;
@@ -37,6 +44,7 @@ export interface ColumnDef<T> {
 export function id(): ColumnDef<number> {
     return {
         $type: 0 as never,
+        kind: 'id',
         sqlType: 'INTEGER PRIMARY KEY',
         nullable: false,
         primaryKey: true,
@@ -62,6 +70,7 @@ export function integer<E extends readonly number[] = never>(
 ): ColumnDef<NumericEnumValue<E>> {
     return {
         $type: 0 as never,
+        kind: 'integer',
         sqlType: 'INTEGER',
         nullable: false,
         primaryKey: false,
@@ -73,6 +82,7 @@ export function integer<E extends readonly number[] = never>(
 export function real(opts?: { merge?: MergeStrategy | false }): ColumnDef<number> {
     return {
         $type: 0 as never,
+        kind: 'real',
         sqlType: 'REAL',
         nullable: false,
         primaryKey: false,
@@ -85,6 +95,7 @@ export function text<E extends readonly string[] = never>(
 ): ColumnDef<TextEnumValue<E>> {
     return {
         $type: '' as never,
+        kind: 'text',
         sqlType: 'TEXT',
         nullable: false,
         primaryKey: false,
@@ -96,6 +107,7 @@ export function text<E extends readonly string[] = never>(
 export function boolean(opts?: { merge?: MergeStrategy | false }): ColumnDef<boolean> {
     return {
         $type: false as never,
+        kind: 'boolean',
         sqlType: 'INTEGER',
         nullable: false,
         primaryKey: false,

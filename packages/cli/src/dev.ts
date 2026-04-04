@@ -192,6 +192,10 @@ async function boot(
     banner('starting workspace service');
     const serverDir = join(repoRoot, 'packages', 'server');
     const tsxBin = join(serverDir, 'node_modules', '.bin', 'tsx');
+    // Phase 4: tell the server where to find the user's entity definitions.
+    // Convention is `apps/example/src/entities.ts` (or whatever app dir);
+    // missing file is OK — the server runs without entities.
+    const entitiesPath = resolveEntitiesPath(repoRoot);
     const workspace = spawnManaged(tsxBin, ['watch', 'src/index.ts'], {
         name: 'workspace',
         cwd: serverDir,
@@ -199,9 +203,11 @@ async function boot(
             ...process.env,
             PORT: String(ports.workspace),
             NATS_URL: `nats://127.0.0.1:${ports.natsClient}`,
+            ...(entitiesPath ? { SYNCENGINE_ENTITIES_PATH: entitiesPath } : {}),
         },
     });
     processes.push(workspace);
+    if (entitiesPath) note(`entities → ${entitiesPath.replace(repoRoot + sep, '')}`);
     // Restate services speak HTTP/2 cleartext — Node's fetch can't probe
     // them directly, so we use a TCP-level readiness check.
     await waitForTcp(ports.workspace, { label: 'workspace service', timeoutMs: 30_000 });
@@ -270,6 +276,30 @@ function isSafeStateDirToWipe(stateDir: string, repoRoot: string): boolean {
     // (e.g. users who run their own per-branch state subdir).
     const repoSyncDir = resolve(repoRoot, '.syncengine') + sep;
     return resolvedState.startsWith(repoSyncDir);
+}
+
+/**
+ * Locate the user's entity definitions file. Convention:
+ *   apps/{app}/src/entities.ts
+ *
+ * The CLI doesn't know which app the user runs (apps/example today, but
+ * the framework will support multiple apps), so we scan apps/* for the
+ * first src/entities.ts that exists. Returning `null` is fine — the
+ * server treats entities as optional.
+ */
+function resolveEntitiesPath(repoRoot: string): string | null {
+    const appsDir = join(repoRoot, 'apps');
+    if (!existsSync(appsDir)) return null;
+    // Avoid pulling in fs.readdirSync just for this — apps/example is the
+    // only app today, so check it directly. If/when multi-app lands the
+    // resolver can scan dynamically.
+    const candidates = [
+        join(appsDir, 'example', 'src', 'entities.ts'),
+    ];
+    for (const path of candidates) {
+        if (existsSync(path)) return path;
+    }
+    return null;
 }
 
 function buildPidsSnapshot(processes: ManagedProcess[]): Pids {

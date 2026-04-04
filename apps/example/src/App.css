@@ -306,6 +306,33 @@ body {
   font-weight: 600;
 }
 
+/* Budget lock button (Phase 4 actor demo) */
+.budget-lock {
+  font-size: 10px;
+  padding: 2px 8px;
+  min-width: 56px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.budget-lock.held {
+  background: #16a34a;
+  color: white;
+  border-color: #16a34a;
+}
+
+.budget-lock.held:hover {
+  background: #22c55e;
+  border-color: #22c55e;
+}
+
+.budget-lock.contended {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.3);
+  cursor: not-allowed;
+}
+
 .budget-bar {
   height: 6px;
   background: var(--surface);
