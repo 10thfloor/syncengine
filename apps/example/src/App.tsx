@@ -6,7 +6,7 @@ import {
 import {
     expenses, budgets,
     topExpenses, byCategory, totals, spendVsBudget,
-    CHANNELS, BUDGET_SEED, CATEGORIES, EMOJI, migrations,
+    CHANNELS, BUDGET_SEED, CATEGORIES, EMOJI,
     type Category,
 } from './features/expenses.actor';
 import { budgetLock } from './entities/budget-lock.actor';
@@ -33,7 +33,6 @@ export const db = store({
     channels: CHANNELS,
     seed: { budgets: BUDGET_SEED },
     schemaVersion: 1,
-    migrations,
 });
 
 export type DB = typeof db;

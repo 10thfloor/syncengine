@@ -39,7 +39,7 @@
 // the same code runs on the client and the server, so the optimistic
 // guess matches the authoritative result modulo concurrent writes.
 
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import {
     applyHandler,
     rebase,
@@ -114,13 +114,16 @@ interface EntitySubscription {
     /** Monotonic id for tagging pending actions. Restart-safe because
      *  entity subscriptions are per-tab and per-(type, key). */
     nextActionId: number;
-    /** Disposal: close the NATS subscription and forget the entry. */
-    dispose: () => void;
 }
 
 const subscriptions = new Map<string, EntitySubscription>();
 
-/** A lazy NATS connection shared across all entity subscriptions. */
+/**
+ * A lazy NATS connection shared across all entity subscriptions. The
+ * promise is nulled on connection close so the next caller reconnects
+ * — without this, a transient NATS outage would permanently break
+ * subsequent mounts with a settled-rejected cache entry.
+ */
 let natsConnPromise: Promise<{
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     nc: any;
@@ -132,9 +135,26 @@ async function getNats() {
     if (!natsConnPromise) {
         natsConnPromise = (async () => {
             const { connect, JSONCodec } = await import('nats.ws');
-            const nc = await connect({ servers: runtimeNatsUrl });
-            const codec = JSONCodec();
-            return { nc, codec };
+            try {
+                const nc = await connect({ servers: runtimeNatsUrl });
+                const codec = JSONCodec();
+                // Reset the cached promise when the connection closes,
+                // either gracefully or on error. The next getNats() call
+                // will re-dial.
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                void (nc as any).closed().then(() => {
+                    natsConnPromise = null;
+                }).catch(() => {
+                    natsConnPromise = null;
+                });
+                return { nc, codec };
+            } catch (err) {
+                // Connection failed outright — reset the cache so the
+                // next call can retry instead of returning this
+                // settled-rejected promise forever.
+                natsConnPromise = null;
+                throw err;
+            }
         })();
     }
     return natsConnPromise;
@@ -157,7 +177,6 @@ function getOrCreateSubscription(
         ready: false,
         listeners: new Set(),
         nextActionId: 1,
-        dispose: () => {},
     };
     subscriptions.set(subKey, sub);
 
@@ -215,11 +234,16 @@ function getOrCreateSubscription(
             console.warn('[syncengine] entity NATS subscription failed:', err);
         }
     })();
+    void natsSub;
 
-    sub.dispose = () => {
-        natsSub?.unsubscribe();
-        subscriptions.delete(subKey);
-    };
+    // Subscriptions intentionally live for the tab lifetime. Earlier
+    // versions disposed on last-listener-removed, but that races with
+    // React StrictMode's double-mount (subscribe → cleanup → subscribe)
+    // and with prop changes that swap `(entity, key)` out from under
+    // the listener set. Holding on to a handful of per-(type, key)
+    // state objects is cheap; the handler bodies and NATS traffic are
+    // the actual cost centers, and both are already shared across
+    // consumers of the same subscription.
 
     return sub;
 }
@@ -236,12 +260,13 @@ function setConfirmed(
     const result = rebase(entity, sub.confirmed, sub.pending);
     sub.optimistic = result.state;
     // If any pending actions failed during rebase, drop them from the
-    // queue. The in-flight POST for each still carries the authoritative
-    // verdict — dropping from the optimistic chain just means the UI
-    // reflects the pre-action state until the server responds.
-    if (result.failed.length > 0) {
-        const failedSet = new Set(result.failed);
-        sub.pending = sub.pending.filter((_, i) => !failedSet.has(i));
+    // queue by their stable id. The in-flight POST for each still
+    // carries the authoritative verdict — dropping from the optimistic
+    // chain just means the UI reflects the pre-action state until the
+    // server responds.
+    if (result.failedIds.length > 0) {
+        const failedSet = new Set(result.failedIds);
+        sub.pending = sub.pending.filter((a) => !failedSet.has(a.id));
     }
 }
 
@@ -251,9 +276,9 @@ function setConfirmed(
 function rebaseSub(sub: EntitySubscription, entity: AnyEntity): void {
     const result = rebase(entity, sub.confirmed, sub.pending);
     sub.optimistic = result.state;
-    if (result.failed.length > 0) {
-        const failedSet = new Set(result.failed);
-        sub.pending = sub.pending.filter((_, i) => !failedSet.has(i));
+    if (result.failedIds.length > 0) {
+        const failedSet = new Set(result.failedIds);
+        sub.pending = sub.pending.filter((a) => !failedSet.has(a.id));
     }
 }
 
@@ -347,19 +372,25 @@ export function useEntity<
     }
     const sub = subRef.current!;
 
-    // Standard external-store subscription pattern. The snapshot is the
-    // subscription object itself — React only re-renders when `notify`
-    // mutates one of its fields.
-    const subscribe = useRef((onChange: () => void) => {
-        sub.listeners.add(onChange);
-        return () => {
-            sub.listeners.delete(onChange);
-            // Tear down the subscription when the LAST listener leaves.
-            // Multiple components can share one entity subscription, so
-            // we only dispose when the listener set goes empty.
-            if (sub.listeners.size === 0) sub.dispose();
-        };
-    }).current;
+    // Standard external-store subscription pattern. `subscribe` must be
+    // rebuilt whenever `sub` changes (e.g., the caller passed a different
+    // `(entity, key)`) — otherwise the closure would hold on to the old
+    // subscription object and React would send notifications to the
+    // wrong listener set. `useCallback` with `[sub]` deps makes
+    // `useSyncExternalStore` re-subscribe on the new sub when the
+    // identity flips.
+    //
+    // No sub teardown here — see `getOrCreateSubscription` for the
+    // "subscriptions live for the tab lifetime" rationale.
+    const subscribe = useCallback(
+        (onChange: () => void) => {
+            sub.listeners.add(onChange);
+            return () => {
+                sub.listeners.delete(onChange);
+            };
+        },
+        [sub],
+    );
 
     // Separate selectors keep snapshots stable so React's
     // bailout-on-equal works correctly. We surface the OPTIMISTIC state

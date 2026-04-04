@@ -64,7 +64,6 @@ export {
     validateEntityState,
     applyHandler,
     rebase,
-    server,
 } from './entity';
 export type {
     EntityDef,

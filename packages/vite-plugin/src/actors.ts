@@ -170,24 +170,11 @@ export function stripServerCalls(source: string): string {
         if (!handlersRel) { cursor = callEnd + 1; continue; }
 
         // `handlersRel.valueStart` is the index (inside configBody) of
-        // the first non-whitespace character after `handlers:`.
-        const valueStart = configStart + 1 + handlersRel.valueStart;
-
-        // The value may be `{...}` OR `server({...})` (we still tolerate
-        // the wrapper form for users who prefer the explicit marker).
-        let braceStart = valueStart;
-        let serverWrapped = false;
-        if (out.slice(valueStart).match(/^server\s*\(/)) {
-            serverWrapped = true;
-            const sOpen = out.indexOf('(', valueStart);
-            const sClose = findBalancedClose(out, sOpen, '(', ')');
-            if (sClose === -1) { cursor = callEnd + 1; continue; }
-            // Find the brace inside the server() arg
-            const innerRel = findTopLevelBrace(out.slice(sOpen + 1, sClose));
-            if (innerRel === -1) { cursor = callEnd + 1; continue; }
-            braceStart = sOpen + 1 + innerRel;
-        }
-
+        // the first non-whitespace character after `handlers:`. The
+        // value must be an object literal `{...}`; any other form
+        // (e.g., an external variable) can't be statically stripped
+        // and is passed through unchanged.
+        const braceStart = configStart + 1 + handlersRel.valueStart;
         if (out[braceStart] !== '{') { cursor = callEnd + 1; continue; }
         const braceEnd = findBalancedClose(out, braceStart, '{', '}');
         if (braceEnd === -1) { cursor = callEnd + 1; continue; }
@@ -200,14 +187,12 @@ export function stripServerCalls(source: string): string {
         }
 
         // Build the stub and splice it in place of just the braced
-        // handler literal (not the optional `server(` wrapper — leaving
-        // it in place keeps the symbol alive in the import graph).
+        // handler literal.
         const stub = buildStubLiteral(handlerNames);
         out = out.slice(0, braceStart) + stub + out.slice(braceEnd + 1);
         // Advance past the replacement. `callEnd` has shifted; recompute
         // the scanning cursor conservatively.
         cursor = braceStart + stub.length;
-        void serverWrapped;
     }
     return out;
 }
@@ -539,10 +524,21 @@ function buildStubLiteral(handlerNames: readonly string[]): string {
 // ── Dev middleware: /__syncengine/rpc/<entity>/<key>/<handler> ─────────────
 
 /**
+ * Validation regex for entity and handler names. Matches the same
+ * constraint enforced by `defineEntity` in core: must start with a
+ * letter or underscore followed by at least one alphanumeric (the
+ * single-underscore prefix is reserved for framework built-ins like
+ * `_read`/`_init`). Unvalidated names forwarded into the Restate URL
+ * would allow path traversal attacks (`../admin`) from any browser
+ * tab with access to the dev server.
+ */
+const NAME_REGEX = /^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$/;
+
+/**
  * Build a Connect-style middleware that forwards
  * `/__syncengine/rpc/<entity>/<key>/<handler>` POSTs to the framework's
  * Restate entity runtime. The browser posts `[...args]` as the body;
- * we relay verbatim.
+ * we relay verbatim after validating the path components.
  */
 export function buildRpcMiddleware(
     restateUrlFn: () => string,
@@ -563,14 +559,49 @@ export function buildRpcMiddleware(
             res.end(`Expected /__syncengine/rpc/<entity>/<key>/<handler>, got ${req.url}`);
             return;
         }
-        const [entityName, entityKey, handlerName] = pathParts as [string, string, string];
+        const [entityNameRaw, entityKeyRaw, handlerNameRaw] = pathParts as [string, string, string];
+
+        // Decode once — the client URL-encodes the key but leaves entity
+        // and handler names alone (they're supposed to be identifiers).
+        let entityName: string;
+        let entityKey: string;
+        let handlerName: string;
+        try {
+            entityName = decodeURIComponent(entityNameRaw);
+            entityKey = decodeURIComponent(entityKeyRaw);
+            handlerName = decodeURIComponent(handlerNameRaw);
+        } catch {
+            res.statusCode = 400;
+            res.end('Malformed URL-encoded path component');
+            return;
+        }
+
+        // Harden against path traversal and header injection: entity and
+        // handler names must match the framework's identifier regex
+        // exactly. Entity KEY is user data so it doesn't have to be an
+        // identifier, but we reject slashes and control chars to keep
+        // the composite Restate key well-formed.
+        if (!NAME_REGEX.test(entityName) || !NAME_REGEX.test(handlerName)) {
+            res.statusCode = 400;
+            res.end('Invalid entity or handler name (must match ^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$)');
+            return;
+        }
+        // eslint-disable-next-line no-control-regex
+        if (entityKey.length === 0 || entityKey.length > 512 || /[\/\\\x00-\x1f]/.test(entityKey)) {
+            res.statusCode = 400;
+            res.end('Invalid entity key');
+            return;
+        }
 
         // Collect body (small — handler args only).
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(chunk as Buffer);
         const body = Buffer.concat(chunks).toString('utf8') || '[]';
 
-        // Forward to Restate.
+        // Forward to Restate. `entityName` and `handlerName` are now
+        // guaranteed identifiers, so the URL interpolation is safe.
+        // The workspaceId+key composite gets encoded because the key
+        // is user data.
         const restateUrl = restateUrlFn().replace(/\/+$/, '');
         const workspaceId = workspaceIdFn();
         const targetUrl =

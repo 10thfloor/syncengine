@@ -296,31 +296,14 @@ export function isEntity(x: unknown): x is AnyEntity {
     return typeof x === 'object' && x !== null && (x as { $tag?: string }).$tag === 'entity';
 }
 
-// ── server() — handler marker for client/server splitting ─────────────────
-//
-// `server({ ... })` is a marker the Vite plugin uses to identify the
-// handler bag in a `.actor.ts` file so it can strip handler BODIES from
-// the client bundle while preserving handler NAMES for the typed action
-// proxy. At runtime on the server, `server(handlers)` is the identity
-// function — it just returns its argument unchanged. In the client
-// bundle the plugin replaces the entire call expression with a stub
-// object that maps each handler name to a function that throws (or,
-// in a future phase, routes to the RPC middleware as a fetch proxy).
-//
-// The purpose is purely transport: keeping server-only code out of the
-// browser bundle. It has no effect on server-side execution.
-//
-//     export const counter = defineEntity('counter', {
-//         state: { value: integer() },
-//         handlers: server({
-//             increment(state, by: number) { ... },
-//             reset() { ... },
-//         }),
-//     });
-
-export function server<T>(handlers: T): T {
-    return handlers;
-}
+// NOTE: an earlier draft exposed a `server<T>(handlers: T): T` identity
+// helper as an explicit marker for the Vite plugin's handler-stripping
+// transform. It was removed because wrapping handlers in `server(...)`
+// broke TypeScript's state-parameter inference inside `defineEntity` —
+// the plugin now keys off the `.actor.ts` file extension + the
+// `handlers:` property literal inside `defineEntity(...)` calls
+// instead, which preserves inference. See the review commit message
+// for the full rationale.
 
 // ── Pure handler execution ─────────────────────────────────────────────────
 //
@@ -389,23 +372,32 @@ export function applyHandler(
 //
 // If a pending handler throws mid-rebase (e.g., a remote mutation changed
 // the state such that our local call is no longer valid), the handler is
-// DROPPED from the output chain and its index is recorded in `failed`.
-// The caller is responsible for deciding what to do with failures —
-// typically the useEntity hook waits for the in-flight server response
-// to deliver the authoritative verdict, since the server might succeed
-// or fail independently of our local check.
+// DROPPED from the output chain and its STABLE ID is recorded in
+// `failedIds`. The caller is responsible for deciding what to do with
+// failures — typically the useEntity hook waits for the in-flight
+// server response to deliver the authoritative verdict, since the
+// server might succeed or fail independently of our local check.
+//
+// Using stable ids rather than array indices makes the result
+// immune to any mutation of the pending array between the rebase call
+// and the caller's filter step (e.g., if another action resolves
+// concurrently and the caller re-filters the queue).
 
 export interface RebaseResult {
     /** The optimistic state after folding valid pending actions over
      *  the confirmed base. If `confirmed` is null, this is also null. */
     readonly state: Record<string, unknown> | null;
-    /** Indices into the original pending array of actions that threw
-     *  during rebase. The caller may want to drop these from its queue
-     *  or mark them in the UI. */
-    readonly failed: readonly number[];
+    /** Stable IDs of pending actions that threw during rebase. The
+     *  caller typically drops these from the pending queue. */
+    readonly failedIds: readonly number[];
 }
 
 export interface PendingActionLike {
+    /** Stable, monotonically-increasing id assigned at enqueue time.
+     *  Used by `rebase()` to report failures without relying on array
+     *  indices that may shift if the pending queue is mutated
+     *  concurrently. */
+    readonly id: number;
     readonly handlerName: string;
     readonly args: readonly unknown[];
 }
@@ -416,21 +408,20 @@ export function rebase(
     pending: readonly PendingActionLike[],
 ): RebaseResult {
     if (confirmed === null) {
-        return { state: null, failed: [] };
+        return { state: null, failedIds: [] };
     }
     let state = confirmed;
-    const failed: number[] = [];
-    for (let i = 0; i < pending.length; i++) {
-        const action = pending[i]!;
+    const failedIds: number[] = [];
+    for (const action of pending) {
         try {
             state = applyHandler(entity, action.handlerName, state, action.args);
         } catch {
             // Rebase failed on this action — drop it from the chain but
             // keep folding subsequent actions on the unchanged state.
-            failed.push(i);
+            failedIds.push(action.id);
         }
     }
-    return { state, failed };
+    return { state, failedIds };
 }
 
 /** Generic alias used in function signatures that accept any entity, the

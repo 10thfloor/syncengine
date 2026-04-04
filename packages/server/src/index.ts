@@ -18,12 +18,8 @@ const PORT = parseInt(process.env.PORT ?? "9080", 10);
 //
 // On the server side there's no Vite in the loop — tsx loads the files
 // with their original content including the full handler bodies. The
-// Vite plugin's `server({...})`-body stripping is a client-bundle-only
-// concern; the server always sees the real code.
-//
-// The legacy SYNCENGINE_ENTITIES_PATH env var (single-file convention
-// from pre-PLAN Phase 4) is still honored for back-compat, but apps
-// should migrate to SYNCENGINE_APP_DIR + `.actor.ts` files.
+// Vite plugin's handler-body stripping is a client-bundle-only concern;
+// the server always sees the real code.
 
 function walkActorFiles(srcDir: string): string[] {
     const out: string[] = [];
@@ -57,49 +53,32 @@ function walkActorFiles(srcDir: string): string[] {
 }
 
 async function loadEntities(): Promise<AnyEntity[]> {
-    const entities: AnyEntity[] = [];
-
-    // Primary path: glob every `.actor.ts` file under the app dir
     const appDir = process.env.SYNCENGINE_APP_DIR;
-    if (appDir) {
-        const srcDir = resolve(appDir, "src");
-        const files = walkActorFiles(srcDir);
-        for (const file of files) {
-            try {
-                const mod = (await import(file)) as Record<string, unknown>;
-                for (const value of Object.values(mod)) {
-                    if (isEntity(value)) entities.push(value);
-                }
-            } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                console.error(
-                    `[workspace-service] failed to load actor file ${file}: ${msg}`,
-                );
-            }
-        }
-        if (files.length === 0) {
-            console.warn(
-                `[workspace-service] SYNCENGINE_APP_DIR=${appDir} but no .actor.ts files found under src/`,
-            );
-        }
+    if (!appDir) return [];
+
+    const srcDir = resolve(appDir, "src");
+    const files = walkActorFiles(srcDir);
+    if (files.length === 0) {
+        console.warn(
+            `[workspace-service] SYNCENGINE_APP_DIR=${appDir} but no .actor.ts files found under src/`,
+        );
+        return [];
     }
 
-    // Legacy single-file fallback (pre-PLAN Phase 4)
-    const legacyPath = process.env.SYNCENGINE_ENTITIES_PATH;
-    if (legacyPath && entities.length === 0) {
+    const entities: AnyEntity[] = [];
+    for (const file of files) {
         try {
-            const mod = (await import(legacyPath)) as Record<string, unknown>;
+            const mod = (await import(file)) as Record<string, unknown>;
             for (const value of Object.values(mod)) {
                 if (isEntity(value)) entities.push(value);
             }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.error(
-                `[workspace-service] failed to load entities from ${legacyPath}: ${msg}`,
+                `[workspace-service] failed to load actor file ${file}: ${msg}`,
             );
         }
     }
-
     return entities;
 }
 

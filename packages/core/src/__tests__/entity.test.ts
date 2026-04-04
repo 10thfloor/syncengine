@@ -325,66 +325,67 @@ describe('defineEntity (Phase 4)', () => {
         it('returns null state when confirmed is null', () => {
             const result = rebase(counter, null, []);
             expect(result.state).toBeNull();
-            expect(result.failed).toEqual([]);
+            expect(result.failedIds).toEqual([]);
         });
 
         it('returns the confirmed state when pending is empty', () => {
             const result = rebase(counter, { value: 42 }, []);
             expect(result.state).toEqual({ value: 42 });
-            expect(result.failed).toEqual([]);
+            expect(result.failedIds).toEqual([]);
         });
 
         it('folds a single pending action over the confirmed base', () => {
             const result = rebase(counter, { value: 10 }, [
-                { handlerName: 'increment', args: [5] },
+                { id: 1, handlerName: 'increment', args: [5] },
             ]);
             expect(result.state).toEqual({ value: 15 });
-            expect(result.failed).toEqual([]);
+            expect(result.failedIds).toEqual([]);
         });
 
         it('folds multiple pending actions in order', () => {
             const result = rebase(counter, { value: 0 }, [
-                { handlerName: 'increment', args: [1] },
-                { handlerName: 'increment', args: [2] },
-                { handlerName: 'increment', args: [3] },
+                { id: 1, handlerName: 'increment', args: [1] },
+                { id: 2, handlerName: 'increment', args: [2] },
+                { id: 3, handlerName: 'increment', args: [3] },
             ]);
             expect(result.state).toEqual({ value: 6 });
-            expect(result.failed).toEqual([]);
+            expect(result.failedIds).toEqual([]);
         });
 
         it('re-running on a different confirmed produces the right answer (concurrent write case)', () => {
             // My original pending: [+5]. If confirmed is 10 → optimistic is 15.
             // A remote client also did +3 → new confirmed is 13.
             // Rebasing my pending on the new confirmed should give 18.
-            const pending = [{ handlerName: 'increment', args: [5] }];
+            const pending = [{ id: 1, handlerName: 'increment', args: [5] }];
             const before = rebase(counter, { value: 10 }, pending);
             expect(before.state).toEqual({ value: 15 });
             const after = rebase(counter, { value: 13 }, pending);
             expect(after.state).toEqual({ value: 18 });
         });
 
-        it('drops actions that throw during rebase and reports their indices', () => {
+        it('drops actions that throw during rebase and reports their stable ids', () => {
             // mustBePositive throws on non-positive state. If the confirmed
             // state is 5 → mustBePositive → 10 (ok). If confirmed is 0 →
             // mustBePositive throws → drop from chain → subsequent actions
             // continue from the un-doubled state.
             const pending = [
-                { handlerName: 'mustBePositive', args: [] },
-                { handlerName: 'increment', args: [7] },
+                { id: 42, handlerName: 'mustBePositive', args: [] },
+                { id: 43, handlerName: 'increment', args: [7] },
             ];
             const ok = rebase(counter, { value: 5 }, pending);
             expect(ok.state).toEqual({ value: 17 }); // (5*2)+7
-            expect(ok.failed).toEqual([]);
+            expect(ok.failedIds).toEqual([]);
 
             const bad = rebase(counter, { value: 0 }, pending);
             expect(bad.state).toEqual({ value: 7 }); // mustBePositive dropped, then 0+7
-            expect(bad.failed).toEqual([0]);
+            // Failure reported by the action's stable id, not its array index.
+            expect(bad.failedIds).toEqual([42]);
         });
 
         it('pending actions are immutable inputs — rebase does not mutate them', () => {
             const pending = [
-                { handlerName: 'increment', args: [1] },
-                { handlerName: 'increment', args: [2] },
+                { id: 1, handlerName: 'increment', args: [1] },
+                { id: 2, handlerName: 'increment', args: [2] },
             ] as const;
             const result1 = rebase(counter, { value: 10 }, pending);
             const result2 = rebase(counter, { value: 100 }, pending);
@@ -403,7 +404,7 @@ describe('defineEntity (Phase 4)', () => {
                 },
             });
             const result = rebase(cart, { items: 0, total: 100 }, [
-                { handlerName: 'addItem', args: [3] },
+                { id: 1, handlerName: 'addItem', args: [3] },
             ]);
             expect(result.state).toEqual({ items: 3, total: 100 });
         });

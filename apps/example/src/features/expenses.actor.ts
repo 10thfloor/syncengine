@@ -18,7 +18,6 @@
 import {
     table, id, real, text, view,
     sum, count, avg, max,
-    type Migration,
 } from '@syncengine/client';
 
 // ── Domain enum ────────────────────────────────────────────────────────────
@@ -98,13 +97,3 @@ export const BUDGET_SEED = CATEGORIES.map((cat, i) => ({
     budget: BUDGET_LIMITS[cat],
 }));
 
-// ── Migrations ────────────────────────────────────────────────────────────
-
-export const migrations: readonly Migration[] = [
-    {
-        version: 2,
-        steps: [
-            { op: 'addColumn', table: 'expenses', column: 'tags', type: 'TEXT', default: '', nullable: false },
-        ],
-    },
-];
