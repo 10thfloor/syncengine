@@ -60,13 +60,23 @@ export async function restateHealth(ports: Ports): Promise<boolean> {
 export async function restateRegisterDeployment(
     ports: Ports,
     serviceUri: string,
+    opts: { force?: boolean } = {},
 ): Promise<void> {
+    // `force: true` tells the Restate admin API to re-discover the
+    // deployment even if one with the same URI is already registered.
+    // That's exactly what we need for PLAN Phase 7 hot-reload: when a
+    // `.actor.ts` file changes and tsx restarts the workspace service,
+    // the service metadata (handler list, schemas) may have changed but
+    // the admin has the old version cached. Force-registering triggers
+    // discovery against the running server and updates the metadata
+    // without touching the persistent virtual-object state (which is
+    // keyed by workspace id, independent of deployment version).
     const res = await fetch(
         `http://127.0.0.1:${ports.restateAdmin}/deployments`,
         {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ uri: serviceUri }),
+            body: JSON.stringify({ uri: serviceUri, force: opts.force ?? false }),
         },
     );
     if (!res.ok) {

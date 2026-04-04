@@ -17,7 +17,7 @@
  * and both state files are unlinked. Second Ctrl-C force-kills.
  */
 
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, watch, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
@@ -247,8 +247,78 @@ async function boot(
     processes.push(vite);
     await waitForTcp(ports.vite, { label: 'vite', timeoutMs: 30_000 });
 
+    // 7. PLAN Phase 7 — HMR for actor files.
+    //
+    // tsx already auto-restarts the workspace service when any .ts file
+    // in its watch set changes, so edits to handler BODIES take effect
+    // immediately. What tsx can't do is tell Restate's admin API about
+    // changed SERVICE METADATA (new handlers added, handler signatures
+    // changed). Restate caches the service's handler list from the
+    // original `register-deployment` call, so an unknown handler looks
+    // like a 404 until we re-discover.
+    //
+    // This watcher sits in the CLI process (which knows the admin port
+    // and the workspace service URI), debounces .actor.ts change events
+    // so tsx's own restart has time to settle, waits for the workspace
+    // service TCP port to be live again, and calls the admin API with
+    // `force: true` to trigger re-discovery. Entity state is keyed by
+    // virtual-object id in Restate's persistent store, so it survives
+    // the re-registration — the whole point of Phase 7.
+    if (appDir) {
+        watchActorFiles(appDir, async () => {
+            try {
+                await waitForTcp(ports.workspace, {
+                    label: 'workspace service',
+                    timeoutMs: 10_000,
+                });
+                await restateRegisterDeployment(
+                    ports,
+                    `http://127.0.0.1:${ports.workspace}`,
+                    { force: true },
+                );
+                note('[hot-reload] re-registered workspace service with restate');
+            } catch (err) {
+                process.stderr.write(
+                    `\x1b[33m[hot-reload] re-register failed: ${String((err as Error).message ?? err)}\x1b[0m\n`,
+                );
+            }
+        });
+    }
+
     if (!process.env.SYNCENGINE_DEV_QUIET) {
         printReadyBanner(ports);
+    }
+}
+
+/**
+ * Watch the user's app directory for changes under `src/**\/*.actor.ts`
+ * and invoke `onChange` (debounced) when any of them is created,
+ * modified, or deleted. Uses Node's native recursive `fs.watch`, which
+ * is supported on macOS and Linux (the only platforms the dev
+ * orchestrator targets). On change, waits 400ms for tsx's own restart
+ * to settle before firing.
+ */
+function watchActorFiles(appDir: string, onChange: () => void): void {
+    const srcDir = join(appDir, 'src');
+    if (!existsSync(srcDir)) return;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    try {
+        watch(
+            srcDir,
+            { recursive: true, persistent: false },
+            (_event, filename) => {
+                if (!filename || !String(filename).endsWith('.actor.ts')) return;
+                if (debounceTimer) clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => {
+                    debounceTimer = null;
+                    onChange();
+                }, 400);
+            },
+        );
+    } catch (err) {
+        process.stderr.write(
+            `\x1b[33m[hot-reload] fs.watch(${srcDir}) failed: ${String((err as Error).message ?? err)} — actor hot-reload disabled\x1b[0m\n`,
+        );
     }
 }
 
