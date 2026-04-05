@@ -6,12 +6,11 @@ dist
 dist-ssr
 
 # Rust / WASM
-dbsp-engine/target
-dbsp-engine/pkg
+packages/dbsp-engine/target
+packages/dbsp-engine/pkg
 
-# Services
-services/*/node_modules
-services/*/dist
+# Syncengine dev state
+.syncengine/
 
 # Logs
 logs

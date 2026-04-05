@@ -1,0 +1,331 @@
+/**
+ * `syncengine dev` — the one-command orchestrator.
+ *
+ * Startup sequence:
+ *   1. Resolve repo root + state dir, optionally `--fresh` (wipe first)
+ *   2. Write ports.json so other commands can find the running stack
+ *   3. Generate nats-server config pointing at local JetStream store
+ *   4. Spawn nats-server  → wait for port + monitor /healthz
+ *   5. Spawn restate-server → wait for admin /health
+ *   6. Spawn workspace service → wait for TCP (service speaks h2c)
+ *   7. POST to Restate admin to register the workspace deployment
+ *   8. POST workspace.provision() for the 'demo' workspace
+ *   9. Spawn Vite dev server
+ *  10. Write pids.json with the full child set
+ *
+ * On SIGINT, children are terminated in reverse order via process groups
+ * and both state files are unlinked. Second Ctrl-C force-kills.
+ */
+
+import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
+
+import { binaryPath as natsBinary } from '@syncengine/nats-bin';
+import { binaryPath as restateBinary } from '@syncengine/restate-bin';
+
+import {
+    banner,
+    note,
+    spawnManaged,
+    registerShutdown,
+    waitForHttp,
+    waitForTcp,
+    requirePortsFree,
+    type ManagedProcess,
+} from './runner';
+import {
+    DEFAULT_PORTS,
+    findRepoRoot,
+    stateDirFor,
+    writePorts,
+    writePids,
+    readPids,
+    isAlive,
+    clearStateFiles,
+    type Pids,
+    type Ports,
+} from './state';
+import {
+    restateRegisterDeployment,
+    provisionWorkspace,
+} from './client';
+
+const DEMO_WORKSPACE_ID = 'demo';
+
+// ── Entry ─────────────────────────────────────────────────────────────────
+
+export async function devCommand(args: string[]): Promise<void> {
+    const fresh = args.includes('--fresh');
+    const repoRoot = await findRepoRoot();
+    const stateDir = stateDirFor(repoRoot);
+
+    // --fresh: wipe the state dir, but refuse to nuke state that belongs
+    // to a currently-running orchestrator (that would orphan processes
+    // and corrupt Restate's RocksDB mid-write).
+    if (fresh) {
+        const existing = readPids(stateDir);
+        if (existing && isAlive(existing.orchestrator)) {
+            throw new Error(
+                `--fresh refused: a syncengine dev stack (pid ${existing.orchestrator}) is already running.\n` +
+                `Run \`syncengine down\` first, then retry with \`syncengine dev --fresh\`.`,
+            );
+        }
+
+        // Safety guard: `rmSync` with `recursive: true, force: true` is a
+        // footgun. Since `stateDir` can be overridden via SYNCENGINE_STATE_DIR,
+        // a misconfigured env var could point it at `/` or `$HOME`. Refuse to
+        // wipe anything that isn't clearly a syncengine state directory.
+        if (!isSafeStateDirToWipe(stateDir, repoRoot)) {
+            throw new Error(
+                `--fresh refused: state dir ${stateDir} is outside the expected locations.\n` +
+                `Expected either <repoRoot>/.syncengine/dev or ~/.syncengine/dev.\n` +
+                `Remove SYNCENGINE_STATE_DIR or delete the directory manually.`,
+            );
+        }
+
+        if (existsSync(stateDir)) {
+            banner('--fresh: wiping dev state');
+            rmSync(stateDir, { recursive: true, force: true });
+        }
+    }
+
+    ensureStateDirs(stateDir);
+
+    // Persist the chosen ports immediately so concurrent `status` /
+    // `workspace *` commands can discover them even during boot.
+    const ports: Ports = { ...DEFAULT_PORTS };
+    writePorts(stateDir, ports);
+
+    // Preflight: fail fast if any required port is held by a pre-existing
+    // process (old docker container, zombie syncengine, etc). Better to
+    // crash cleanly here than have half the stack come up pointed at the
+    // wrong server.
+    await requirePortsFree([
+        { port: ports.natsClient, label: 'nats client' },
+        { port: ports.natsWs, label: 'nats websocket' },
+        { port: ports.natsMonitor, label: 'nats monitor' },
+        { port: ports.restateIngress, label: 'restate ingress' },
+        { port: ports.restateAdmin, label: 'restate admin' },
+        { port: ports.restateNode, label: 'restate cluster' },
+        { port: ports.workspace, label: 'workspace service' },
+        { port: ports.vite, label: 'vite' },
+    ]);
+
+    const processes: ManagedProcess[] = [];
+    const { shutdown, isShuttingDown } = registerShutdown(processes, {
+        onDone: () => clearStateFiles(stateDir),
+    });
+
+    try {
+        await boot(processes, stateDir, repoRoot, ports);
+        // Everything is up — record the full pid set for `syncengine down`.
+        writePids(stateDir, buildPidsSnapshot(processes));
+    } catch (err) {
+        process.stderr.write(
+            `\n\x1b[1;31msyncengine dev failed:\x1b[0m ${String(err instanceof Error ? err.message : err)}\n`,
+        );
+        // Run shutdown (idempotent with any SIGINT-triggered shutdown that
+        // might already be in flight). `clearStateFiles` is called exactly
+        // once via the `onDone` hook — no explicit call here.
+        await shutdown('error');
+        // Only exit 1 if no signal handler has already claimed the exit
+        // code. If SIGINT arrived during boot, let its `.finally(exit 130)`
+        // win so the caller sees the standard signal exit code.
+        if (!isShuttingDown()) process.exit(1);
+    }
+
+    // Keep the orchestrator alive — shutdown is driven by SIGINT
+    await new Promise<void>(() => { /* never resolves */ });
+}
+
+// ── Boot sequence ─────────────────────────────────────────────────────────
+
+async function boot(
+    processes: ManagedProcess[],
+    stateDir: string,
+    repoRoot: string,
+    ports: Ports,
+): Promise<void> {
+    // 1. NATS
+    banner('starting nats-server');
+    const natsPath = await natsBinary();
+    const natsConfPath = writeNatsConfig(stateDir, ports);
+    const nats = spawnManaged(natsPath, ['-c', natsConfPath], {
+        name: 'nats',
+        cwd: repoRoot,
+    });
+    processes.push(nats);
+    await waitForTcp(ports.natsClient, { label: 'nats client', timeoutMs: 15_000 });
+    await waitForHttp(`http://127.0.0.1:${ports.natsMonitor}/healthz`, {
+        label: 'nats monitor',
+        timeoutMs: 15_000,
+    });
+    note(`nats listening on :${ports.natsClient} (ws :${ports.natsWs}, mon :${ports.natsMonitor})`);
+
+    // 2. Restate
+    banner('starting restate-server');
+    const restatePath = await restateBinary();
+    const restateBaseDir = join(stateDir, 'restate');
+    const restate = spawnManaged(
+        restatePath,
+        ['--base-dir', restateBaseDir, '--node-name', 'syncengine-dev'],
+        {
+            name: 'restate',
+            cwd: repoRoot,
+            env: {
+                ...process.env,
+                RESTATE_LOG_FILTER: process.env.RESTATE_LOG_FILTER ?? 'warn,restate=info',
+            },
+        },
+    );
+    processes.push(restate);
+    await waitForHttp(`http://127.0.0.1:${ports.restateAdmin}/health`, {
+        label: 'restate admin',
+        timeoutMs: 60_000,
+    });
+    note(`restate admin :${ports.restateAdmin}, ingress :${ports.restateIngress}`);
+
+    // 3. Workspace service (tsx directly — going through pnpm breaks the
+    //    process-group kill cascade on shutdown)
+    banner('starting workspace service');
+    const serverDir = join(repoRoot, 'packages', 'server');
+    const tsxBin = join(serverDir, 'node_modules', '.bin', 'tsx');
+    const workspace = spawnManaged(tsxBin, ['watch', 'src/index.ts'], {
+        name: 'workspace',
+        cwd: serverDir,
+        env: {
+            ...process.env,
+            PORT: String(ports.workspace),
+            NATS_URL: `nats://127.0.0.1:${ports.natsClient}`,
+        },
+    });
+    processes.push(workspace);
+    // Restate services speak HTTP/2 cleartext — Node's fetch can't probe
+    // them directly, so we use a TCP-level readiness check.
+    await waitForTcp(ports.workspace, { label: 'workspace service', timeoutMs: 30_000 });
+    note(`workspace service :${ports.workspace}`);
+
+    // 4. Register the deployment with Restate
+    banner('registering workspace service with restate');
+    await restateRegisterDeployment(ports, `http://127.0.0.1:${ports.workspace}`);
+    note('workspace service registered');
+
+    // 5. Auto-provision the default 'demo' workspace
+    banner(`provisioning workspace '${DEMO_WORKSPACE_ID}'`);
+    await provisionWorkspace(ports, DEMO_WORKSPACE_ID);
+    note(`workspace '${DEMO_WORKSPACE_ID}' ready`);
+
+    // 6. Vite
+    banner('starting vite dev server');
+    const exampleDir = join(repoRoot, 'apps', 'example');
+    const viteBin = join(exampleDir, 'node_modules', '.bin', 'vite');
+    const vite = spawnManaged(viteBin, [], {
+        name: 'vite',
+        cwd: exampleDir,
+        env: { ...process.env, FORCE_COLOR: '1' },
+    });
+    processes.push(vite);
+    await waitForTcp(ports.vite, { label: 'vite', timeoutMs: 30_000 });
+
+    if (!process.env.SYNCENGINE_DEV_QUIET) {
+        printReadyBanner(ports);
+    }
+}
+
+// ── State helpers ─────────────────────────────────────────────────────────
+
+function ensureStateDirs(stateDir: string): void {
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(join(stateDir, 'jetstream'), { recursive: true });
+    mkdirSync(join(stateDir, 'restate'), { recursive: true });
+}
+
+/**
+ * Allow wiping only state directories that look like ours — either the
+ * in-repo `.syncengine/dev` or the home-scoped `~/.syncengine/dev`. Any
+ * other target (typical signal of a misconfigured SYNCENGINE_STATE_DIR)
+ * is rejected to prevent `rmSync(..., { force: true })` from silently
+ * deleting unrelated files.
+ */
+function isSafeStateDirToWipe(stateDir: string, repoRoot: string): boolean {
+    const resolvedState = resolve(stateDir);
+    const insideRepo = resolve(repoRoot, '.syncengine', 'dev');
+    const insideHome = resolve(homedir(), '.syncengine', 'dev');
+    if (resolvedState === insideRepo || resolvedState === insideHome) return true;
+    // Also allow any path explicitly nested under the repo's .syncengine dir
+    // (e.g. users who run their own per-branch state subdir).
+    const repoSyncDir = resolve(repoRoot, '.syncengine') + sep;
+    return resolvedState.startsWith(repoSyncDir);
+}
+
+function buildPidsSnapshot(processes: ManagedProcess[]): Pids {
+    const children: Pids['children'] = {};
+    for (const { name, child } of processes) {
+        if (child.pid) children[name as keyof Pids['children']] = child.pid;
+    }
+    return {
+        orchestrator: process.pid,
+        startedAt: Date.now(),
+        children,
+    };
+}
+
+// ── NATS config generation ────────────────────────────────────────────────
+
+function writeNatsConfig(stateDir: string, ports: Ports): string {
+    const confPath = join(stateDir, 'nats-server.conf');
+    const jetstreamDir = join(stateDir, 'jetstream');
+    const body = `# Generated by syncengine dev — do not edit manually
+# Local-dev NATS config with JetStream + WebSocket for browser clients.
+
+listen: 0.0.0.0:${ports.natsClient}
+http_port: ${ports.natsMonitor}
+server_name: syncengine_dev
+
+websocket {
+  listen: "0.0.0.0:${ports.natsWs}"
+  no_tls: true
+}
+
+jetstream {
+  store_dir: "${jetstreamDir.replace(/"/g, '\\"')}"
+  max_mem: 256MB
+  max_file: 1GB
+}
+
+authorization {
+  default_permissions = {
+    publish = ">"
+    subscribe = ">"
+  }
+}
+
+debug: false
+trace: false
+logtime: true
+`;
+    writeFileSync(confPath, body);
+    return confPath;
+}
+
+// ── Ready banner ──────────────────────────────────────────────────────────
+
+function printReadyBanner(ports: Ports): void {
+    const bar = '━'.repeat(52);
+    process.stdout.write(`
+\x1b[1;32m${bar}
+  syncengine dev — all services ready
+${bar}\x1b[0m
+  \x1b[1mApp\x1b[0m           → http://localhost:${ports.vite}
+  \x1b[1mNATS WS\x1b[0m       → ws://localhost:${ports.natsWs}
+  \x1b[1mNATS monitor\x1b[0m  → http://localhost:${ports.natsMonitor}
+  \x1b[1mRestate\x1b[0m       → http://localhost:${ports.restateIngress}
+  \x1b[1mRestate admin\x1b[0m → http://localhost:${ports.restateAdmin}
+  \x1b[1mWorkspace svc\x1b[0m → http://localhost:${ports.workspace}
+  \x1b[1mDemo workspace\x1b[0m → ${DEMO_WORKSPACE_ID}
+\x1b[2m
+  Ctrl-C to shut everything down.\x1b[0m
+
+`);
+}

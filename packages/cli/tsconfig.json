@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "declaration": true,
+    "noEmit": true,
+    "paths": {
+      "@syncengine/bin-utils": ["../bin-utils/src/index.ts"],
+      "@syncengine/nats-bin": ["../nats-bin/src/index.ts"],
+      "@syncengine/restate-bin": ["../restate-bin/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@syncengine/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "syncengine": "./bin/syncengine.mjs"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@syncengine/bin-utils": "workspace:*",
+    "@syncengine/nats-bin": "workspace:*",
+    "@syncengine/restate-bin": "workspace:*",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.3"
+  }
+}
