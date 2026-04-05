@@ -169,88 +169,33 @@ function emitSyncStatus(phase, messagesReplayed, extra = {}) {
     self.postMessage({ type: 'SYNC_STATUS', phase, messagesReplayed, ...extra });
 }
 
-// ── JetStream replay ────────────────────────────────────────────────────────
-
-async function replayFromJetStream(codec, subject) {
-    // Caller (connectNats) sets sync.isReplaying = true around the whole loop.
-    const lastSeq = sync.lastProcessedSeqs[subject] || 0;
-
-    try {
-        const streamName = `WS_${nats.config.workspaceId.replace(/-/g, '_')}`;
-        const js = nats.conn.jetstream();
-        const jsm = await nats.conn.jetstreamManager();
-
-        let streamInfo;
-        try {
-            streamInfo = await jsm.streams.info(streamName);
-        } catch {
-            console.log(`[sync] no stream found for ${subject}, skipping replay`);
-            return;
-        }
-
-        const msgCount = Number(streamInfo.state.messages);
-        if (msgCount === 0) {
-            console.log(`[sync] stream empty for ${subject}, skipping replay`);
-            return;
-        }
-
-        console.log(`[sync] replaying from ${subject}`);
-        emitSyncStatus('replaying', 0, { totalMessages: msgCount });
-        setConnectionStatus('syncing');
-
-        const consumerOpts = lastSeq > 0
-            ? { filterSubjects: [subject], deliver_policy: 'by_start_sequence', opt_start_seq: lastSeq + 1 }
-            : { filterSubjects: [subject] };
-
-        const consumer = await js.consumers.get(streamName, consumerOpts);
-        const messages = await consumer.consume();
-        let replayed = 0;
-
-        for await (const raw of messages) {
-            let msg;
-            try { msg = codec.decode(raw.data); } catch { raw.ack(); replayed++; continue; }
-
-            if (msg._clientId === CLIENT_ID) { raw.ack(); replayed++; sync.lastProcessedSeqs[subject] = raw.seq; continue; }
-
-            if (msg.type === 'INSERT' && msg.table && msg.record) {
-                await handleMessage({
-                    type: 'INSERT', table: msg.table, record: msg.record,
-                    _noUndo: true, _fromNats: true, _isReplay: true,
-                    _nonce: msg._nonce, _hlc: msg._hlc,
-                });
-            } else if (msg.type === 'DELETE' && msg.table && msg.id !== undefined) {
-                await handleMessage({
-                    type: 'DELETE', table: msg.table, id: msg.id,
-                    _fromNats: true, _isReplay: true,
-                    _nonce: msg._nonce, _hlc: msg._hlc,
-                });
-            } else if (msg.type === 'RESET') {
-                for (const t of schemaTables) db.exec(`DELETE FROM ${t.name}`);
-                dbsp.reset();
-            }
-
-            raw.ack();
-            replayed++;
-            sync.lastProcessedSeqs[subject] = raw.seq;
-
-            if (replayed % REPLAY_PROGRESS_INTERVAL === 0) {
-                emitSyncStatus('replaying', replayed, { totalMessages: msgCount });
-            }
-            if (replayed >= msgCount) { messages.stop(); break; }
-        }
-
-        console.log(`[sync] replay complete for ${subject}: ${replayed} messages`);
-    } catch (e) {
-        console.warn(`[sync] replay error for ${subject} (falling back to live-only):`, e.message || e);
-    }
-}
+// ── Unified JetStream consumer (replay + live on one iterator) ─────────────
+//
+// One ordered pull consumer per channel subject, created with
+// `opt_start_seq = lastProcessedSeqs[s] + 1` so it naturally picks up where
+// the previous session left off. The SAME consumer serves both initial
+// catchup and ongoing live delivery — no gap between "replay ends" and
+// "live starts" because they are the same iterator.
+//
+// Phase transition: every JetStream message carries `raw.info.pending`, the
+// number of messages still pending delivery AFTER this one. When a consumer
+// sees `pending === 0` it has caught up with the stream as of right now.
+// Once ALL consumers (one per subject) have reported caught-up at least
+// once, a single global `finalizeReplay()` runs: flips `sync.isReplaying`
+// to false, rebuilds DBSP from SQLite, and drains the local-mutation queue.
+// After that, all consumers process messages as live (broadcasts fire,
+// authority sends resume, cross-tab sync is on).
+//
+// Consumers run in parallel via independent async loops but coordinate
+// on a shared `finalizeLatch` promise so concurrent messages landing on
+// different subjects during finalize await it rather than racing DBSP.
 
 async function finalizeReplay() {
     sync.isReplaying = false;
 
-    // Replay may contain RESET messages that wipe DBSP state (including join
-    // indexes). Rebuild DBSP from SQLite so all views — especially joins —
-    // have correct state before going live.
+    // Replay may have applied RESET messages that wiped DBSP state
+    // (including join indexes). Rebuild DBSP from SQLite so all views —
+    // especially joins — have correct state before going live.
     dbsp.reset();
     hydrateFromSQLite(schemaTables);
 
@@ -260,6 +205,210 @@ async function finalizeReplay() {
         console.log(`[sync] flushing ${sync.localMutationQueue.length} queued local mutations`);
         for (const msg of sync.localMutationQueue) await handleMessage(msg);
         sync.localMutationQueue = [];
+    }
+}
+
+// Shared coordination state for the consumer loops. Reset on each connect.
+const replayCoord = {
+    caughtUp: new Set(),
+    expected: 0,
+    finalizeLatch: null,
+};
+
+function resetReplayCoord(expectedSubjects) {
+    replayCoord.caughtUp = new Set();
+    replayCoord.expected = expectedSubjects;
+    replayCoord.finalizeLatch = null;
+    replayCoord.finalizeFailed = false;
+}
+
+async function markConsumerCaughtUp(subject) {
+    if (replayCoord.caughtUp.has(subject)) return;
+    replayCoord.caughtUp.add(subject);
+    console.log(`[sync] caught up on ${subject} (${replayCoord.caughtUp.size}/${replayCoord.expected})`);
+
+    if (replayCoord.caughtUp.size === replayCoord.expected && !replayCoord.finalizeLatch) {
+        // Kick off finalize once. Other consumer loops that encounter
+        // `finalizeLatch` at the top of their iteration will await it, so
+        // no message is processed concurrently with DBSP rebuild.
+        replayCoord.finalizeLatch = finalizeReplay().catch((e) => {
+            console.error('[sync] finalize failed:', e);
+            // Mark the failure so the post-await flush path below can
+            // skip the outbound queue drain — which would otherwise run
+            // against a half-reset DBSP (reset() succeeded, hydrate()
+            // threw) and emit corrupt deltas to the UI.
+            replayCoord.finalizeFailed = true;
+            // Unblock consumers even on failure — otherwise they hang forever.
+            sync.isReplaying = false;
+        });
+        await replayCoord.finalizeLatch;
+
+        if (replayCoord.finalizeFailed) {
+            // DBSP may be in an inconsistent state (finalize threw between
+            // reset and hydrate). The only safe recovery is a full
+            // reconnect — which tears down the consumers, wipes
+            // replayCoord, and re-runs the replay phase from scratch.
+            setConnectionStatus('disconnected');
+            if (nats.conn && !nats.conn.isClosed()) {
+                try { await nats.conn.close(); } catch { /* ignore */ }
+            }
+            return;
+        }
+
+        setConnectionStatus('connected');
+
+        // Flush per-channel offline queues: anything that was queued while
+        // we were offline now has a live connection to publish through.
+        if (nats.conn && !nats.conn.isClosed()) {
+            const codec = replayCoord.codec;
+            for (const s of nats.routing.subjects) {
+                const queue = nats.outboundQueues[s] || [];
+                for (const msg of queue) {
+                    nats.conn.publish(s, codec.encode(msg));
+                }
+                nats.outboundQueues[s] = [];
+            }
+            drainCausalQueue();
+        }
+    }
+}
+
+/**
+ * Process messages from a single consumer's iterator. Runs forever until
+ * the iterator closes (disconnect) or is explicitly stopped. Handles both
+ * the initial catch-up phase and ongoing live delivery — the `_isReplay`
+ * flag is derived from the global `sync.isReplaying` at processing time.
+ */
+async function processConsumer(codec, source) {
+    const { subject, consumer, messages } = source;
+
+    // Probe num_pending upfront so subjects that start fully caught up
+    // (empty stream, or lastProcessedSeqs already at the tip) still fire
+    // their "caught up" signal — the for-await below would otherwise block
+    // forever waiting for a first message that never comes.
+    //
+    // If the probe throws (network hiccup, transient broker error), we
+    // must still mark the subject caught up. Otherwise `caughtUp.size`
+    // never reaches `expected`, finalize never runs, `sync.isReplaying`
+    // stays true, and every local mutation silently queues into
+    // `sync.localMutationQueue` forever with no user-visible error.
+    // Assuming caught-up on probe failure is the safer degraded mode:
+    // the for-await will still deliver any messages that actually arrive.
+    try {
+        const info = await consumer.info();
+        if (info.num_pending === 0) {
+            await markConsumerCaughtUp(subject);
+        } else {
+            console.log(`[sync] replaying ${info.num_pending} pending from ${subject}`);
+            emitSyncStatus('replaying', 0, { totalMessages: info.num_pending });
+            setConnectionStatus('syncing');
+        }
+    } catch (e) {
+        console.warn(`[sync] consumer.info() failed for ${subject}, assuming caught up:`, e?.message || e);
+        await markConsumerCaughtUp(subject);
+    }
+
+    let processed = 0;
+
+    try {
+        for await (const raw of messages) {
+            if (!initialized) continue;
+
+            // Wait for any in-flight finalize to complete before processing
+            // more messages. Prevents the race where another consumer has
+            // triggered finalize (DBSP reset + hydrate) and this loop would
+            // otherwise write to DBSP concurrently.
+            if (replayCoord.finalizeLatch) {
+                await replayCoord.finalizeLatch;
+            }
+
+            let msg;
+            try { msg = codec.decode(raw.data); } catch {
+                raw.ack();
+                if (raw.info?.pending === 0) await markConsumerCaughtUp(subject);
+                continue;
+            }
+
+            // Skip our own outbound messages echoed back by the stream.
+            if (msg._clientId === CLIENT_ID) {
+                raw.ack();
+                sync.lastProcessedSeqs[subject] = raw.seq;
+                if (raw.info?.pending === 0) await markConsumerCaughtUp(subject);
+                continue;
+            }
+
+            // Nonce dedup — protects against any residual cross-path overlap
+            // (should be impossible with the unified consumer, but cheap).
+            if (msg._nonce && dedup(msg._nonce)) {
+                raw.ack();
+                sync.lastProcessedSeqs[subject] = raw.seq;
+                if (raw.info?.pending === 0) await markConsumerCaughtUp(subject);
+                continue;
+            }
+
+            // `sync.isReplaying` is the single source of truth for whether
+            // a message is in the catchup phase (queue, no broadcast) or
+            // live phase (broadcast + authority). It stays true until
+            // `finalizeReplay()` completes, at which point every subsequent
+            // message on every consumer flips to live behavior in lockstep.
+            //
+            // INVARIANT: `handleInsert` and `handleDelete` below MUST remain
+            // synchronous (no internal awaits). Their body runs atomically
+            // within a single microtask, which is what prevents a race
+            // where another consumer's `markConsumerCaughtUp` triggers
+            // finalize (dbsp.reset + hydrateFromSQLite) while this one
+            // has yielded mid-DBSP-mutation. If a future change needs to
+            // await inside handleInsert/handleDelete, the coordination
+            // model here must be revisited (e.g. by holding `finalizeLatch`
+            // open around the DBSP write itself).
+            const isReplay = sync.isReplaying;
+
+            if (msg.type === 'SCHEMA_MIGRATION' && msg.toVersion && msg.migrations) {
+                handleSchemaMigrationNotification(msg);
+            } else if (msg.type === 'INSERT' && msg.table && msg.record) {
+                await handleMessage({
+                    type: 'INSERT', table: msg.table, record: msg.record,
+                    _noUndo: true, _fromNats: true, _isReplay: isReplay,
+                    _nonce: msg._nonce, _hlc: msg._hlc,
+                });
+            } else if (msg.type === 'DELETE' && msg.table && msg.id !== undefined) {
+                await handleMessage({
+                    type: 'DELETE', table: msg.table, id: msg.id,
+                    _fromNats: true, _isReplay: isReplay,
+                    _nonce: msg._nonce, _hlc: msg._hlc,
+                });
+            } else if (msg.type === 'RESET') {
+                // RESET wipes SQLite + DBSP unconditionally. The live-only
+                // side effects (undo wipe, FULL_SYNC post, cross-tab broadcast)
+                // only fire once we are past the replay phase.
+                for (const t of schemaTables) db.exec(`DELETE FROM ${t.name}`);
+                dbsp.reset();
+                if (!isReplay) {
+                    undoStack.length = 0;
+                    self.postMessage({ type: 'UNDO_SIZE', size: 0 });
+                    self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
+                    broadcastReset(msg._nonce);
+                }
+            }
+
+            raw.ack();
+            processed++;
+            sync.lastProcessedSeqs[subject] = raw.seq;
+
+            if (isReplay && processed % REPLAY_PROGRESS_INTERVAL === 0) {
+                emitSyncStatus('replaying', processed);
+            }
+
+            // Primary replay → live transition signal: when the broker
+            // tells us the consumer has nothing left pending, this
+            // consumer has caught up with the stream's tail.
+            if (raw.info?.pending === 0) {
+                await markConsumerCaughtUp(subject);
+            }
+        }
+    } catch (e) {
+        // Natural termination (disconnect, stop, network error).
+        console.log(`[sync] consumer loop for ${subject} ended:`, e?.message || 'closed');
     }
 }
 
@@ -286,46 +435,52 @@ async function connectNats() {
         nats.conn = await connect(connectOpts);
         console.log(`[nats] connected to ${natsUrl}`);
 
-        // Replay historical messages from each channel sequentially.
-        // isReplaying wraps the entire loop so all channels finish before
-        // local mutations flush and DBSP rehydrates.
+        // Initialize replay phase — consumers will flip this to false once
+        // they've all reported caught-up via `markConsumerCaughtUp`.
         sync.isReplaying = true;
-        try {
-            for (const s of channelSubjects) {
-                await replayFromJetStream(codec, s);
-            }
-        } finally {
-            await finalizeReplay();
-        }
-
-        setConnectionStatus('connected');
-
-        // Flush per-channel offline queues
-        for (const s of channelSubjects) {
-            const queue = nats.outboundQueues[s] || [];
-            for (const msg of queue) {
-                nats.conn.publish(s, codec.encode(msg));
-            }
-            nats.outboundQueues[s] = [];
-        }
-        drainCausalQueue();
-
-        // Reset authority backoff on fresh connection
+        resetReplayCoord(channelSubjects.length);
+        replayCoord.codec = codec;
         authority.backoff = 0;
         authority.backoffUntil = 0;
 
-        // Subscribe to each channel's delta subject; each gets its own inbound loop.
-        nats.subs = [];
+        // Create one ordered pull consumer per channel subject, starting at
+        // the high-water mark recorded from the previous session (or from
+        // the beginning on first connect). Each consumer serves both the
+        // historical catchup AND ongoing live delivery — there is no
+        // separate "subscribe live" step.
+        const js = nats.conn.jetstream();
+        const streamName = `WS_${nats.config.workspaceId.replace(/-/g, '_')}`;
+        const sources = [];
         for (const s of channelSubjects) {
-            const sub = nats.conn.subscribe(s);
-            nats.subs.push(sub);
-            runInboundLoop(codec, sub);
+            const lastSeq = sync.lastProcessedSeqs[s] || 0;
+            const consumerOpts = lastSeq > 0
+                ? { filterSubjects: [s], deliver_policy: 'by_start_sequence', opt_start_seq: lastSeq + 1 }
+                : { filterSubjects: [s] };
+            const consumer = await js.consumers.get(streamName, consumerOpts);
+            const messages = await consumer.consume();
+            sources.push({ subject: s, consumer, messages });
         }
+
+        // Start all consumer loops in parallel. Each loop is long-lived and
+        // runs until disconnect. The first consumer loop whose `markConsumerCaughtUp`
+        // brings `caughtUp.size` up to `expected` is responsible for kicking
+        // off the single global `finalizeReplay()`.
+        //
+        // Fire-and-forget — internal try/catch in processConsumer covers
+        // the for-await. The `.catch()` here is a defensive trap for any
+        // synchronous throw between function entry and the first try block
+        // that would otherwise become an unhandled rejection in the Worker.
+        nats.subs = sources;
+        for (const source of sources) {
+            processConsumer(codec, source).catch((err) => {
+                console.error(`[sync] processConsumer(${source.subject}) unhandled:`, err);
+            });
+        }
+
+        // Other per-connection subscriptions (not the replay path).
         await subscribeAuthority(codec);
         subscribeGC(codec);
         startPeerAckTimer();
-
-        // Watch for disconnect
         watchDisconnect();
 
     } catch (e) {
@@ -338,52 +493,6 @@ async function connectNats() {
         }
         nats.conn = null;
         setTimeout(() => connectNats(), NATS_RECONNECT_RETRY_MS);
-    }
-}
-
-// ── Inbound NATS message loop ───────────────────────────────────────────────
-
-async function runInboundLoop(codec, sub) {
-    for await (const raw of sub) {
-        if (!initialized) continue;
-
-        let msg;
-        try { msg = codec.decode(raw.data); } catch { continue; }
-
-        if (msg._clientId === CLIENT_ID) continue;
-        if (msg._nonce && dedup(msg._nonce)) continue;
-
-        if (msg.type === 'SCHEMA_MIGRATION' && msg.toVersion && msg.migrations) {
-            handleSchemaMigrationNotification(msg);
-            continue;
-        }
-
-        if (msg.type === 'INSERT' && msg.table && msg.record) {
-            handleMessage({
-                type: 'INSERT', table: msg.table, record: msg.record,
-                _noUndo: true, _fromNats: true,
-                _nonce: msg._nonce, _hlc: msg._hlc,
-            });
-            continue;
-        }
-
-        if (msg.type === 'DELETE' && msg.table && msg.id) {
-            handleMessage({
-                type: 'DELETE', table: msg.table, id: msg.id,
-                _fromNats: true,
-                _nonce: msg._nonce, _hlc: msg._hlc,
-            });
-            continue;
-        }
-
-        if (msg.type === 'RESET') {
-            for (const t of schemaTables) db.exec(`DELETE FROM ${t.name}`);
-            dbsp.reset();
-            undoStack.length = 0;
-            self.postMessage({ type: 'UNDO_SIZE', size: 0 });
-            self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
-            broadcastReset(msg._nonce);
-        }
     }
 }
 
@@ -439,8 +548,20 @@ async function watchDisconnect() {
     const err = await nats.conn.closed();
     console.log('[nats] connection closed', err || '');
     setConnectionStatus('disconnected');
-    nats.conn = null;
+
+    // Best-effort cleanup of the per-subject ordered pull consumers. Each
+    // consumer has a 5-minute `inactive_threshold` on the NATS server, so
+    // leaking them on disconnect is survivable but wasteful. Across many
+    // reconnects it can exhaust the stream's `max_consumers`. We stop the
+    // iterator locally and call delete() on the server-side consumer.
+    const sources = nats.subs || [];
     nats.subs = [];
+    for (const source of sources) {
+        try { source.messages?.stop(); } catch { /* ignore */ }
+        try { await source.consumer?.delete(); } catch { /* ignore */ }
+    }
+
+    nats.conn = null;
     authority.sub = null;
     if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
     setTimeout(() => connectNats(), NATS_RECONNECT_DELAY_MS);
