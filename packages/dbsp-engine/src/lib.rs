@@ -189,7 +189,16 @@ pub struct ViewDef {
     pub name: String,
     #[serde(default)]
     pub source_table: String,
+    /// Post-pipeline natural key. For pipelines that include `aggregate`, this
+    /// is rewritten to the group-by column. Used by topN, applyDeltas, and
+    /// other operators that index the **view's output** records.
     pub id_key: String,
+    /// Source table's primary key — never rewritten by the pipeline. Used by
+    /// `apply_join` to dedup `left_index` records, which must be keyed on the
+    /// source row identity, not the post-aggregate group key. Defaults to
+    /// `id_key` for back-compat with old wire formats.
+    #[serde(default)]
+    pub source_id_key: Option<String>,
     pub pipeline: Vec<Operator>,
     #[serde(default)]
     pub monotonicity: Option<Monotonicity>,
@@ -867,7 +876,17 @@ fn apply_join(
     right_key: &str,
 ) -> Vec<Delta> {
     let mut output = Vec::new();
-    let id_key = view.def.id_key.clone();
+    // The left_index dedup must use the SOURCE table's primary key, not the
+    // view's post-pipeline `id_key` — otherwise a downstream `aggregate(...)`
+    // that rewrites `id_key` to the group-by column would collapse every row
+    // in a group down to one entry, dropping all but the latest source row.
+    // We fall back to `id_key` if the wire format didn't include
+    // `source_id_key`, which keeps the old test fixtures working.
+    let id_key = view
+        .def
+        .source_id_key
+        .clone()
+        .unwrap_or_else(|| view.def.id_key.clone());
 
     // Step 1: ∆L ⋈ R_old
     for ld in left_deltas {
@@ -994,10 +1013,23 @@ mod tests {
     }
 
     fn make_view(name: &str, source: &str, id_key: &str, pipeline: Vec<Operator>) -> ViewState {
+        // Default source_id_key to id_key for tests that don't have a
+        // pipeline rewriting it (filter, topN, etc.).
+        make_view_with_source_id(name, source, id_key, id_key, pipeline)
+    }
+
+    fn make_view_with_source_id(
+        name: &str,
+        source: &str,
+        source_id_key: &str,
+        id_key: &str,
+        pipeline: Vec<Operator>,
+    ) -> ViewState {
         ViewState::new(ViewDef {
             name: name.to_string(),
             source_table: source.to_string(),
             id_key: id_key.to_string(),
+            source_id_key: Some(source_id_key.to_string()),
             pipeline,
             monotonicity: None,
         })
@@ -1601,6 +1633,111 @@ mod tests {
     }
 
     // ── Integration Tests ───────────────────────────────────────────────────
+
+    /// Regression test for the spendVsBudget pattern in apps/example.
+    ///
+    /// `view(expenses).join(budgets, category, category).aggregate([category],
+    /// { spent: sum(amount), budget: max(budget) })` undersummed because the
+    /// join's `left_index` was deduping with the view's post-aggregate
+    /// `id_key` ('category') instead of the source table's PK ('id'). All but
+    /// the last expense per category got overwritten in left_index, and the
+    /// aggregate only saw a fraction of the deltas. The fix splits `id_key`
+    /// from `source_id_key` so the join can dedup on the source PK
+    /// independently of any downstream rewrite.
+    #[test]
+    fn test_join_then_aggregate_keeps_all_source_rows() {
+        let mut view = make_view_with_source_id(
+            "spend_vs_budget",
+            "expenses",
+            "id",        // source PK — never rewritten
+            "category",  // post-aggregate id_key
+            vec![
+                Operator::Join {
+                    right_table: "budgets".to_string(),
+                    left_key: "category".to_string(),
+                    right_key: "category".to_string(),
+                },
+                Operator::Aggregate {
+                    group_by: vec!["category".to_string()],
+                    aggregates: [
+                        ("spent".to_string(), AggDef { func: "sum".to_string(), field: "amount".to_string() }),
+                        ("budget".to_string(), AggDef { func: "max".to_string(), field: "budget".to_string() }),
+                    ].iter().cloned().collect(),
+                },
+            ],
+        );
+
+        // Five expenses for the same category should ALL be summed, not just
+        // the last one. The pre-fix bug truncated this to ~$500.
+        let deltas = vec![
+            make_delta("budgets",  json!({"id": 1, "category": "Food", "budget": 2000.0}), 1),
+            make_delta("expenses", json!({"id": 1, "category": "Food", "amount":  100.0}), 1),
+            make_delta("expenses", json!({"id": 2, "category": "Food", "amount":  200.0}), 1),
+            make_delta("expenses", json!({"id": 3, "category": "Food", "amount":  300.0}), 1),
+            make_delta("expenses", json!({"id": 4, "category": "Food", "amount":  400.0}), 1),
+            make_delta("expenses", json!({"id": 5, "category": "Food", "amount":  500.0}), 1),
+        ];
+
+        let output = process_view(&mut view, &deltas);
+        let last = output
+            .iter()
+            .rev()
+            .find(|d| d.weight == 1 && d.record.get("category").map_or(false, |v| v == "Food"))
+            .expect("expected at least one Food aggregate row");
+        assert_eq!(last.record["spent"], 1500.0, "all 5 expenses should be summed");
+        assert_eq!(last.record["budget"], 2000.0);
+    }
+
+    /// Same pattern, reversed insertion order: expenses first, budget last.
+    /// This is the seed-after-replay case that hit the bug in the live app.
+    #[test]
+    fn test_join_then_aggregate_budget_arrives_after_expenses() {
+        let mut view = make_view_with_source_id(
+            "spend_vs_budget",
+            "expenses",
+            "id",
+            "category",
+            vec![
+                Operator::Join {
+                    right_table: "budgets".to_string(),
+                    left_key: "category".to_string(),
+                    right_key: "category".to_string(),
+                },
+                Operator::Aggregate {
+                    group_by: vec!["category".to_string()],
+                    aggregates: [
+                        ("spent".to_string(), AggDef { func: "sum".to_string(), field: "amount".to_string() }),
+                        ("budget".to_string(), AggDef { func: "max".to_string(), field: "budget".to_string() }),
+                    ].iter().cloned().collect(),
+                },
+            ],
+        );
+
+        // Phase 1: 3 expenses arrive with no budget. Join's right_index is
+        // empty, so step 1 emits nothing — but step 2 must still record ALL
+        // 3 expenses in left_index (this is what the bug broke).
+        let phase1 = vec![
+            make_delta("expenses", json!({"id": 1, "category": "Food", "amount": 100.0}), 1),
+            make_delta("expenses", json!({"id": 2, "category": "Food", "amount": 200.0}), 1),
+            make_delta("expenses", json!({"id": 3, "category": "Food", "amount": 300.0}), 1),
+        ];
+        let _ = process_view(&mut view, &phase1);
+
+        // Phase 2: budget arrives. Join step 3 looks up left_index['Food']
+        // and should find all 3 expenses, emitting one merged delta per row.
+        let phase2 = vec![
+            make_delta("budgets", json!({"id": 1, "category": "Food", "budget": 2000.0}), 1),
+        ];
+        let output = process_view(&mut view, &phase2);
+
+        let last = output
+            .iter()
+            .rev()
+            .find(|d| d.weight == 1 && d.record.get("category").map_or(false, |v| v == "Food"))
+            .expect("expected at least one Food aggregate row after budget arrival");
+        assert_eq!(last.record["spent"], 600.0, "all 3 expenses should be summed when budget arrives");
+        assert_eq!(last.record["budget"], 2000.0);
+    }
 
     #[test]
     fn test_full_pipeline_filter_then_aggregate() {

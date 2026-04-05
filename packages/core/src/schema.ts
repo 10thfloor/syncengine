@@ -322,7 +322,13 @@ export interface ViewBuilder<TRecord> {
     readonly $tag: 'view';
     readonly $id: string;
     readonly $tableName: string;
+    /** Post-pipeline natural key. `aggregate([col])` rewrites this to the
+     *  group-by column so the store/worker can index aggregated output rows. */
     readonly $idKey: string;
+    /** Source table's primary key — never rewritten by the pipeline. The
+     *  worker uses it to dedup the join's `left_index`, which must key on
+     *  source-row identity, not the post-aggregate group key. */
+    readonly $sourceIdKey: string;
     readonly $pipeline: Operator[];
     readonly $sourceTables: string[];
     readonly $monotonicity: Monotonicity;
@@ -368,6 +374,7 @@ export interface ViewBuilder<TRecord> {
 function createViewBuilder<TRecord>(
     $id: string,
     tableName: string,
+    sourceIdKey: string,
     idKey: string,
     pipeline: Operator[],
     sourceTables?: string[],
@@ -379,27 +386,28 @@ function createViewBuilder<TRecord>(
         $id,
         $tableName: tableName,
         $idKey: idKey,
+        $sourceIdKey: sourceIdKey,
         $pipeline: pipeline,
         $sourceTables: tables,
         $monotonicity: classifyPipeline(pipeline),
         $record: undefined as never,
 
         filter(field, _op, value) {
-            return createViewBuilder<TRecord>($id, tableName, idKey, [
+            return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'filter', field: refOrString(field), eq: value },
             ], tables);
         },
 
         project(...fields) {
-            return createViewBuilder($id, tableName, idKey, [
+            return createViewBuilder($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'project', fields: fields.map(refOrString) },
             ], tables) as never;
         },
 
         topN(sortBy, limit, order = 'desc') {
-            return createViewBuilder<TRecord>($id, tableName, idKey, [
+            return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'topN', sort_by: refOrString(sortBy), limit, order },
             ], tables);
@@ -416,26 +424,30 @@ function createViewBuilder<TRecord>(
             //     that does not exist in the output record. All deltas for a
             //     global aggregate share the same synthetic id, which is
             //     exactly the semantics we want (one row replaces the other).
+            //
+            // Note: $sourceIdKey is left untouched — the join's left_index
+            // dedup downstream of an aggregate needs the source PK, not the
+            // group-by column.
             const aggIdKey = groupByNames.length === 1
                 ? groupByNames[0]
                 : groupByNames.length === 0
                     ? '$agg'
                     : idKey;
-            return createViewBuilder($id, tableName, aggIdKey, [
+            return createViewBuilder($id, tableName, sourceIdKey, aggIdKey, [
                 ...pipeline,
                 { op: 'aggregate', group_by: groupByNames, aggregates },
             ], tables) as never;
         },
 
         distinct() {
-            return createViewBuilder<TRecord>($id, tableName, idKey, [
+            return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'distinct', key: idKey },
             ], tables);
         },
 
         join(rightTable, leftKey, rightKey) {
-            return createViewBuilder($id, tableName, idKey, [
+            return createViewBuilder($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 {
                     op: 'join',
@@ -457,6 +469,7 @@ export function view<TTable extends AnyTable>(
     return createViewBuilder<TTable['$record']>(
         $id,
         sourceTable.$name,
+        sourceTable.$idKey,
         sourceTable.$idKey,
         [],
     );

@@ -787,11 +787,17 @@ async function handleInit(data) {
     const { schema } = data;
 
     // 1. DBSP Engine
+    //
+    // `source_id_key` is the source table's primary key — distinct from
+    // `id_key`, which may be rewritten by an aggregate op. The DBSP join's
+    // `left_index` dedup needs the source PK so a downstream aggregate
+    // doesn't collapse all rows in a group to one entry.
     dbsp = new DbspEngine(
         schema.views.map(v => ({
             name: v.name,
             source_table: v.source_table || v.tableName,
             id_key: v.id_key,
+            source_id_key: v.source_id_key || v.id_key,
             pipeline: v.pipeline,
         }))
     );

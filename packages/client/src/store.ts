@@ -66,6 +66,11 @@ interface InitMessage {
             tableName: string;
             source_table: string;
             id_key: string;
+            /** Source table's primary key — independent of `id_key`, which
+             *  may be rewritten by an `aggregate` op. The DBSP join uses
+             *  this for `left_index` dedup so a downstream aggregate doesn't
+             *  collapse all source rows in a group to a single entry. */
+            source_id_key: string;
             pipeline: unknown[];
             sourceTables: string[];
             monotonicity: string;
@@ -333,6 +338,7 @@ export function store<
             tableName: v.$tableName,
             source_table: v.$tableName,
             id_key: v.$idKey,
+            source_id_key: v.$sourceIdKey,
             pipeline: v.$pipeline,
             sourceTables: v.$sourceTables,
             monotonicity: v.$monotonicity,
