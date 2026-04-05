@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { SyncConfig } from '@syncengine/core';
+import type { SyncConfig } from '@syncengine/core/internal';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. SyncConfig auth fields

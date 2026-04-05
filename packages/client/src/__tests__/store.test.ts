@@ -11,7 +11,7 @@ import {
     count,
     extractMergeConfig,
 } from '@syncengine/core';
-import type { SyncConfig } from '@syncengine/core';
+import type { SyncConfig } from '@syncengine/core/internal';
 import type { StoreConfig } from '../store';
 
 describe('Store configuration and schema payload', () => {

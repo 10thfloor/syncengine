@@ -15,7 +15,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { table, id, real, text, view, sum, count, extractMergeConfig } from '@syncengine/core';
-import type { SyncConfig, ConnectionStatus } from '@syncengine/core';
+import type { SyncConfig, ConnectionStatus } from '@syncengine/core/internal';
 
 // ── Test fixtures ──────────────────────────────────────────────────────────
 

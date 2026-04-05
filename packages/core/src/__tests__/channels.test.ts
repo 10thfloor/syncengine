@@ -5,7 +5,7 @@ import {
     type ChannelConfig,
     type ChannelRouting,
 } from '../channels';
-import type { SyncConfig } from '../sync-types';
+import type { SyncConfig } from '../internal/sync-types';
 
 describe('Channel routing (tracer bullet)', () => {
     const workspaceId = 'acme';

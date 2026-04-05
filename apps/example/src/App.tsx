@@ -91,15 +91,15 @@ const CHANNELS: ChannelConfig[] = [
 ];
 
 // ── Store ───────────────────────────────────────────────────────────────────
+// No NATS URL, no workspace ID — the framework threads those through from
+// the runtime config (populated by `syncengine dev` for local dev, or from
+// SYNCENGINE_* env vars in production). User code only declares the
+// access-control `channels` and the schema.
 
 const db = store({
   tables: [expenses, budgets],
   views: [topExpenses, byCategory, totals, spendVsBudget],
-  sync: {
-    workspaceId: "demo",
-    natsUrl: "ws://localhost:9222",
-    channels: CHANNELS,
-  },
+  channels: CHANNELS,
   schemaVersion: 1,
   migrations,
 });
@@ -191,6 +191,7 @@ function ConflictPanel({
                   {c.strategy.toUpperCase()}
                 </span>
                 <button
+                  type="button"
                   className="conflict-dismiss"
                   onClick={() => onDismiss(realIndex)}
                 >

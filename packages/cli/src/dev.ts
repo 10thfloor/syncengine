@@ -40,6 +40,7 @@ import {
     stateDirFor,
     writePorts,
     writePids,
+    writeRuntimeConfig,
     readPids,
     isAlive,
     clearStateFiles,
@@ -215,6 +216,18 @@ async function boot(
     banner(`provisioning workspace '${DEMO_WORKSPACE_ID}'`);
     await provisionWorkspace(ports, DEMO_WORKSPACE_ID);
     note(`workspace '${DEMO_WORKSPACE_ID}' ready`);
+
+    // 5b. Write runtime.json so @syncengine/vite-plugin can populate
+    //     `virtual:syncengine/runtime-config` when Vite boots. This must
+    //     happen BEFORE vite starts — otherwise the plugin reads a missing
+    //     file and falls back to the static defaults.
+    writeRuntimeConfig(stateDir, {
+        workspaceId: DEMO_WORKSPACE_ID,
+        natsUrl: `ws://localhost:${ports.natsWs}`,
+        restateUrl: `http://localhost:${ports.restateIngress}`,
+        authToken: null,
+    });
+    note(`runtime.json → workspace=${DEMO_WORKSPACE_ID}, nats=ws://localhost:${ports.natsWs}`);
 
     // 6. Vite
     banner('starting vite dev server');

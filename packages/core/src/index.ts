@@ -16,15 +16,18 @@ export {
 } from './schema';
 export type { TableDef, ViewDef, MergeStrategy, Monotonicity } from './schema';
 
-// ── Sync types (protocol contracts) ────────────────────────────────────────
+// ── Connection / status (user-facing subset of the protocol types) ────────
+// SyncConfig itself is no longer user-facing — it lives in
+// @syncengine/core/internal and is threaded through by the framework via
+// virtual:syncengine/runtime-config. But the UI still needs to read the
+// connection + sync phase, so those stay on the public surface.
 export type {
-    SyncConfig,
     ConnectionStatus,
     SyncStatus,
     ConflictRecord,
-} from './sync-types';
+} from './internal/sync-types';
 
-// ── Channels ────────────────────────────────────────────────────────────────
+// ── Channels (user-facing access control boundaries) ──────────────────────
 export { buildChannelRouting, resolvePublishSubjects } from './channels';
 export type { ChannelConfig, ChannelRouting, RoutableMessage } from './channels';
 

@@ -8,7 +8,7 @@
  * without a circular dependency.
  */
 
-import type { ChannelConfig } from './channels';
+import type { ChannelConfig } from '../channels';
 
 // ── Sync configuration ─────────────────────────────────────────────────────
 

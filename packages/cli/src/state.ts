@@ -52,6 +52,25 @@ export interface Pids {
     children: Partial<Record<'nats' | 'restate' | 'workspace' | 'vite', number>>;
 }
 
+// ── Runtime config (consumed by @syncengine/vite-plugin) ─────────────────
+
+/**
+ * Framework-facing runtime configuration. Written by `syncengine dev`
+ * after the stack is ready, consumed by `@syncengine/vite-plugin` to
+ * populate `virtual:syncengine/runtime-config`. User code never sees
+ * these values directly — the client runtime reads them via the virtual
+ * module.
+ */
+export interface RuntimeConfig {
+    workspaceId: string;
+    /** WebSocket URL the browser connects to for NATS + JetStream. */
+    natsUrl: string;
+    /** Restate ingress HTTP URL for authority / workspace RPC. */
+    restateUrl: string;
+    /** Optional JWT for authenticated dev sessions (null in open dev). */
+    authToken: string | null;
+}
+
 // ── Paths ─────────────────────────────────────────────────────────────────
 
 export async function findRepoRoot(): Promise<string> {
@@ -79,6 +98,10 @@ function portsFilePath(stateDir: string): string {
 
 function pidsFilePath(stateDir: string): string {
     return join(stateDir, 'pids.json');
+}
+
+function runtimeConfigPath(stateDir: string): string {
+    return join(stateDir, 'runtime.json');
 }
 
 // ── Read/write ────────────────────────────────────────────────────────────
@@ -119,8 +142,17 @@ export function readPids(stateDir: string): Pids | null {
     }
 }
 
+export function writeRuntimeConfig(stateDir: string, config: RuntimeConfig): void {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(runtimeConfigPath(stateDir), JSON.stringify(config, null, 2));
+}
+
 export function clearStateFiles(stateDir: string): void {
-    for (const path of [portsFilePath(stateDir), pidsFilePath(stateDir)]) {
+    for (const path of [
+        portsFilePath(stateDir),
+        pidsFilePath(stateDir),
+        runtimeConfigPath(stateDir),
+    ]) {
         try { unlinkSync(path); } catch { /* ignore */ }
     }
 }

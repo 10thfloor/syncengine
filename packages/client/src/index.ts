@@ -8,9 +8,9 @@ export { store } from './store';
 export type {
     Store,
     StoreConfig,
-    // Re-exported from core via store.ts for backward compat
-    SyncConfig,
     ConnectionStatus,
     SyncStatus,
     ConflictRecord,
 } from './store';
+// SyncConfig is no longer user-facing — the framework threads NATS URLs
+// and workspace IDs through `virtual:syncengine/runtime-config` internally.

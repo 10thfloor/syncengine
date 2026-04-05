@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { table, id, real, text, view, sum, count, extractMergeConfig } from '../schema';
-import type { SyncConfig } from '../sync-types';
+import type { SyncConfig } from '../internal/sync-types';
 
 /**
  * E2E Contract Tests for dashboard-poc

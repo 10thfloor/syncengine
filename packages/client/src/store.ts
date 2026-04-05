@@ -7,14 +7,25 @@ import {
     type TableDef,
     type ViewDef,
     type Migration,
-    type SyncConfig,
+    type ChannelConfig,
     type ConnectionStatus,
     type SyncStatus,
     type ConflictRecord,
 } from '@syncengine/core';
+import type { SyncConfig } from '@syncengine/core/internal';
+// Runtime-config virtual module — populated at bundle time by
+// @syncengine/vite-plugin from .syncengine/dev/runtime.json (dev) or
+// SYNCENGINE_* env vars (prod). User code never touches these values.
+import {
+    workspaceId as runtimeWorkspaceId,
+    natsUrl as runtimeNatsUrl,
+    restateUrl as runtimeRestateUrl,
+    authToken as runtimeAuthToken,
+    // eslint-disable-next-line import/no-unresolved
+} from 'virtual:syncengine/runtime-config';
 
-// Re-export protocol types for consumers of @syncengine/client
-export type { SyncConfig, ConnectionStatus, SyncStatus, ConflictRecord };
+// Re-export connection/status types for React components
+export type { ConnectionStatus, SyncStatus, ConflictRecord };
 
 // ── Worker message types ────────────────────────────────────────────────────
 
@@ -76,7 +87,13 @@ function useExternalStore<T>(
 export interface StoreConfig {
     tables: TableDef[];
     views: ViewDef[];
-    sync?: SyncConfig;
+    /**
+     * Optional sync channels for access-control boundaries. Each channel
+     * maps a subset of tables to its own NATS subject so permissions can
+     * be enforced per-channel at the broker. If omitted, all tables sync
+     * through a single default channel.
+     */
+    channels?: ChannelConfig[];
     schemaVersion?: number;
     migrations?: Migration[];
 }
@@ -103,6 +120,19 @@ export interface Store {
 }
 
 export function store(config: StoreConfig): Store {
+    // Build the internal SyncConfig from the runtime virtual module. User
+    // code no longer supplies NATS URLs or workspace IDs — the framework
+    // threads them through via `virtual:syncengine/runtime-config` which
+    // @syncengine/vite-plugin populates from .syncengine/dev/runtime.json
+    // in dev and SYNCENGINE_* env vars in production.
+    const syncConfig: SyncConfig = {
+        workspaceId: runtimeWorkspaceId,
+        natsUrl: runtimeNatsUrl,
+        restateUrl: runtimeRestateUrl,
+        ...(runtimeAuthToken ? { authToken: runtimeAuthToken } : {}),
+        ...(config.channels ? { channels: config.channels } : {}),
+    };
+
     const schemaPayload: InitMessage['schema'] = {
         tables: config.tables.map(t => ({
             name: t.name,
@@ -138,7 +168,10 @@ export function store(config: StoreConfig): Store {
     const undoSubscribers = new Set<() => void>();
 
     // ── Connection status ───────────────────────────────────────────────────
-    let connectionStatus: ConnectionStatus = config.sync ? 'connecting' : 'off';
+    // Always start in 'connecting' now — the runtime config always resolves
+    // to a NATS URL (dev defaults or env-supplied prod values), so the
+    // worker will always attempt a connection.
+    let connectionStatus: ConnectionStatus = 'connecting';
     const connectionSubscribers = new Set<() => void>();
 
     // ── Sync status ─────────────────────────────────────────────────────────
@@ -192,8 +225,11 @@ export function store(config: StoreConfig): Store {
             // before sending INIT. Module workers with top-level await
             // may drop messages posted before evaluation completes.
             if (msg.type === 'WORKER_LOADED') {
-                const initMsg: InitMessage = { type: 'INIT', schema: schemaPayload };
-                if (config.sync) initMsg.sync = config.sync;
+                const initMsg: InitMessage = {
+                    type: 'INIT',
+                    schema: schemaPayload,
+                    sync: syncConfig,
+                };
                 if (config.schemaVersion) initMsg.schemaVersion = config.schemaVersion;
                 if (config.migrations) initMsg.migrations = config.migrations;
                 worker!.postMessage(initMsg);
