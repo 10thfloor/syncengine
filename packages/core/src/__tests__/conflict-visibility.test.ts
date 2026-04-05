@@ -8,7 +8,7 @@
  * 1. ConflictRecord — when LWW resolves, the engine emits the losing value
  *    alongside the winner so the UI can show a "conflict resolved" indicator.
  * 2. Conflict log — recent conflicts are stored per-table for UI display.
- * 3. Store hook — useConflicts() provides reactive access to the conflict log.
+ * 3. Store hook — db.use({...}).conflicts provides reactive access to the conflict log.
  * 4. Manual resolution — user can accept the loser's value, overriding LWW.
  */
 
@@ -142,7 +142,7 @@ describe('Engine merge resolution with conflict info', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. Store: useConflicts() hook
+// 4. Store: db.use({...}).conflicts
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('Store conflict tracking', () => {

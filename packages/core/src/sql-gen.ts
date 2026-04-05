@@ -2,7 +2,7 @@
 // Shared between store.ts (schema init) and migrations.ts (ALTER TABLE).
 // All identifier/value interpolation goes through escaping helpers.
 
-import type { TableDef } from './schema';
+import type { AnyTable, ColumnDef } from './schema';
 
 // ── Escaping ────────────────────────────────────────────────────────────────
 
@@ -33,23 +33,24 @@ export function escapeLiteral(val: string | number | boolean): string {
 
 // ── Table DDL ───────────────────────────────────────────────────────────────
 
-/** Generate CREATE TABLE IF NOT EXISTS from a TableDef */
-export function tableToCreateSQL(t: TableDef): string {
-    const cols = Object.entries(t.columns)
+/** Generate `CREATE TABLE IF NOT EXISTS` from a Table. */
+export function tableToCreateSQL(t: AnyTable): string {
+    const cols = Object.entries(t.$columns)
         .map(([name, col]) => {
-            // Primary keys get their full sqlType (e.g. "INTEGER PRIMARY KEY")
-            let sql = `${escapeIdentifier(name)} ${col.sqlType}`;
-            if (!col.nullable && !col.primaryKey) sql += ' NOT NULL';
+            const c = col as ColumnDef<unknown>;
+            // Primary keys carry their full sqlType (e.g. "INTEGER PRIMARY KEY")
+            let sql = `${escapeIdentifier(name)} ${c.sqlType}`;
+            if (!c.nullable && !c.primaryKey) sql += ' NOT NULL';
             return sql;
         })
         .join(', ');
-    return `CREATE TABLE IF NOT EXISTS ${escapeIdentifier(t.name)} (${cols});`;
+    return `CREATE TABLE IF NOT EXISTS ${escapeIdentifier(t.$name)} (${cols});`;
 }
 
-/** Generate INSERT OR REPLACE from a TableDef */
-export function tableToInsertSQL(t: TableDef): string {
-    const colNames = Object.keys(t.columns);
+/** Generate `INSERT OR REPLACE` from a Table. */
+export function tableToInsertSQL(t: AnyTable): string {
+    const colNames = Object.keys(t.$columns);
     const quoted = colNames.map(escapeIdentifier).join(', ');
     const placeholders = colNames.map(() => '?').join(', ');
-    return `INSERT OR REPLACE INTO ${escapeIdentifier(t.name)} (${quoted}) VALUES (${placeholders})`;
+    return `INSERT OR REPLACE INTO ${escapeIdentifier(t.$name)} (${quoted}) VALUES (${placeholders})`;
 }

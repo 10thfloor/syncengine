@@ -27,8 +27,8 @@ const expenses = table('expenses', {
     date: text({ merge: 'lww' }),
 });
 
-const byCategory = view('byCategory', expenses)
-    .aggregate(['category'], { total: sum('amount'), count: count() });
+const byCategory = view(expenses)
+    .aggregate([expenses.category], { total: sum(expenses.amount), count: count() });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. Worker → NATS: JetStream replay protocol
@@ -268,9 +268,9 @@ describe('Restate snapshot endpoint', () => {
 
 describe('Store sync status', () => {
 
-    it('store exposes useSyncStatus hook', () => {
-        // The store should expose a hook that provides detailed sync status
-        // beyond just connection status. This includes replay progress.
+    it('store exposes sync phase through db.use()', () => {
+        // db.use({...}).sync provides detailed sync status beyond just the
+        // connection status — it carries replay progress.
         const syncStatus = {
             phase: 'replaying' as 'idle' | 'replaying' | 'live',
             messagesReplayed: 150,
@@ -284,7 +284,7 @@ describe('Store sync status', () => {
 
     it('SYNC_STATUS messages update store sync state', () => {
         // The store should handle SYNC_STATUS messages from the worker
-        // and expose them via useSyncStatus
+        // and expose them via db.use({...}).sync
         const workerMessage = {
             type: 'SYNC_STATUS' as const,
             phase: 'live' as const,

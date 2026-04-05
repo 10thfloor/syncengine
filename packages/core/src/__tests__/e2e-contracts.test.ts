@@ -17,37 +17,45 @@ import type { SyncConfig } from '../internal/sync-types';
  * can understand each other's messages.
  */
 
-// ── Fixture: Sample schema ──────────────────────────────────────────────────
+// ── Fixture: Sample schema (Phase 2.5 DSL) ──────────────────────────────────
 
 const expenses = table('expenses', {
     id: id(),
-    amount: real({ merge: 'lww' }),
-    category: text({ merge: 'lww' }),
-    description: text({ merge: 'lww' }),
-    date: text({ merge: 'lww' }),
+    amount: real(),
+    category: text(),
+    description: text(),
+    date: text(),
 });
 
+// Every non-PK column opts out of merge, so extractMergeConfig returns null —
+// this is the "no merge annotations" case the contract tests exercise.
 const budgets = table('budgets', {
     id: id(),
-    category: text(),
-    limit: real(),
+    category: text({ merge: false }),
+    limit: real({ merge: false }),
 });
 
-const topExpenses = view('topExpenses', expenses).topN('amount', 5, 'desc');
-const byCategory = view('byCategory', expenses).aggregate(['category'], { total: sum('amount'), count: count() });
-const spendVsBudget = view('spendVsBudget', expenses).join(budgets, 'category', 'category');
+// In Phase 2.5, view() takes only the source table; the name is assigned by
+// the store at registration time (via the object-property key at db.use).
+// Aggregate/top-N/filter accept column refs (`expenses.amount`) instead of strings.
+const topExpenses = view(expenses).topN(expenses.amount, 5, 'desc');
+const byCategory = view(expenses).aggregate([expenses.category], {
+    total: sum(expenses.amount),
+    count: count(),
+});
+const spendVsBudget = view(expenses).join(budgets, expenses.category, budgets.category);
 
 // ── 1. Schema → Worker INIT contract ────────────────────────────────────────
 
 describe('Schema → Worker INIT contract', () => {
     it('tables have required fields for worker initialization', () => {
-        // Worker expects table defs to have: name, columns
-        expect(expenses.name).toBe('expenses');
-        expect(expenses._tag).toBe('table');
-        expect(Object.keys(expenses.columns)).toEqual(['id', 'amount', 'category', 'description', 'date']);
+        // Worker expects table defs to have: $name, $columns
+        expect(expenses.$name).toBe('expenses');
+        expect(expenses.$tag).toBe('table');
+        expect(Object.keys(expenses.$columns)).toEqual(['id', 'amount', 'category', 'description', 'date']);
 
         // Each column should have sqlType
-        for (const col of Object.values(expenses.columns)) {
+        for (const col of Object.values(expenses.$columns)) {
             expect(col.sqlType).toBeTruthy();
             expect(typeof col.nullable).toBe('boolean');
             expect(typeof col.primaryKey).toBe('boolean');
@@ -56,36 +64,39 @@ describe('Schema → Worker INIT contract', () => {
 
     it('primary key is correctly identified', () => {
         // id() should create a PRIMARY KEY column
-        const idCol = expenses.columns['id'];
+        const idCol = expenses.$columns['id'];
         expect(idCol.primaryKey).toBe(true);
         expect(idCol.sqlType).toBe('INTEGER PRIMARY KEY');
     });
 
     it('views have required fields for worker', () => {
-        // Worker expects: name, tableName, idKey, pipeline, sourceTables, monotonicity
-        expect(topExpenses.name).toBe('topExpenses');
-        expect(topExpenses._tag).toBe('view');
-        expect(topExpenses.tableName).toBe('expenses');
-        expect(topExpenses.idKey).toBe('id');
-        expect(topExpenses.pipeline).toHaveLength(1);
-        expect(topExpenses.pipeline[0]).toEqual({
+        // Worker expects: $tableName, $idKey, $pipeline, $sourceTables, $monotonicity.
+        // The view name itself is assigned by the store at registration time,
+        // so ViewBuilder carries only an opaque $id here.
+        expect(topExpenses.$tag).toBe('view');
+        expect(topExpenses.$id).toMatch(/^view_\d+$/);
+        expect(topExpenses.$tableName).toBe('expenses');
+        expect(topExpenses.$idKey).toBe('id');
+        expect(topExpenses.$pipeline).toHaveLength(1);
+        expect(topExpenses.$pipeline[0]).toEqual({
             op: 'topN',
             sort_by: 'amount',
             limit: 5,
             order: 'desc',
         });
-        expect(topExpenses.sourceTables).toEqual(['expenses']);
+        expect(topExpenses.$sourceTables).toEqual(['expenses']);
     });
 
     it('view monotonicity is classified for CALM routing', () => {
         // monotonic views go local only; non-monotonic route through authority
-        expect(topExpenses.monotonicity).toBe('non_monotonic');  // topN is non-monotonic
-        expect(byCategory.monotonicity).toBe('monotonic');       // aggregate is monotonic
-        expect(spendVsBudget.monotonicity).toBe('non_monotonic'); // join is non-monotonic
+        expect(topExpenses.$monotonicity).toBe('non_monotonic');  // topN is non-monotonic
+        expect(byCategory.$monotonicity).toBe('monotonic');       // aggregate is monotonic
+        expect(spendVsBudget.$monotonicity).toBe('non_monotonic'); // join is non-monotonic
     });
 
     it('merge configs are extractable for CRDV', () => {
-        // extractMergeConfig pulls merge: 'lww' annotations from schema
+        // extractMergeConfig pulls merge strategies from schema. In Phase 2.5
+        // every non-PK column defaults to 'lww' — no explicit annotation needed.
         const expensesMerge = extractMergeConfig(expenses);
         expect(expensesMerge).not.toBeNull();
         expect(expensesMerge!.table).toBe('expenses');
@@ -96,8 +107,9 @@ describe('Schema → Worker INIT contract', () => {
             date: 'lww',
         });
 
+        // `budgets` opts out of merge on every non-PK column, so extract returns null.
         const budgetsMerge = extractMergeConfig(budgets);
-        expect(budgetsMerge).toBeNull();  // no merge annotations
+        expect(budgetsMerge).toBeNull();
     });
 
     it('INIT message schema payload structure matches worker expectations', () => {
@@ -105,21 +117,21 @@ describe('Schema → Worker INIT contract', () => {
         const schemaPayload = {
             tables: [
                 {
-                    name: expenses.name,
-                    sql: `CREATE TABLE IF NOT EXISTS ${expenses.name} (...)`,
-                    insertSql: `INSERT OR REPLACE INTO ${expenses.name} (...) VALUES (...)`,
-                    columns: Object.keys(expenses.columns),
+                    name: expenses.$name,
+                    sql: `CREATE TABLE IF NOT EXISTS ${expenses.$name} (...)`,
+                    insertSql: `INSERT OR REPLACE INTO ${expenses.$name} (...) VALUES (...)`,
+                    columns: Object.keys(expenses.$columns),
                 },
             ],
             views: [
                 {
-                    name: topExpenses.name,
-                    tableName: topExpenses.tableName,
-                    source_table: topExpenses.tableName,  // snake_case for Rust
-                    id_key: topExpenses.idKey,            // snake_case for Rust
-                    pipeline: topExpenses.pipeline,
-                    sourceTables: topExpenses.sourceTables,
-                    monotonicity: topExpenses.monotonicity,
+                    name: 'topExpenses',                      // assigned at db.use
+                    tableName: topExpenses.$tableName,
+                    source_table: topExpenses.$tableName,     // snake_case for Rust
+                    id_key: topExpenses.$idKey,               // snake_case for Rust
+                    pipeline: topExpenses.$pipeline,
+                    sourceTables: topExpenses.$sourceTables,
+                    monotonicity: topExpenses.$monotonicity,
                 },
             ],
             mergeConfigs: [extractMergeConfig(expenses)].filter((c): c is NonNullable<typeof c> => c !== null),
@@ -562,35 +574,37 @@ describe('SyncConfig contract', () => {
 describe('CALM routing contract', () => {
     it('monotonic views route locally only', () => {
         // Views without topN, distinct, or join can be computed locally
-        expect(byCategory.monotonicity).toBe('monotonic');
+        expect(byCategory.$monotonicity).toBe('monotonic');
 
         // No need to send to authority
-        const shouldRouteToAuthority = byCategory.monotonicity === 'non_monotonic';
+        const shouldRouteToAuthority = byCategory.$monotonicity === 'non_monotonic';
         expect(shouldRouteToAuthority).toBe(false);
     });
 
     it('non-monotonic views route through authority', () => {
         // Views with topN, distinct, or join must go to server
-        expect(topExpenses.monotonicity).toBe('non_monotonic');
-        expect(spendVsBudget.monotonicity).toBe('non_monotonic');
+        expect(topExpenses.$monotonicity).toBe('non_monotonic');
+        expect(spendVsBudget.$monotonicity).toBe('non_monotonic');
 
         // These should route to authority
-        for (const view of [topExpenses, spendVsBudget]) {
-            const shouldRoute = view.monotonicity === 'non_monotonic';
+        for (const v of [topExpenses, spendVsBudget]) {
+            const shouldRoute = v.$monotonicity === 'non_monotonic';
             expect(shouldRoute).toBe(true);
         }
     });
 
     it('monotonicity metadata is sent in INIT', () => {
-        // Worker receives monotonicity for routing decisions
+        // Worker receives monotonicity for routing decisions. The view name
+        // is assigned at db.use time; here we hardcode it to exercise the
+        // INIT shape the store will build.
         const viewMeta = {
-            name: topExpenses.name,
-            monotonicity: topExpenses.monotonicity,
-            tableName: topExpenses.tableName,
-            id_key: topExpenses.idKey,
-            source_table: topExpenses.tableName,
-            pipeline: topExpenses.pipeline,
-            sourceTables: topExpenses.sourceTables,
+            name: 'topExpenses',
+            monotonicity: topExpenses.$monotonicity,
+            tableName: topExpenses.$tableName,
+            id_key: topExpenses.$idKey,
+            source_table: topExpenses.$tableName,
+            pipeline: topExpenses.$pipeline,
+            sourceTables: topExpenses.$sourceTables,
         };
 
         expect(viewMeta.monotonicity).toBe('non_monotonic');

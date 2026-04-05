@@ -1,4 +1,4 @@
-// ── Schema ──────────────────────────────────────────────────────────────────
+// ── Schema DSL ──────────────────────────────────────────────────────────────
 export {
     table,
     id,
@@ -13,8 +13,23 @@ export {
     min,
     max,
     extractMergeConfig,
+    isTable,
+    isView,
 } from './schema';
-export type { TableDef, ViewDef, MergeStrategy, Monotonicity } from './schema';
+export type {
+    Table,
+    TableMetadata,
+    AnyTable,
+    ColumnDef,
+    ColumnRef,
+    ViewBuilder,
+    Operator,
+    AggDef,
+    MergeStrategy,
+    Monotonicity,
+    InferRecord,
+    NumericKeys,
+} from './schema';
 
 // ── Connection / status (user-facing subset of the protocol types) ────────
 // SyncConfig itself is no longer user-facing — it lives in
@@ -29,7 +44,17 @@ export type {
 
 // ── Channels (user-facing access control boundaries) ──────────────────────
 export { buildChannelRouting, resolvePublishSubjects } from './channels';
-export type { ChannelConfig, ChannelRouting, RoutableMessage } from './channels';
+export type {
+    ChannelConfig,
+    ChannelNames,
+    ChannelSubject,
+    ChannelRouting,
+    RoutableMessage,
+} from './channels';
+
+// ── NATS ACL (pure helper, no caller wired in Phase 2.5) ──────────────────
+export { generateNatsPermissions } from './nats-acl';
+export type { RoleSpec, Roles, NatsPermissions } from './nats-acl';
 
 // ── HLC ─────────────────────────────────────────────────────────────────────
 export { hlcTick, hlcMerge, hlcPack, hlcCompare } from './hlc';

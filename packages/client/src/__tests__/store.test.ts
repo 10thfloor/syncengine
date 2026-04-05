@@ -10,168 +10,138 @@ import {
     sum,
     count,
     extractMergeConfig,
+    type ChannelConfig,
 } from '@syncengine/core';
-import type { SyncConfig } from '@syncengine/core/internal';
-import type { StoreConfig } from '../store';
+import { validateStoreConfig, type StoreConfig, type SeedMap } from '../store';
 
-describe('Store configuration and schema payload', () => {
-    describe('SyncConfig interface', () => {
-        it('has required workspaceId', () => {
-            const config: SyncConfig = {
-                workspaceId: 'ws-123',
-            };
-            expect(config.workspaceId).toBe('ws-123');
-        });
+// ── Fixtures ────────────────────────────────────────────────────────────────
+//
+// store.test is a unit test over the Phase 2.5 config surface:
+//   - StoreConfig shape (tables, views, channels?, seed?)
+//   - validateStoreConfig() fail-fast rules
+//   - schema payload construction from $-prefixed metadata
+//
+// The full `store(...)` factory talks to a Worker and a virtual runtime-config
+// module, so it's exercised in integration tests and the live example app
+// instead of here.
 
-        it('supports optional natsUrl', () => {
-            const config: SyncConfig = {
-                workspaceId: 'ws-123',
-                natsUrl: 'ws://localhost:9222',
-            };
-            expect(config.natsUrl).toBe('ws://localhost:9222');
-        });
+describe('Phase 2.5 store config', () => {
+    describe('StoreConfig shape', () => {
+        it('accepts a minimal config with tables and views', () => {
+            const users = table('users', { id: id(), name: text() });
+            const allUsers = view(users);
 
-        it('supports optional restateUrl', () => {
-            const config: SyncConfig = {
-                workspaceId: 'ws-123',
-                restateUrl: 'http://localhost:8080',
-            };
-            expect(config.restateUrl).toBe('http://localhost:8080');
-        });
-
-        it('supports both optional URLs', () => {
-            const config: SyncConfig = {
-                workspaceId: 'ws-123',
-                natsUrl: 'ws://custom-nats:9222',
-                restateUrl: 'http://custom-restate:8080',
-            };
-            expect(config.natsUrl).toBe('ws://custom-nats:9222');
-            expect(config.restateUrl).toBe('http://custom-restate:8080');
-        });
-    });
-
-    describe('StoreConfig validation', () => {
-        it('accepts valid config with tables and views', () => {
-            const t = table('users', { id: id(), name: text() });
-            const v = view('all_users', t);
-
-            const config: StoreConfig = {
-                tables: [t],
-                views: [v],
+            const config: StoreConfig<readonly [typeof users]> = {
+                tables: [users] as const,
+                views: [allUsers],
             };
 
             expect(config.tables).toHaveLength(1);
             expect(config.views).toHaveLength(1);
-            expect(config.sync).toBeUndefined();
-        });
-
-        it('accepts config with sync settings', () => {
-            const t = table('users', { id: id() });
-            const v = view('all_users', t);
-
-            const config: StoreConfig = {
-                tables: [t],
-                views: [v],
-                sync: {
-                    workspaceId: 'ws-123',
-                },
-            };
-
-            expect(config.sync?.workspaceId).toBe('ws-123');
+            expect(config.channels).toBeUndefined();
+            expect(config.seed).toBeUndefined();
         });
 
         it('accepts multiple tables', () => {
             const users = table('users', { id: id() });
             const posts = table('posts', { id: id() });
 
-            const config: StoreConfig = {
-                tables: [users, posts],
+            const config: StoreConfig<readonly [typeof users, typeof posts]> = {
+                tables: [users, posts] as const,
                 views: [],
             };
 
             expect(config.tables).toHaveLength(2);
         });
 
-        it('accepts multiple views on same table', () => {
+        it('accepts multiple views on the same table', () => {
             const users = table('users', { id: id(), age: integer() });
 
-            const config: StoreConfig = {
-                tables: [users],
+            const config: StoreConfig<readonly [typeof users]> = {
+                tables: [users] as const,
                 views: [
-                    view('all_users', users),
-                    view('adults', users).filter('age', 'eq', 18),
+                    view(users),
+                    view(users).filter(users.age, 'eq', 18),
                 ],
             };
 
             expect(config.views).toHaveLength(2);
+            expect(config.views[0].$monotonicity).toBe('unknown');   // empty pipeline
+            expect(config.views[1].$monotonicity).toBe('monotonic'); // filter only
         });
 
         it('accepts empty views', () => {
             const t = table('users', { id: id() });
 
-            const config: StoreConfig = {
-                tables: [t],
+            const config: StoreConfig<readonly [typeof t]> = {
+                tables: [t] as const,
                 views: [],
             };
 
             expect(config.views).toHaveLength(0);
         });
+
+        it('accepts channels and seed', () => {
+            const budgets = table('budgets', { id: id(), limit: real() });
+            const channels: readonly ChannelConfig[] = [
+                { name: 'config', tables: [budgets] },
+            ] as const;
+            const seed: SeedMap<readonly [typeof budgets]> = {
+                budgets: [{ limit: 1000 }, { limit: 2000 }],
+            };
+
+            const config: StoreConfig<readonly [typeof budgets], typeof channels> = {
+                tables: [budgets] as const,
+                views: [],
+                channels,
+                seed,
+            };
+
+            expect(config.channels).toHaveLength(1);
+            expect(config.seed?.budgets).toHaveLength(2);
+        });
     });
 
-    describe('schema payload generation from StoreConfig', () => {
-        it('generates correct table metadata', () => {
-            const t = table('users', {
+    describe('schema metadata accessible via $-prefixed fields', () => {
+        it('table exposes $name, $tag, $columns, $idKey', () => {
+            const users = table('users', {
                 id: id(),
                 name: text(),
                 age: integer(),
             });
 
-            const config: StoreConfig = {
-                tables: [t],
-                views: [],
-            };
-
-            // We can't directly test tableToSQL since it's private,
-            // but we can verify the table is properly structured
-            expect(config.tables[0].name).toBe('users');
-            expect(Object.keys(config.tables[0].columns)).toEqual([
-                'id',
-                'name',
-                'age',
-            ]);
+            expect(users.$name).toBe('users');
+            expect(users.$tag).toBe('table');
+            expect(Object.keys(users.$columns)).toEqual(['id', 'name', 'age']);
+            expect(users.$idKey).toBe('id');
         });
 
         it('preserves column information through config', () => {
-            const t = table('products', {
+            const products = table('products', {
                 id: id(),
                 price: real(),
                 in_stock: boolean(),
             });
 
-            const config: StoreConfig = {
-                tables: [t],
+            const config: StoreConfig<readonly [typeof products]> = {
+                tables: [products] as const,
                 views: [],
             };
 
-            const tbl = config.tables[0];
-            expect(tbl.columns.id.primaryKey).toBe(true);
-            expect(tbl.columns.price.sqlType).toBe('REAL');
-            expect(tbl.columns.in_stock.sqlType).toBe('INTEGER');
+            const t = config.tables[0];
+            expect(t.$columns.id.primaryKey).toBe(true);
+            expect(t.$columns.price.sqlType).toBe('REAL');
+            expect(t.$columns.in_stock.sqlType).toBe('INTEGER');
         });
 
-        it('includes merge configs in payload', () => {
-            const t = table('events', {
+        it('includes merge configs in payload — with lww defaults', () => {
+            const events = table('events', {
                 id: id(),
                 count: integer({ merge: 'add' }),
                 lastSeen: integer({ merge: 'lww' }),
             });
 
-            const config: StoreConfig = {
-                tables: [t],
-                views: [],
-            };
-
-            const mergeConfig = extractMergeConfig(config.tables[0]);
+            const mergeConfig = extractMergeConfig(events);
             expect(mergeConfig).not.toBeNull();
             expect(mergeConfig?.table).toBe('events');
             expect(mergeConfig?.fields).toEqual({
@@ -180,18 +150,18 @@ describe('Store configuration and schema payload', () => {
             });
         });
 
-        it('filters out tables without merge config', () => {
-            const withMerge = table('synced', {
+        it('filters out tables whose every non-PK column opts out', () => {
+            const synced = table('synced', {
                 id: id(),
                 value: integer({ merge: 'max' }),
             });
-            const withoutMerge = table('local', {
+            const local = table('local', {
                 id: id(),
-                data: text(),
+                data: text({ merge: false }),
             });
 
-            const config: StoreConfig = {
-                tables: [withMerge, withoutMerge],
+            const config: StoreConfig<readonly [typeof synced, typeof local]> = {
+                tables: [synced, local] as const,
                 views: [],
             };
 
@@ -204,56 +174,50 @@ describe('Store configuration and schema payload', () => {
         });
 
         it('preserves view pipelines through config', () => {
-            const t = table('sales', {
+            const sales = table('sales', {
                 id: id(),
                 amount: integer(),
                 category: text(),
             });
 
-            const viewDef = view('high_value', t)
-                .filter('amount', 'eq', 1000)
-                .aggregate(['category'], { total: sum('amount') });
+            const highValue = view(sales)
+                .filter(sales.amount, 'eq', 1000)
+                .aggregate([sales.category], { total: sum(sales.amount) });
 
-            const config: StoreConfig = {
-                tables: [t],
-                views: [viewDef],
+            const config: StoreConfig<readonly [typeof sales]> = {
+                tables: [sales] as const,
+                views: [highValue],
             };
 
             const v = config.views[0];
-            expect(v.name).toBe('high_value');
-            expect(v.pipeline).toHaveLength(2);
-            expect(v.pipeline[0].op).toBe('filter');
-            expect(v.pipeline[1].op).toBe('aggregate');
-            expect(v.monotonicity).toBe('monotonic');
+            expect(v.$pipeline).toHaveLength(2);
+            expect(v.$pipeline[0].op).toBe('filter');
+            expect(v.$pipeline[1].op).toBe('aggregate');
+            expect(v.$monotonicity).toBe('monotonic');
         });
 
         it('tracks source tables in view definitions', () => {
             const users = table('users', { id: id() });
             const posts = table('posts', { id: id(), userId: integer() });
 
-            const joined = view('user_posts', users).join(
-                posts,
-                'id',
-                'userId',
-            );
+            const joined = view(users).join(posts, users.id, posts.userId);
 
-            const config: StoreConfig = {
-                tables: [users, posts],
+            const config: StoreConfig<readonly [typeof users, typeof posts]> = {
+                tables: [users, posts] as const,
                 views: [joined],
             };
 
             const v = config.views[0];
-            expect(v.sourceTables).toContain('users');
-            expect(v.sourceTables).toContain('posts');
+            expect(v.$sourceTables).toContain('users');
+            expect(v.$sourceTables).toContain('posts');
         });
 
-        it('handles complex schema with multiple tables and views', () => {
+        it('handles a complex schema with multiple tables and views', () => {
             const users = table('users', {
                 id: id(),
-                name: text({ merge: 'lww' }),
+                name: text(),
                 score: integer({ merge: 'max' }),
             });
-
             const posts = table('posts', {
                 id: id(),
                 userId: integer(),
@@ -261,22 +225,13 @@ describe('Store configuration and schema payload', () => {
                 likes: integer({ merge: 'add' }),
             });
 
-            const allUsers = view('all_users', users);
-            const userTopPosts = view('top_posts_per_user', posts)
-                .topN('likes', 5)
-                .aggregate(['userId'], { total_likes: sum('likes') });
-            const userJoinPost = view('users_with_posts', users).join(
-                posts,
-                'id',
-                'userId',
-            );
+            const allUsers = view(users);
+            const topPosts = view(posts).topN(posts.likes, 5);
+            const usersWithPosts = view(users).join(posts, users.id, posts.userId);
 
-            const config: StoreConfig = {
-                tables: [users, posts],
-                views: [allUsers, userTopPosts, userJoinPost],
-                sync: {
-                    workspaceId: 'ws-demo',
-                },
+            const config: StoreConfig<readonly [typeof users, typeof posts]> = {
+                tables: [users, posts] as const,
+                views: [allUsers, topPosts, usersWithPosts],
             };
 
             expect(config.tables).toHaveLength(2);
@@ -285,117 +240,176 @@ describe('Store configuration and schema payload', () => {
             const mergeConfigs = config.tables
                 .map(extractMergeConfig)
                 .filter((c): c is NonNullable<typeof c> => c !== null);
+            // Both tables carry at least one non-PK column → both have merge configs.
             expect(mergeConfigs).toHaveLength(2);
-
-            expect(config.sync?.workspaceId).toBe('ws-demo');
         });
     });
 
     describe('view properties accessible through config', () => {
-        it('view has correct name and table reference', () => {
+        it('view exposes $tableName matching the source table', () => {
             const products = table('products', { id: id() });
-            const v = view('inventory', products);
+            const v = view(products);
 
-            expect(v.name).toBe('inventory');
-            expect(v.tableName).toBe('products');
+            expect(v.$tag).toBe('view');
+            expect(v.$tableName).toBe('products');
         });
 
-        it('view idKey matches table primary key', () => {
+        it('view $idKey matches the source table primary key', () => {
             const items = table('items', { itemId: id(), label: text() });
-            const v = view('all_items', items);
+            const v = view(items);
 
-            expect(v.idKey).toBe('itemId');
+            expect(v.$idKey).toBe('itemId');
         });
 
-        it('view with aggregate has updated idKey', () => {
+        it('aggregate with single group-by rewrites $idKey to the group column', () => {
             const sales = table('sales', {
                 id: id(),
                 region: text(),
                 amount: integer(),
             });
 
-            const byRegion = view('sales_by_region', sales).aggregate(
-                ['region'],
-                { total: sum('amount') },
-            );
+            const byRegion = view(sales).aggregate([sales.region], {
+                total: sum(sales.amount),
+            });
 
-            expect(byRegion.idKey).toBe('region');
+            expect(byRegion.$idKey).toBe('region');
         });
 
-        it('monotonicity is accessible through view', () => {
+        it('monotonicity classifications match the pipeline', () => {
             const events = table('events', {
                 id: id(),
                 value: integer(),
             });
 
-            const filtered = view('filtered', events).filter(
-                'value',
-                'eq',
-                10,
-            );
-            const topN = view('top', events).topN('value', 5);
+            const filtered = view(events).filter(events.value, 'eq', 10);
+            const topN = view(events).topN(events.value, 5);
+            const aggregated = view(events).aggregate([events.value], {
+                count: count(),
+            });
+            const distinct = view(events).distinct();
 
-            expect(filtered.monotonicity).toBe('monotonic');
-            expect(topN.monotonicity).toBe('non_monotonic');
+            expect(filtered.$monotonicity).toBe('monotonic');
+            expect(topN.$monotonicity).toBe('non_monotonic');
+            expect(aggregated.$monotonicity).toBe('monotonic');
+            expect(distinct.$monotonicity).toBe('non_monotonic');
         });
     });
 
-    describe('schema composition', () => {
-        it('supports building schema incrementally', () => {
-            const users = table('users', {
-                id: id(),
-                name: text(),
-            });
-            const posts = table('posts', {
-                id: id(),
-                userId: integer(),
-                content: text(),
-            });
+    // ── validateStoreConfig() ───────────────────────────────────────────────
+    //
+    // validateStoreConfig runs every fail-fast rule declared at the top of
+    // store.ts. These tests lock each rule independently so a regression in
+    // any branch is caught here instead of leaking into live runtime failures.
 
-            const views = [
-                view('all_users', users),
-                view('user_posts_count', posts).aggregate(
-                    ['userId'],
-                    { count: count() },
-                ),
-            ];
-
-            const config: StoreConfig = {
-                tables: [users, posts],
-                views,
-            };
-
-            expect(config.tables).toHaveLength(2);
-            expect(config.views).toHaveLength(2);
+    describe('validateStoreConfig', () => {
+        it('accepts a valid minimal config', () => {
+            const users = table('users', { id: id() });
+            expect(() =>
+                validateStoreConfig({ tables: [users], views: [] }),
+            ).not.toThrow();
         });
 
-        it('table names must be unique in config', () => {
-            // This test documents the expectation that duplicate table names
-            // would be problematic (though not type-checked)
-            const t1 = table('items', { id: id() });
-            const t2 = table('items', { id: id() });
-
-            const config: StoreConfig = {
-                tables: [t1, t2],
-                views: [],
-            };
-
-            // Both are in config but represent the same table name
-            expect(config.tables[0].name).toBe(config.tables[1].name);
+        it('rejects duplicate table names', () => {
+            const a = table('items', { id: id() });
+            const b = table('items', { id: id() });
+            expect(() =>
+                validateStoreConfig({ tables: [a, b], views: [] }),
+            ).toThrow(/Duplicate table name/);
         });
 
-        it('view names should be unique in config', () => {
-            const t = table('users', { id: id() });
-            const v1 = view('all', t);
-            const v2 = view('all', t);
+        it('rejects a view that references an unknown table', () => {
+            const known = table('known', { id: id() });
+            const orphan = table('orphan', { id: id() });
+            const v = view(orphan);
 
-            const config: StoreConfig = {
-                tables: [t],
-                views: [v1, v2],
+            expect(() =>
+                validateStoreConfig({ tables: [known], views: [v] }),
+            ).toThrow(/unknown table/);
+        });
+
+        it('rejects a channel that references an unknown table', () => {
+            const tasks = table('tasks', { id: id() });
+            const orphan = table('orphan', { id: id() });
+
+            expect(() =>
+                validateStoreConfig({
+                    tables: [tasks],
+                    views: [],
+                    channels: [{ name: 'team', tables: [tasks, orphan] }],
+                }),
+            ).toThrow(/unknown table/);
+        });
+
+        it('rejects a table not covered by any channel (when channels set)', () => {
+            const tasks = table('tasks', { id: id() });
+            const notes = table('notes', { id: id() });
+
+            expect(() =>
+                validateStoreConfig({
+                    tables: [tasks, notes],
+                    views: [],
+                    channels: [{ name: 'team', tables: [tasks] }],
+                }),
+            ).toThrow(/not mapped to any channel/);
+        });
+
+        it('rejects duplicate channel names', () => {
+            const t = table('t', { id: id() });
+            expect(() =>
+                validateStoreConfig({
+                    tables: [t],
+                    views: [],
+                    channels: [
+                        { name: 'dup', tables: [t] },
+                        { name: 'dup', tables: [t] },
+                    ],
+                }),
+            ).toThrow(/Duplicate channel name/);
+        });
+
+        it('rejects seed keys that do not match any table', () => {
+            const tasks = table('tasks', { id: id(), title: text() });
+            expect(() =>
+                validateStoreConfig({
+                    tables: [tasks],
+                    views: [],
+                    // cast: SeedMap is generic; this intentionally bypasses
+                    // the compile-time check to exercise the runtime guard.
+                    seed: { bogus: [{ title: 'nope' }] } as unknown as SeedMap<readonly [typeof tasks]>,
+                }),
+            ).toThrow(/does not correspond to any table/);
+        });
+    });
+
+    // ── SeedMap type-level guarantees ──────────────────────────────────────
+    //
+    // SeedMap is a mapped type over config.tables. These checks don't assert
+    // runtime behavior — they exist so that tsc flags regressions in the
+    // per-table record shape expected by `store({ seed: {...} })`.
+
+    describe('SeedMap type guarantees', () => {
+        it('SeedMap key matches table $name', () => {
+            const budgets = table('budgets', { id: id(), limit: real() });
+            const seed: SeedMap<readonly [typeof budgets]> = {
+                budgets: [{ limit: 1000 }],
             };
+            expect(seed.budgets).toHaveLength(1);
+        });
 
-            // Both have same name; config allows it but the worker would need to handle
-            expect(config.views[0].name).toBe(config.views[1].name);
+        it('SeedMap allows omitting the primary key', () => {
+            const t = table('t', { id: id(), name: text() });
+            const seed: SeedMap<readonly [typeof t]> = {
+                t: [{ name: 'a' }, { name: 'b' }],
+            };
+            expect(seed.t).toHaveLength(2);
+        });
+
+        it('SeedMap allows providing the primary key explicitly', () => {
+            const t = table('t', { id: id(), name: text() });
+            const seed: SeedMap<readonly [typeof t]> = {
+                t: [{ id: 1, name: 'a' }],
+            };
+            expect(seed.t?.[0].id).toBe(1);
         });
     });
 });

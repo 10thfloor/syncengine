@@ -4,13 +4,17 @@
 export * from '@syncengine/core';
 
 // ── Store (React hooks + worker wiring) ──────────────────────────────────
-export { store } from './store';
+export { store, validateStoreConfig } from './store';
 export type {
     Store,
     StoreConfig,
+    SeedMap,
+    UseResult,
     ConnectionStatus,
     SyncStatus,
     ConflictRecord,
 } from './store';
-// SyncConfig is no longer user-facing — the framework threads NATS URLs
-// and workspace IDs through `virtual:syncengine/runtime-config` internally.
+
+// ── React provider ───────────────────────────────────────────────────────
+export { StoreProvider, useStore } from './react';
+export type { StoreProviderProps } from './react';

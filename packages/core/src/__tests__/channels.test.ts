@@ -5,9 +5,19 @@ import {
     type ChannelConfig,
     type ChannelRouting,
 } from '../channels';
+import { table, id, text } from '../schema';
 import type { SyncConfig } from '../internal/sync-types';
 
-describe('Channel routing (tracer bullet)', () => {
+// Test fixtures — Table refs, not strings
+const tasks = table('tasks', { id: id(), title: text() });
+const announcements = table('announcements', { id: id(), body: text() });
+const prs = table('prs', { id: id(), title: text() });
+const shared = table('shared', { id: id(), label: text() });
+const t1 = table('t1', { id: id() });
+const t2 = table('t2', { id: id() });
+const t3 = table('t3', { id: id() });
+
+describe('Channel routing (Phase 2.5)', () => {
     const workspaceId = 'acme';
 
     describe('buildChannelRouting', () => {
@@ -24,10 +34,10 @@ describe('Channel routing (tracer bullet)', () => {
 
         it('multi-channel mode: each channel maps to ws.{id}.ch.{name}.deltas', () => {
             const channels: ChannelConfig[] = [
-                { name: 'public', tables: ['announcements'] },
-                { name: 'team.eng', tables: ['tasks', 'prs'] },
+                { name: 'public', tables: [announcements] },
+                { name: 'team.eng', tables: [tasks, prs] },
             ];
-            const sync: SyncConfig = { workspaceId, channels };
+            const sync = { workspaceId, channels };
             const routing = buildChannelRouting(sync, ['announcements', 'tasks', 'prs']);
 
             expect(routing.subjects).toEqual([
@@ -79,7 +89,7 @@ describe('Channel routing (tracer bullet)', () => {
 
     describe('buildChannelRouting edge cases', () => {
         it('empty channels array falls back to legacy mode', () => {
-            const sync: SyncConfig = { workspaceId, channels: [] };
+            const sync = { workspaceId, channels: [] };
             const routing = buildChannelRouting(sync, ['tasks']);
             expect(routing.subjects).toEqual([`ws.${workspaceId}.deltas`]);
             expect(routing.tableToSubject).toEqual({
@@ -88,11 +98,11 @@ describe('Channel routing (tracer bullet)', () => {
         });
 
         it('double-assigned table: later channel wins', () => {
-            const sync: SyncConfig = {
+            const sync = {
                 workspaceId,
                 channels: [
-                    { name: 'a', tables: ['shared'] },
-                    { name: 'b', tables: ['shared'] },
+                    { name: 'a', tables: [shared] },
+                    { name: 'b', tables: [shared] },
                 ],
             };
             const routing = buildChannelRouting(sync, ['shared']);
@@ -100,9 +110,9 @@ describe('Channel routing (tracer bullet)', () => {
         });
 
         it('unassigned table: absent from tableToSubject (will not sync)', () => {
-            const sync: SyncConfig = {
+            const sync = {
                 workspaceId,
-                channels: [{ name: 'public', tables: ['announcements'] }],
+                channels: [{ name: 'public', tables: [announcements] }],
             };
             const routing = buildChannelRouting(sync, ['announcements', 'orphan']);
             expect(routing.tableToSubject).toHaveProperty('announcements');
@@ -110,12 +120,12 @@ describe('Channel routing (tracer bullet)', () => {
         });
 
         it('channel subjects preserve declaration order', () => {
-            const sync: SyncConfig = {
+            const sync = {
                 workspaceId,
                 channels: [
-                    { name: 'z', tables: ['t1'] },
-                    { name: 'a', tables: ['t2'] },
-                    { name: 'm', tables: ['t3'] },
+                    { name: 'z', tables: [t1] },
+                    { name: 'a', tables: [t2] },
+                    { name: 'm', tables: [t3] },
                 ],
             };
             const routing = buildChannelRouting(sync, ['t1', 't2', 't3']);
