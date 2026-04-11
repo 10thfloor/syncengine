@@ -1,6 +1,68 @@
 (function initSyncengineDevtools() {
     'use strict';
 
+    // ── CSS class name constants (single source of truth) ─────────────────
+    var CLS = {
+        devtools:            'se-devtools',
+        pill:                'se-pill',
+        pillDot:             'se-pill-dot',
+        pillLabel:           'se-pill-label',
+        toast:               'se-toast',
+        hidden:              'se-hidden',
+        // Drawer shell
+        drawer:              'se-drawer',
+        resizeHandle:        'se-resize-handle',
+        // Tab bar
+        tabBar:              'se-tab-bar',
+        tab:                 'se-tab',
+        tabActive:           'active',
+        tabBarStatus:        'se-tab-bar-status',
+        tabContent:          'se-tab-content',
+        // Data tab
+        dataSidebar:         'se-data-sidebar',
+        dataSidebarGroup:    'se-data-sidebar-group',
+        dataSidebarItem:     'se-data-sidebar-item',
+        syncDot:             'se-sync-dot',
+        syncLabel:           'se-sync-label',
+        dataGrid:            'se-data-grid',
+        dataToolbar:         'se-data-toolbar',
+        dataToolbarName:     'se-data-toolbar-name',
+        dataToolbarCount:    'se-data-toolbar-count',
+        dataToolbarSeq:      'se-data-toolbar-seq',
+        gridTable:           'se-grid-table',
+        // Timeline tab
+        timeline:            'se-timeline',
+        timelineFilters:     'se-timeline-filters',
+        timelineFilter:      'se-timeline-filter',
+        timelineList:        'se-timeline-list',
+        timelineEntry:       'se-timeline-entry',
+        timelineTs:          'se-timeline-ts',
+        timelineBadge:       'se-timeline-badge',
+        timelineSummary:     'se-timeline-summary',
+        timelineDetail:      'se-timeline-detail',
+        // State tab
+        state:               'se-state',
+        stateGroupLabel:     'se-state-group-label',
+        stateRow:            'se-state-row',
+        stateLabel:          'se-state-label',
+        stateValue:          'se-state-value',
+        // Actions tab
+        actions:             'se-actions',
+        actionCard:          'se-action-card',
+        actionCardLabel:     'se-action-card-label',
+        actionCardDesc:      'se-action-card-desc',
+        // Badges
+        badge:               'se-badge',
+        badgeGreen:          'se-badge-green',
+        badgeYellow:         'se-badge-yellow',
+        badgeRed:            'se-badge-red',
+        // Empty state
+        empty:               'se-empty',
+        // Num cell alignment
+        num:                 'num',
+        local:               'local',
+    };
+
     // ── Shadow DOM setup ─────────────────────────────────────────────────
     var host = document.createElement('div');
     host.id = 'syncengine-devtools-host';
@@ -9,86 +71,69 @@
     style.textContent = __DEVTOOLS_STYLES__;
     shadow.appendChild(style);
     var root = document.createElement('div');
-    root.className = 'se-devtools';
+    root.className = CLS.devtools;
     shadow.appendChild(root);
     document.body.appendChild(host);
 
-    // ── State ────────────────────────────────────────────────────────────
-    var expanded = sessionStorage.getItem('se-devtools-expanded') === '1';
-    var status = {
-        connection: 'connecting',
-        sync: { phase: 'idle', messagesReplayed: 0, totalMessages: 0, snapshotLoaded: false },
-        hlc: { ts: 0, counter: 0 },
-        conflicts: [],
-        offlineQueue: 0,
-        undoDepth: 0,
-        schema: { version: null, fingerprint: null },
-        entities: [],
-        channels: [],
-        views: {},
-    };
-    var serverMetrics = null;
+    // ── Persistent state ─────────────────────────────────────────────────
+    var drawerOpen = sessionStorage.getItem('se-dt-open') === '1';
+    var drawerHeight = parseInt(localStorage.getItem('se-dt-h') || '320', 10);
+    var activeTab = sessionStorage.getItem('se-dt-tab') || 'data';
 
-    // Read workspace ID from the meta tag injected by the workspaces plugin
-    function getWorkspaceId() {
-        var el = document.querySelector('meta[name="syncengine-workspace-id"]');
-        return (el && el.getAttribute('content')) || null;
-    }
+    // ── App state ────────────────────────────────────────────────────────
+    var connStatus = 'connecting';
+    var peerId = '';
+    var serverUrl = '';
+    var tables = [];          // Array<{ name, columns, sql }>
+    var viewDefs = [];        // Array<{ name, sourceTable }>
+    var schemaInfo = { version: 0, fingerprint: '' };
+    var viewRowCounts = {};   // { [viewName]: number }
+    var channelSeqs = {};     // { [channelId]: number }
+    var entityCounts = {};    // { [table]: { rowCount, localCount } }
+    var lastGcCollected = null;
+    var offlineQueue = 0;
+    var syncPhase = 'idle';
+    var hlc = { ts: 0, counter: 0 };
 
-    // Message log ring buffer
-    var MESSAGE_LOG_MAX = 50;
-    var messageLog = [];
-    var messagePaused = false;
-    var expandedMessageIndex = -1;
+    // Selected table in Data tab
+    var selectedTable = null;
+    var tableRows = {};       // { [tableName]: { columns: [], rows: [], localIds: [] } }
+    var pendingQueryIds = {}; // { [queryId]: tableName }
 
-    // Message filter types
-    var MESSAGE_KINDS = ['delta', 'entity-write', 'entity-state', 'topic', 'gc', 'authority'];
-    var messageFilters = {};
-    MESSAGE_KINDS.forEach(function (k) { messageFilters[k] = true; });
-
-    // Section open states
-    var SECTION_KEYS = ['sync', 'data', 'messages', 'peers', 'actions'];
-    var sectionOpen = {};
-    try {
-        var saved = JSON.parse(sessionStorage.getItem('se-devtools-sections') || '{}');
-        SECTION_KEYS.forEach(function (k) {
-            sectionOpen[k] = saved[k] !== undefined ? saved[k] : (k === 'sync');
-        });
-    } catch (_) {
-        SECTION_KEYS.forEach(function (k) { sectionOpen[k] = (k === 'sync'); });
-    }
-
-    // Pill position
-    var pillPos = null;
-    try {
-        pillPos = JSON.parse(sessionStorage.getItem('se-devtools-pill-pos'));
-    } catch (_) { /* ignore */ }
+    // Timeline
+    var TIMELINE_MAX = 200;
+    var timeline = [];
+    var expandedTimelineIdx = -1;
+    var timelineFilters = { delta: true, 'entity-write': true, 'entity-state': true, authority: true, gc: true, topic: true };
+    var TIMELINE_KINDS = ['delta', 'entity-write', 'entity-state', 'authority', 'gc', 'topic'];
 
     // ── DOM references ───────────────────────────────────────────────────
     var pillEl = null;
-    var popoverEl = null;
+    var drawerEl = null;
+    var tabPanels = {};       // { tabName: el }
+    var dataSidebarEl = null;
+    var dataGridEl = null;
+    var timelineListEl = null;
+    var stateEl = null;
+    var actionsEl = null;
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    /** Remove all child nodes from an element (safe alternative to innerHTML = '') */
-    function clearChildren(el) {
-        while (el.firstChild) el.removeChild(el.firstChild);
+    function el(tag, cls, text) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text !== undefined) e.textContent = text;
+        return e;
     }
 
-    function saveSectionStates() {
-        try { sessionStorage.setItem('se-devtools-sections', JSON.stringify(sectionOpen)); } catch (_) { /* ignore */ }
+    function clearChildren(e) {
+        while (e.firstChild) e.removeChild(e.firstChild);
     }
 
-    function savePillPos() {
-        if (pillPos) {
-            try { sessionStorage.setItem('se-devtools-pill-pos', JSON.stringify(pillPos)); } catch (_) { /* ignore */ }
-        }
-    }
-
-    function formatBytes(bytes) {
-        if (bytes < 1024) return bytes + ' B';
-        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-        return (bytes / 1048576).toFixed(1) + ' MB';
+    function truncate(str, max) {
+        if (!str) return '';
+        str = String(str);
+        return str.length > max ? str.slice(0, max) + '\u2026' : str;
     }
 
     function relativeTime(tsMs) {
@@ -99,791 +144,575 @@
         return Math.floor(diff / 3600000) + 'h';
     }
 
-    function truncate(str, max) {
-        if (!str) return '';
-        str = String(str);
-        return str.length > max ? str.slice(0, max) + '\u2026' : str;
-    }
-
     function statusColor() {
-        if (status.connection === 'error' || status.connection === 'disconnected') return 'red';
-        if (status.connection === 'live' && status.sync.phase === 'ready') return 'green';
+        if (connStatus === 'disconnected' || connStatus === 'error') return 'red';
+        if (connStatus === 'live' || connStatus === 'connected') return 'green';
         return 'yellow';
     }
 
-    function copyToClipboard(text) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(function () {
-                showToast('Copied!', true);
-            });
-        }
+    function savePrefs() {
+        try {
+            sessionStorage.setItem('se-dt-open', drawerOpen ? '1' : '0');
+            sessionStorage.setItem('se-dt-tab', activeTab);
+        } catch (_) {}
+        try { localStorage.setItem('se-dt-h', String(drawerHeight)); } catch (_) {}
     }
 
-    // ── Toast system ─────────────────────────────────────────────────────
+    // ── Toast ─────────────────────────────────────────────────────────────
 
     function showToast(msg, ok) {
-        var toast = document.createElement('div');
-        toast.className = 'se-toast ' + (ok ? 'success' : 'error');
-        toast.textContent = msg;
+        var toast = el('div', CLS.toast + ' ' + (ok ? 'success' : 'error'), msg);
         root.appendChild(toast);
-
-        // Position toast relative to pill
-        if (pillEl) {
-            var pr = pillEl.getBoundingClientRect();
-            toast.style.bottom = (window.innerHeight - pr.top + 8) + 'px';
-            toast.style.right = (window.innerWidth - pr.right) + 'px';
-        }
-
         setTimeout(function () {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
         }, 3000);
     }
 
-    // ── Render pill ──────────────────────────────────────────────────────
+    // ── Pill ─────────────────────────────────────────────────────────────
 
     function renderPill() {
         if (!pillEl) {
-            pillEl = document.createElement('div');
-            pillEl.className = 'se-pill';
+            pillEl = el('div', CLS.pill);
+            pillEl.addEventListener('click', openDrawer);
             root.appendChild(pillEl);
-            setupDraggable(pillEl);
         }
-
-        var color = statusColor();
-        var conflictCount = status.conflicts ? status.conflicts.length : 0;
-        var label = 'syncengine';
-        if (conflictCount > 0) label += ' \u26A0' + conflictCount;
-
+        pillEl.classList.toggle(CLS.hidden, drawerOpen);
         clearChildren(pillEl);
-        var dot = document.createElement('span');
-        dot.className = 'se-pill-dot ' + color;
+        var dot = el('span', CLS.pillDot + ' ' + statusColor());
         pillEl.appendChild(dot);
-        var lbl = document.createElement('span');
-        lbl.className = 'se-pill-label';
-        lbl.textContent = label;
+        var lbl = el('span', CLS.pillLabel, 'syncengine');
         pillEl.appendChild(lbl);
-
-        // Apply saved position
-        if (pillPos) {
-            pillEl.style.bottom = 'auto';
-            pillEl.style.right = 'auto';
-            pillEl.style.left = pillPos.x + 'px';
-            pillEl.style.top = pillPos.y + 'px';
-        }
     }
 
-    // ── Render popover ───────────────────────────────────────────────────
+    // ── Drawer shell ──────────────────────────────────────────────────────
 
-    function renderPopover() {
-        if (!expanded) {
-            if (popoverEl) popoverEl.classList.add('se-hidden');
+    function buildDrawer() {
+        if (drawerEl) return;
+
+        drawerEl = el('div', CLS.drawer);
+        drawerEl.style.height = drawerHeight + 'px';
+
+        // Resize handle
+        var handle = el('div', CLS.resizeHandle);
+        drawerEl.appendChild(handle);
+        setupResize(handle);
+
+        // Tab bar
+        var tabBar = el('div', CLS.tabBar);
+        drawerEl.appendChild(tabBar);
+
+        var TABS = ['Data', 'Timeline', 'State', 'Actions'];
+        TABS.forEach(function (name) {
+            var key = name.toLowerCase();
+            var tabBtn = el('button', CLS.tab, name);
+            tabBtn.addEventListener('click', function () {
+                activeTab = key;
+                savePrefs();
+                updateTabActive();
+                showTab(key);
+            });
+            tabBar.appendChild(tabBtn);
+            tabBtn._tabKey = key;
+        });
+
+        // Status area + close button
+        var statusArea = el('div', CLS.tabBarStatus);
+        var closeBtn = el('button', null, '\u00D7');
+        closeBtn.title = 'Close (Ctrl+Shift+D)';
+        closeBtn.style.cssText = 'background:none;border:none;color:var(--dt-muted);cursor:pointer;font-size:16px;padding:0 4px;line-height:1;font-family:inherit;';
+        closeBtn.addEventListener('click', closeDrawer);
+        statusArea.appendChild(closeBtn);
+        tabBar.appendChild(statusArea);
+
+        // Tab content panels
+        var contentWrap = el('div', CLS.tabContent);
+        drawerEl.appendChild(contentWrap);
+
+        // Build each panel
+        tabPanels['data'] = buildDataPanel();
+        tabPanels['timeline'] = buildTimelinePanel();
+        tabPanels['state'] = buildStatePanel();
+        tabPanels['actions'] = buildActionsPanel();
+
+        Object.keys(tabPanels).forEach(function (k) {
+            contentWrap.appendChild(tabPanels[k]);
+        });
+
+        root.appendChild(drawerEl);
+        updateTabActive();
+        showTab(activeTab);
+    }
+
+    function updateTabActive() {
+        if (!drawerEl) return;
+        var tabs = drawerEl.querySelectorAll('.' + CLS.tab);
+        tabs.forEach(function (t) {
+            var key = t._tabKey;
+            if (key) {
+                t.classList.toggle(CLS.tabActive, key === activeTab);
+            }
+        });
+    }
+
+    function showTab(key) {
+        Object.keys(tabPanels).forEach(function (k) {
+            tabPanels[k].classList.toggle(CLS.hidden, k !== key);
+        });
+        if (key === 'data') renderDataSidebar();
+        if (key === 'state') renderState();
+        if (key === 'timeline') renderTimeline();
+        if (key === 'actions') renderActions();
+    }
+
+    function openDrawer() {
+        drawerOpen = true;
+        savePrefs();
+        if (!drawerEl) buildDrawer();
+        drawerEl.classList.remove(CLS.hidden);
+        renderPill();
+        showTab(activeTab);
+    }
+
+    function closeDrawer() {
+        drawerOpen = false;
+        savePrefs();
+        if (drawerEl) drawerEl.classList.add(CLS.hidden);
+        renderPill();
+    }
+
+    function toggleDrawer() {
+        if (drawerOpen) closeDrawer(); else openDrawer();
+    }
+
+    // ── Resize ────────────────────────────────────────────────────────────
+
+    function setupResize(handle) {
+        var resizing = false;
+        var startY = 0;
+        var startH = 0;
+
+        handle.addEventListener('pointerdown', function (e) {
+            resizing = true;
+            startY = e.clientY;
+            startH = drawerEl.offsetHeight;
+            handle.setPointerCapture(e.pointerId);
+            e.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', function (e) {
+            if (!resizing) return;
+            var delta = startY - e.clientY;
+            var newH = Math.min(
+                Math.max(160, startH + delta),
+                Math.floor(window.innerHeight * 0.8)
+            );
+            drawerHeight = newH;
+            drawerEl.style.height = newH + 'px';
+        });
+
+        handle.addEventListener('pointerup', function () {
+            if (!resizing) return;
+            resizing = false;
+            savePrefs();
+        });
+    }
+
+    // ── Data panel ────────────────────────────────────────────────────────
+
+    function buildDataPanel() {
+        var panel = el('div', null);
+        panel.style.cssText = 'display:flex;flex:1;overflow:hidden;';
+
+        dataSidebarEl = el('div', CLS.dataSidebar);
+        panel.appendChild(dataSidebarEl);
+
+        dataGridEl = el('div', CLS.dataGrid);
+        panel.appendChild(dataGridEl);
+
+        return panel;
+    }
+
+    function renderDataSidebar() {
+        if (!dataSidebarEl) return;
+        clearChildren(dataSidebarEl);
+
+        if (tables.length === 0 && viewDefs.length === 0) {
+            dataSidebarEl.appendChild(el('div', CLS.empty, 'Waiting for schema\u2026'));
             return;
         }
 
-        if (!popoverEl) {
-            popoverEl = document.createElement('div');
-            popoverEl.className = 'se-popover';
-            root.appendChild(popoverEl);
-        }
-        popoverEl.classList.remove('se-hidden');
-
-        // Position relative to pill
-        if (pillEl) {
-            var pr = pillEl.getBoundingClientRect();
-            var popoverBottom = window.innerHeight - pr.top + 8;
-            var popoverRight = window.innerWidth - pr.right;
-            // Clamp to viewport
-            if (popoverRight < 8) popoverRight = 8;
-            if (popoverBottom + 520 > window.innerHeight) popoverBottom = 8;
-            popoverEl.style.bottom = popoverBottom + 'px';
-            popoverEl.style.right = popoverRight + 'px';
-            popoverEl.style.top = 'auto';
-            popoverEl.style.left = 'auto';
-        }
-
-        // Rebuild content
-        clearChildren(popoverEl);
-
-        // Header
-        var header = document.createElement('div');
-        header.className = 'se-popover-header';
-
-        var titleWrap = document.createElement('div');
-        titleWrap.className = 'se-popover-header-title';
-        var logo = document.createElement('div');
-        logo.className = 'se-popover-header-logo';
-        titleWrap.appendChild(logo);
-        var titleText = document.createElement('span');
-        titleText.textContent = 'Syncengine DevTools';
-        titleWrap.appendChild(titleText);
-        header.appendChild(titleWrap);
-
-        var minBtn = document.createElement('button');
-        minBtn.className = 'se-popover-minimize';
-        minBtn.textContent = '\u2212'; // minus sign
-        minBtn.title = 'Minimize (Ctrl+Shift+D)';
-        minBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            toggleExpanded();
-        });
-        header.appendChild(minBtn);
-        popoverEl.appendChild(header);
-
-        // Sections
-        renderSectionSync();
-        renderSectionData();
-        renderSectionMessages();
-        renderSectionPeers();
-        renderSectionActions();
-    }
-
-    function createSection(key, title) {
-        var sec = document.createElement('div');
-        sec.className = 'se-section';
-
-        var hdr = document.createElement('div');
-        hdr.className = 'se-section-header';
-
-        var label = document.createElement('span');
-        label.textContent = title;
-        hdr.appendChild(label);
-
-        var chevron = document.createElement('span');
-        chevron.className = 'se-chevron' + (sectionOpen[key] ? ' open' : '');
-        chevron.textContent = '\u25B6'; // right triangle
-        hdr.appendChild(chevron);
-
-        hdr.addEventListener('click', function () {
-            sectionOpen[key] = !sectionOpen[key];
-            saveSectionStates();
-            renderPopover();
-        });
-        sec.appendChild(hdr);
-
-        if (sectionOpen[key]) {
-            var body = document.createElement('div');
-            body.className = 'se-section-body';
-            sec.appendChild(body);
-            sec._body = body;
-        }
-
-        popoverEl.appendChild(sec);
-        return sec._body || null;
-    }
-
-    function addRow(parent, label, value, opts) {
-        opts = opts || {};
-        var row = document.createElement('div');
-        row.className = 'se-row';
-        var lbl = document.createElement('span');
-        lbl.className = 'se-label';
-        lbl.textContent = label;
-        row.appendChild(lbl);
-        var val = document.createElement('span');
-        val.className = 'se-value' + (opts.mono ? ' se-mono' : '');
-        if (opts.copyable) {
-            val.className += ' se-copyable';
-            val.title = 'Click to copy';
-            val.addEventListener('click', function () { copyToClipboard(opts.copyText || val.textContent); });
-        }
-        if (opts.rawElement) {
-            val.appendChild(value);
-        } else {
-            val.textContent = value;
-        }
-        row.appendChild(val);
-        parent.appendChild(row);
-        return row;
-    }
-
-    // ── Section 1: Sync & Connection ─────────────────────────────────────
-
-    function renderSectionSync() {
-        var body = createSection('sync', 'Sync & Connection');
-        if (!body) return;
-
-        // Connection badge
-        var connColor = statusColor();
-        var connBadge = document.createElement('span');
-        connBadge.className = 'se-badge se-badge-' + connColor;
-        var dot = document.createElement('span');
-        dot.className = 'se-badge-dot ' + connColor;
-        connBadge.appendChild(dot);
-        var connText = document.createElement('span');
-        connText.textContent = status.connection;
-        connBadge.appendChild(connText);
-        addRow(body, 'Connection', connBadge, { rawElement: true });
-
-        // Sync phase
-        var phase = status.sync.phase || 'idle';
-        addRow(body, 'Phase', phase);
-
-        // Progress bar during replay
-        if (phase === 'replaying' && status.sync.totalMessages > 0) {
-            var pct = Math.min(100, Math.round((status.sync.messagesReplayed / status.sync.totalMessages) * 100));
-            var progressWrap = document.createElement('div');
-            progressWrap.style.width = '100%';
-            var progressLabel = document.createElement('div');
-            progressLabel.className = 'se-muted';
-            progressLabel.style.fontSize = '9px';
-            progressLabel.style.marginBottom = '2px';
-            progressLabel.textContent = status.sync.messagesReplayed + ' / ' + status.sync.totalMessages + ' (' + pct + '%)';
-            progressWrap.appendChild(progressLabel);
-            var bar = document.createElement('div');
-            bar.className = 'se-progress';
-            var fill = document.createElement('div');
-            fill.className = 'se-progress-bar';
-            fill.style.width = pct + '%';
-            bar.appendChild(fill);
-            progressWrap.appendChild(bar);
-            body.appendChild(progressWrap);
-        }
-
-        // HLC
-        if (status.hlc) {
-            var hlcTs = status.hlc.ts || 0;
-            var hlcCounter = status.hlc.counter || 0;
-            var drift = hlcTs > 0 ? Math.abs(Date.now() - hlcTs) : 0;
-            var driftLabel = drift < 1000 ? '<1s' : (drift / 1000).toFixed(1) + 's';
-            addRow(body, 'HLC', hlcTs + '.' + hlcCounter + ' (drift: ' + driftLabel + ')', { mono: true });
-        }
-
-        // Schema
-        if (status.schema) {
-            if (status.schema.version != null) {
-                addRow(body, 'Schema', 'v' + status.schema.version);
-            }
-            if (status.schema.fingerprint) {
-                addRow(body, 'Fingerprint', truncate(status.schema.fingerprint, 16), { mono: true, copyable: true, copyText: status.schema.fingerprint });
-            }
-        }
-
-        // Offline queue
-        if (status.offlineQueue > 0) {
-            var qBadge = document.createElement('span');
-            qBadge.className = 'se-badge se-badge-yellow';
-            qBadge.textContent = status.offlineQueue + ' pending';
-            addRow(body, 'Offline Queue', qBadge, { rawElement: true });
-        }
-    }
-
-    // ── Section 2: Data ──────────────────────────────────────────────────
-
-    function renderSectionData() {
-        var body = createSection('data', 'Data');
-        if (!body) return;
-
-        // Channels (from server metrics)
-        var streams = (serverMetrics && serverMetrics.nats && serverMetrics.nats.streams) ? serverMetrics.nats.streams : [];
-        if (streams.length > 0) {
-            var sh = document.createElement('div');
-            sh.className = 'se-subheader';
-            sh.textContent = 'Channels (NATS Streams)';
-            body.appendChild(sh);
-
-            var tbl = document.createElement('table');
-            tbl.className = 'se-table';
-            var thead = document.createElement('thead');
-            var headerRow = document.createElement('tr');
-            ['Name', 'Msgs', 'Size', 'Last Seq', 'Consumers'].forEach(function (h) {
-                var th = document.createElement('th');
-                th.textContent = h;
-                headerRow.appendChild(th);
-            });
-            thead.appendChild(headerRow);
-            tbl.appendChild(thead);
-
-            var tbody = document.createElement('tbody');
-            streams.forEach(function (s) {
-                var tr = document.createElement('tr');
-                var cells = [
-                    truncate(s.name, 20),
-                    String(s.messages),
-                    formatBytes(s.bytes),
-                    String(s.lastSeq),
-                    String(s.consumerCount)
-                ];
-                cells.forEach(function (c) {
-                    var td = document.createElement('td');
-                    td.textContent = c;
-                    tr.appendChild(td);
+        if (tables.length > 0) {
+            dataSidebarEl.appendChild(el('div', CLS.dataSidebarGroup, 'Tables'));
+            tables.forEach(function (t) {
+                var item = el('div', CLS.dataSidebarItem + (selectedTable === t.name ? ' active' : ''));
+                var dot = el('span', CLS.syncDot + ' green');
+                item.appendChild(dot);
+                item.appendChild(el('span', null, t.name));
+                var cnt = entityCounts[t.name];
+                if (cnt && cnt.localCount > 0) {
+                    var lbl = el('span', CLS.syncLabel, cnt.localCount + 'L');
+                    lbl.style.color = 'var(--dt-yellow)';
+                    item.appendChild(lbl);
+                }
+                item.addEventListener('click', function () {
+                    selectedTable = t.name;
+                    renderDataSidebar();
+                    requestRows(t.name);
                 });
-                tbody.appendChild(tr);
-            });
-            tbl.appendChild(tbody);
-            body.appendChild(tbl);
-        }
-
-        // Views
-        var viewKeys = status.views ? Object.keys(status.views) : [];
-        if (viewKeys.length > 0) {
-            var sh2 = document.createElement('div');
-            sh2.className = 'se-subheader';
-            sh2.textContent = 'Views';
-            body.appendChild(sh2);
-
-            viewKeys.forEach(function (name) {
-                addRow(body, name, String(status.views[name]), { mono: true });
+                dataSidebarEl.appendChild(item);
             });
         }
 
-        // Entities
-        var entities = status.entities || [];
-        if (entities.length > 0) {
-            var sh3 = document.createElement('div');
-            sh3.className = 'se-subheader';
-            sh3.textContent = 'Entities';
-            body.appendChild(sh3);
-
-            entities.forEach(function (ent) {
-                var row = document.createElement('div');
-                row.className = 'se-row';
-                var lbl = document.createElement('span');
-                lbl.className = 'se-label se-mono';
-                lbl.textContent = truncate(ent.name || ent.key || String(ent), 24);
-                row.appendChild(lbl);
-
-                var badges = document.createElement('span');
-                badges.className = 'se-value';
-                badges.style.display = 'flex';
-                badges.style.gap = '4px';
-
-                if (ent.dirty || ent.diff) {
-                    var diffBadge = document.createElement('span');
-                    diffBadge.className = 'se-badge se-badge-yellow';
-                    diffBadge.textContent = 'diff';
-                    badges.appendChild(diffBadge);
-                }
-                if (ent.pending) {
-                    var pendBadge = document.createElement('span');
-                    pendBadge.className = 'se-badge';
-                    pendBadge.textContent = 'pending';
-                    badges.appendChild(pendBadge);
-                }
-
-                row.appendChild(badges);
-                body.appendChild(row);
+        if (viewDefs.length > 0) {
+            dataSidebarEl.appendChild(el('div', CLS.dataSidebarGroup, 'Views'));
+            viewDefs.forEach(function (v) {
+                var item = el('div', CLS.dataSidebarItem + (selectedTable === ('view:' + v.name) ? ' active' : ''));
+                var dot = el('span', CLS.syncDot + ' yellow');
+                item.appendChild(dot);
+                item.appendChild(el('span', null, v.name));
+                item.addEventListener('click', function () {
+                    selectedTable = 'view:' + v.name;
+                    renderDataSidebar();
+                    requestRows(v.name, true);
+                });
+                dataSidebarEl.appendChild(item);
             });
         }
 
-        // Conflicts
-        var conflicts = status.conflicts || [];
-        if (conflicts.length > 0) {
-            var sh4 = document.createElement('div');
-            sh4.className = 'se-subheader';
-            sh4.textContent = 'Conflicts (' + conflicts.length + ')';
-            body.appendChild(sh4);
-
-            conflicts.forEach(function (c) {
-                var cRow = document.createElement('div');
-                cRow.className = 'se-conflict-row';
-                var field = document.createElement('div');
-                field.className = 'se-conflict-field';
-                field.textContent = (c.table || '?') + '.' + (c.field || '?');
-                cRow.appendChild(field);
-                var meta = document.createElement('div');
-                meta.className = 'se-conflict-meta';
-                meta.textContent = 'strategy: ' + (c.strategy || '?') + ' | winner: ' + truncate(String(c.winner), 12) + ' | loser: ' + truncate(String(c.loser), 12);
-                cRow.appendChild(meta);
-                body.appendChild(cRow);
-            });
-        }
-
-        // Undo depth
-        if (status.undoDepth > 0) {
-            addRow(body, 'Undo depth', String(status.undoDepth));
-        }
-
-        // Empty state
-        if (streams.length === 0 && viewKeys.length === 0 && entities.length === 0 && conflicts.length === 0) {
-            var empty = document.createElement('div');
-            empty.className = 'se-empty';
-            empty.textContent = 'Waiting for data\u2026';
-            body.appendChild(empty);
-        }
+        renderDataGrid();
     }
 
-    // ── Section 3: Message Log ───────────────────────────────────────────
+    function requestRows(tableName, isView) {
+        if (!tableName) return;
+        var sql = isView
+            ? 'SELECT * FROM "' + tableName.replace(/"/g, '""') + '" LIMIT 500'
+            : 'SELECT * FROM "' + tableName.replace(/"/g, '""') + '" LIMIT 500';
+        var qid = 'dq_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+        pendingQueryIds[qid] = { name: tableName, isView: !!isView };
+        try {
+            bc.postMessage({ type: 'devtools-query', id: qid, sql: sql });
+        } catch (_) {}
+    }
 
-    function renderSectionMessages() {
-        var body = createSection('messages', 'Messages');
-        if (!body) return;
+    function renderDataGrid() {
+        if (!dataGridEl) return;
+        clearChildren(dataGridEl);
 
-        // Filters row
-        var filtersRow = document.createElement('div');
-        filtersRow.className = 'se-msg-filters';
+        if (!selectedTable) {
+            dataGridEl.appendChild(el('div', CLS.empty, 'Select a table'));
+            return;
+        }
 
-        MESSAGE_KINDS.forEach(function (kind) {
-            var btn = document.createElement('button');
-            btn.className = 'se-msg-filter' + (messageFilters[kind] ? ' active' : '');
-            btn.textContent = kind;
-            btn.addEventListener('click', function (e) {
-                e.stopPropagation();
-                messageFilters[kind] = !messageFilters[kind];
-                renderPopover();
+        var key = selectedTable.replace(/^view:/, '');
+        var data = tableRows[key];
+
+        // Toolbar
+        var toolbar = el('div', CLS.dataToolbar);
+        toolbar.appendChild(el('span', CLS.dataToolbarName, key));
+
+        if (data) {
+            toolbar.appendChild(el('span', CLS.dataToolbarCount, data.rows.length + ' rows'));
+            var cnt = entityCounts[key];
+            if (cnt && cnt.localCount > 0) {
+                toolbar.appendChild(el('span', CLS.dataToolbarCount, cnt.localCount + ' local'));
+            }
+        } else {
+            toolbar.appendChild(el('span', CLS.dataToolbarCount, 'loading\u2026'));
+        }
+        dataGridEl.appendChild(toolbar);
+
+        if (!data) {
+            dataGridEl.appendChild(el('div', CLS.empty, 'Loading\u2026'));
+            return;
+        }
+
+        if (data.rows.length === 0) {
+            dataGridEl.appendChild(el('div', CLS.empty, 'No rows'));
+            return;
+        }
+
+        var tbl = el('table', CLS.gridTable);
+        var thead = el('thead');
+        var headerRow = el('tr');
+        data.columns.forEach(function (col) {
+            var th = el('th', null, col);
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        tbl.appendChild(thead);
+
+        var tbody = el('tbody');
+        data.rows.forEach(function (row) {
+            var isLocal = data.localIds && data.localIds.indexOf(String(row['id'] || row['_id'] || '')) !== -1;
+            var tr = el('tr');
+            if (isLocal) tr.classList.add(CLS.local);
+            data.columns.forEach(function (col) {
+                var val = row[col];
+                var td = el('td');
+                var valStr = val === null || val === undefined ? '' : String(val);
+                td.textContent = truncate(valStr, 80);
+                td.title = valStr;
+                if (typeof val === 'number') td.classList.add(CLS.num);
+                tbody.appendChild(tr);
+                tr.appendChild(td);
             });
-            filtersRow.appendChild(btn);
+            tbody.appendChild(tr);
         });
+        tbl.appendChild(tbody);
+        dataGridEl.appendChild(tbl);
+    }
 
-        // Pause/resume button
-        var pauseBtn = document.createElement('button');
-        pauseBtn.className = 'se-msg-pause' + (messagePaused ? ' paused' : '');
-        pauseBtn.textContent = messagePaused ? '\u25B6 Resume' : '\u23F8 Pause';
-        pauseBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            messagePaused = !messagePaused;
-            renderPopover();
+    // ── Timeline panel ────────────────────────────────────────────────────
+
+    function buildTimelinePanel() {
+        var panel = el('div', CLS.timeline);
+
+        // Filters
+        var filtersEl = el('div', CLS.timelineFilters);
+        TIMELINE_KINDS.forEach(function (kind) {
+            var btn = el('button', CLS.timelineFilter + (timelineFilters[kind] ? ' active' : ''), kind);
+            btn.addEventListener('click', function () {
+                timelineFilters[kind] = !timelineFilters[kind];
+                btn.classList.toggle('active', !!timelineFilters[kind]);
+                renderTimelineList();
+            });
+            filtersEl.appendChild(btn);
         });
-        filtersRow.appendChild(pauseBtn);
+        panel.appendChild(filtersEl);
 
-        body.appendChild(filtersRow);
+        timelineListEl = el('div', CLS.timelineList);
+        panel.appendChild(timelineListEl);
 
-        // Message list
-        var list = document.createElement('div');
-        list.className = 'se-msg-list';
+        return panel;
+    }
 
-        var filtered = messageLog.filter(function (m) {
-            return messageFilters[m.kind] !== false;
-        });
+    function renderTimeline() {
+        renderTimelineList();
+    }
+
+    function renderTimelineList() {
+        if (!timelineListEl) return;
+        clearChildren(timelineListEl);
+
+        var filtered = timeline.filter(function (e) { return timelineFilters[e.kind] !== false; });
 
         if (filtered.length === 0) {
-            var empty = document.createElement('div');
-            empty.className = 'se-msg-empty';
-            empty.textContent = messageLog.length === 0 ? 'No messages yet' : 'All filtered out';
-            list.appendChild(empty);
-        } else {
-            // Show newest first
-            for (var i = filtered.length - 1; i >= 0; i--) {
-                list.appendChild(createMessageRow(filtered[i]));
-            }
+            timelineListEl.appendChild(el('div', CLS.empty, timeline.length === 0 ? 'No events yet' : 'All filtered out'));
+            return;
         }
 
-        body.appendChild(list);
+        // Newest first
+        for (var i = filtered.length - 1; i >= 0; i--) {
+            timelineListEl.appendChild(buildTimelineEntry(filtered[i], i));
+        }
     }
 
-    function createMessageRow(msg) {
-        var row = document.createElement('div');
-        row.className = 'se-msg-row';
+    function buildTimelineEntry(entry, idx) {
+        var wrap = el('div');
 
-        var summary = document.createElement('div');
-        summary.className = 'se-msg-summary';
+        var row = el('div', CLS.timelineEntry);
+        row.appendChild(el('span', CLS.timelineTs, relativeTime(entry.ts)));
 
-        var ts = document.createElement('span');
-        ts.className = 'se-msg-ts';
-        ts.textContent = relativeTime(msg.ts);
-        summary.appendChild(ts);
+        var badge = el('span', CLS.timelineBadge + ' ' + (entry.kind || '').replace(/\s+/g, '-'), entry.kind || '?');
+        row.appendChild(badge);
 
-        var kindBadge = document.createElement('span');
-        kindBadge.className = 'se-msg-kind ' + (msg.kind || '').replace(/\s+/g, '-');
-        kindBadge.textContent = msg.kind || '?';
-        summary.appendChild(kindBadge);
+        row.appendChild(el('span', CLS.timelineSummary, buildTimelineSummary(entry)));
 
-        var channel = document.createElement('span');
-        channel.className = 'se-msg-channel';
-        channel.textContent = msg.channel || msg.entity || '';
-        summary.appendChild(channel);
-
-        var preview = document.createElement('span');
-        preview.className = 'se-msg-payload-preview';
-        try {
-            preview.textContent = truncate(JSON.stringify(msg.payload), 30);
-        } catch (_) {
-            preview.textContent = '...';
-        }
-        summary.appendChild(preview);
-
-        row.appendChild(summary);
+        wrap.appendChild(row);
 
         // Expanded detail
-        var originalIndex = messageLog.indexOf(msg);
-        if (expandedMessageIndex === originalIndex) {
-            var detail = document.createElement('div');
-            detail.className = 'se-msg-detail';
-            try {
-                detail.textContent = JSON.stringify(msg, null, 2);
-            } catch (_) {
-                detail.textContent = String(msg);
-            }
-            row.appendChild(detail);
+        var origIdx = timeline.indexOf(entry);
+        if (expandedTimelineIdx === origIdx) {
+            var detail = el('div', CLS.timelineDetail);
+            try { detail.textContent = JSON.stringify(entry, null, 2); } catch (_) { detail.textContent = String(entry); }
+            wrap.appendChild(detail);
         }
 
-        row.addEventListener('click', function (e) {
-            e.stopPropagation();
-            var oi = messageLog.indexOf(msg);
-            expandedMessageIndex = (expandedMessageIndex === oi) ? -1 : oi;
-            renderPopover();
+        row.addEventListener('click', function () {
+            var oi = timeline.indexOf(entry);
+            expandedTimelineIdx = (expandedTimelineIdx === oi) ? -1 : oi;
+            renderTimelineList();
         });
 
-        return row;
+        return wrap;
     }
 
-    // ── Section 4: Peers ─────────────────────────────────────────────────
-
-    function renderSectionPeers() {
-        var body = createSection('peers', 'Peers');
-        if (!body) return;
-
-        // Workspace members
-        var wsMembers = (serverMetrics && serverMetrics.workspace && serverMetrics.workspace.members)
-            ? serverMetrics.workspace.members : [];
-
-        if (wsMembers.length > 0) {
-            var sh = document.createElement('div');
-            sh.className = 'se-subheader';
-            sh.textContent = 'Workspace Members (' + wsMembers.length + ')';
-            body.appendChild(sh);
-
-            wsMembers.forEach(function (m) {
-                var item = document.createElement('div');
-                item.className = 'se-peer-item';
-                var dot = document.createElement('span');
-                dot.className = 'se-peer-dot';
-                item.appendChild(dot);
-                var name = document.createElement('span');
-                name.textContent = typeof m === 'string' ? m : (m.id || m.name || JSON.stringify(m));
-                item.appendChild(name);
-                body.appendChild(item);
-            });
-        }
-
-        // Workspace ID
-        if (serverMetrics && serverMetrics.workspace && serverMetrics.workspace.id) {
-            addRow(body, 'Workspace ID', truncate(serverMetrics.workspace.id, 16), {
-                mono: true,
-                copyable: true,
-                copyText: serverMetrics.workspace.id
-            });
-        }
-
-        // Consumer count
-        var streams = (serverMetrics && serverMetrics.nats && serverMetrics.nats.streams) ? serverMetrics.nats.streams : [];
-        if (streams.length > 0 && streams[0].consumerCount != null) {
-            addRow(body, 'Consumers', String(streams[0].consumerCount));
-        }
-
-        // Active channels
-        var channels = status.channels || [];
-        if (channels.length > 0) {
-            var sh2 = document.createElement('div');
-            sh2.className = 'se-subheader';
-            sh2.textContent = 'Active Channels (' + channels.length + ')';
-            body.appendChild(sh2);
-
-            channels.forEach(function (ch) {
-                var item = document.createElement('div');
-                item.className = 'se-channel-item';
-                item.textContent = typeof ch === 'string' ? ch : (ch.name || JSON.stringify(ch));
-                body.appendChild(item);
-            });
-        }
-
-        // Restate health
-        if (serverMetrics && serverMetrics.restate) {
-            var healthy = serverMetrics.restate.healthy;
-            var badge = document.createElement('span');
-            badge.className = 'se-badge ' + (healthy ? 'se-badge-green' : 'se-badge-red');
-            badge.textContent = healthy ? 'healthy' : 'unhealthy';
-            addRow(body, 'Restate', badge, { rawElement: true });
-        }
-
-        // Empty state
-        if (wsMembers.length === 0 && channels.length === 0 && !serverMetrics) {
-            var empty = document.createElement('div');
-            empty.className = 'se-empty';
-            empty.textContent = 'Waiting for server metrics\u2026';
-            body.appendChild(empty);
+    function buildTimelineSummary(entry) {
+        switch (entry.kind) {
+            case 'delta': return (entry.channelId || entry.channel || '') + ' seq=' + (entry.seq || '?') + ' ops=' + (entry.opCount || '?');
+            case 'entity-write': return (entry.table || '') + '#' + (entry.id || '') + ' [' + (entry.fields || []).join(',') + ']';
+            case 'entity-state': return (entry.table || '') + ' rows=' + (entry.rowCount || 0) + ' local=' + (entry.localCount || 0);
+            case 'authority': return (entry.topic || '') + ' ' + (entry.granted ? 'granted' : 'denied');
+            case 'gc': return 'collected ' + (entry.collected || 0);
+            case 'topic': return (entry.topic || '') + ' ' + (entry.event || '');
+            default: return entry.kind || '?';
         }
     }
 
-    // ── Section 5: Actions ───────────────────────────────────────────────
+    // ── State panel ───────────────────────────────────────────────────────
 
-    function renderSectionActions() {
-        var body = createSection('actions', 'Actions');
-        if (!body) return;
-
-        // Safe actions
-        createActionGroup(body, 'Safe', [
-            { label: 'Force Reconnect', action: 'force-reconnect', clientSide: true },
-            { label: 'Trigger GC', action: 'trigger-gc' },
-        ]);
-
-        // Moderate actions
-        createActionGroup(body, 'Moderate', [
-            { label: 'Clear Client DB', action: 'clear-client-db', clientSide: true, variant: 'yellow' },
-            { label: 'Purge Stream', action: 'purge-stream', variant: 'yellow' },
-        ]);
-
-        // Destructive actions
-        createActionGroup(body, 'Destructive', [
-            { label: 'Teardown Workspace', action: 'teardown', variant: 'red', confirm: true },
-            { label: 'Reset Everything', action: 'reset', variant: 'red', confirm: true },
-        ]);
+    function buildStatePanel() {
+        stateEl = el('div', CLS.state);
+        return stateEl;
     }
 
-    function createActionGroup(parent, label, actions) {
-        var group = document.createElement('div');
-        group.className = 'se-actions-group';
+    function renderState() {
+        if (!stateEl) return;
+        clearChildren(stateEl);
 
-        var groupLabel = document.createElement('div');
-        groupLabel.className = 'se-actions-group-label';
-        groupLabel.textContent = label;
-        group.appendChild(groupLabel);
+        // Connection group
+        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Connection'));
+        addStateRow(stateEl, 'Status', connStatus);
+        if (peerId) addStateRow(stateEl, 'Peer ID', truncate(peerId, 32));
+        if (serverUrl) addStateRow(stateEl, 'Server', truncate(serverUrl, 40));
+        addStateRow(stateEl, 'Sync phase', syncPhase);
+        if (hlc.ts) addStateRow(stateEl, 'HLC', hlc.ts + '.' + hlc.counter);
 
-        var row = document.createElement('div');
-        row.className = 'se-actions-row';
-
-        actions.forEach(function (a) {
-            var btn = document.createElement('button');
-            btn.className = 'se-action-btn' + (a.variant ? ' ' + a.variant : '');
-            btn.textContent = a.label;
-            btn.addEventListener('click', function (e) {
-                e.stopPropagation();
-                executeAction(a);
+        // Channels group
+        var channelIds = Object.keys(channelSeqs);
+        if (channelIds.length > 0) {
+            stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Channels'));
+            channelIds.forEach(function (cid) {
+                addStateRow(stateEl, truncate(cid, 24), 'seq=' + channelSeqs[cid]);
             });
-            row.appendChild(btn);
+        }
+
+        // Entity counts group
+        var entityKeys = Object.keys(entityCounts);
+        if (entityKeys.length > 0) {
+            stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Entities'));
+            entityKeys.forEach(function (t) {
+                var c = entityCounts[t];
+                addStateRow(stateEl, t, c.rowCount + ' rows' + (c.localCount > 0 ? ', ' + c.localCount + ' local' : ''));
+            });
+        }
+
+        // Misc
+        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Misc'));
+        addStateRow(stateEl, 'Offline queue', String(offlineQueue));
+        if (lastGcCollected !== null) addStateRow(stateEl, 'Last GC', String(lastGcCollected));
+        if (schemaInfo.version) addStateRow(stateEl, 'Schema v', String(schemaInfo.version));
+        if (schemaInfo.fingerprint) addStateRow(stateEl, 'Fingerprint', truncate(schemaInfo.fingerprint, 16));
+    }
+
+    function addStateRow(parent, label, value) {
+        var row = el('div', CLS.stateRow);
+        row.appendChild(el('span', CLS.stateLabel, label));
+        row.appendChild(el('span', CLS.stateValue, value));
+        parent.appendChild(row);
+    }
+
+    // ── Actions panel ─────────────────────────────────────────────────────
+
+    function buildActionsPanel() {
+        actionsEl = el('div', CLS.actions);
+        renderActions();
+        return actionsEl;
+    }
+
+    function renderActions() {
+        if (!actionsEl) return;
+        clearChildren(actionsEl);
+
+        var ACTION_DEFS = [
+            {
+                label: 'Reconnect',
+                desc: 'Force gateway reconnect',
+                variant: null,
+                action: 'reconnect',
+                clientSide: true,
+            },
+            {
+                label: 'Force Full Sync',
+                desc: 'Discard local state, re-sync',
+                variant: 'yellow',
+                action: 'force-full-sync',
+                clientSide: true,
+            },
+            {
+                label: 'Clear Client DB',
+                desc: 'Delete OPFS database & reload',
+                variant: 'red',
+                action: 'clear-client-db',
+                clientSide: true,
+                confirm: true,
+            },
+        ];
+
+        ACTION_DEFS.forEach(function (def) {
+            var card = el('div', CLS.actionCard + (def.variant ? ' ' + def.variant : ''));
+            var info = el('div');
+            info.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
+            info.appendChild(el('span', CLS.actionCardLabel, def.label));
+            info.appendChild(el('span', CLS.actionCardDesc, def.desc));
+            card.appendChild(info);
+            card.addEventListener('click', function () { executeAction(def); });
+            actionsEl.appendChild(card);
         });
-
-        group.appendChild(row);
-        parent.appendChild(group);
     }
 
-    function executeAction(a) {
-        if (a.confirm) {
-            if (!confirm('Are you sure you want to: ' + a.label + '? This cannot be undone.')) return;
+    function executeAction(def) {
+        if (def.confirm) {
+            if (!confirm('Are you sure? ' + def.label + ' cannot be undone.')) return;
         }
 
-        if (a.clientSide) {
-            // Send via BroadcastChannel
+        if (def.clientSide) {
             try {
-                bc.postMessage({ type: 'devtools-action', action: a.action });
-                showToast(a.label + ': sent', true);
-                if (a.action === 'clear-client-db') {
-                    setTimeout(function () { location.reload(); }, 1000);
+                bc.postMessage({ type: 'devtools-action', action: def.action });
+                showToast(def.label + ': sent', true);
+                if (def.action === 'clear-client-db') {
+                    var onCleared = function (e) {
+                        if (e.data && e.data.type === 'devtools-db-cleared') {
+                            bc.removeEventListener('message', onCleared);
+                            location.reload();
+                        }
+                    };
+                    bc.addEventListener('message', onCleared);
+                    // Fallback reload after 2s
+                    setTimeout(function () { location.reload(); }, 2000);
                 }
             } catch (err) {
-                showToast(a.label + ': ' + err.message, false);
+                showToast(def.label + ': ' + err.message, false);
             }
             return;
         }
 
-        // Server-side action
-        var payload = { action: a.action, workspaceId: getWorkspaceId() };
-
+        // Server-side actions
+        var wsParam = getWorkspaceId();
         fetch('/__syncengine/devtools/action', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ action: def.action, workspaceId: wsParam }),
         })
             .then(function (res) { return res.json(); })
             .then(function (data) {
-                if (data.ok) {
-                    showToast(data.message || (a.label + ': OK'), true);
-                    if (a.action === 'reset' || a.action === 'teardown') {
-                        // Clear client OPFS, wait for worker confirmation, then reload
-                        var dbCleared = false;
-                        var onDbCleared = function (e) {
-                            if (e.data && e.data.type === 'devtools-db-cleared') {
-                                dbCleared = true;
-                                location.reload();
-                            }
-                        };
-                        try {
-                            bc.addEventListener('message', onDbCleared);
-                            bc.postMessage({ type: 'devtools-action', action: 'clear-client-db' });
-                        } catch (e) { /* */ }
-                        // Fallback: reload after 3s even if worker doesn't respond
-                        setTimeout(function () { if (!dbCleared) location.reload(); }, 3000);
-                    }
-                } else {
-                    showToast(data.message || data.error || (a.label + ': failed'), false);
-                }
+                if (data.ok) showToast(data.message || (def.label + ': OK'), true);
+                else showToast(data.message || (def.label + ': failed'), false);
             })
-            .catch(function (err) {
-                showToast(a.label + ': ' + err.message, false);
-            });
+            .catch(function (err) { showToast(def.label + ': ' + err.message, false); });
     }
 
-    // ── Toggle / render ──────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────
 
-    function toggleExpanded() {
-        expanded = !expanded;
-        sessionStorage.setItem('se-devtools-expanded', expanded ? '1' : '0');
-        render();
+    function getWorkspaceId() {
+        var meta = document.querySelector('meta[name="syncengine-workspace-id"]');
+        return (meta && meta.getAttribute('content')) || null;
     }
+
+    // ── Full render ───────────────────────────────────────────────────────
 
     function render() {
         renderPill();
-        renderPopover();
-    }
-
-    // ── Draggable pill ───────────────────────────────────────────────────
-
-    function setupDraggable(el) {
-        var dragging = false;
-        var dragStartX = 0, dragStartY = 0;
-        var elStartX = 0, elStartY = 0;
-        var lastClientX = 0, lastClientY = 0;
-
-        el.addEventListener('mousedown', function (e) {
-            if (e.button !== 0) return;
-            dragging = true;
-            dragStartX = e.clientX;
-            dragStartY = e.clientY;
-            lastClientX = e.clientX;
-            lastClientY = e.clientY;
-            var rect = el.getBoundingClientRect();
-            elStartX = rect.left;
-            elStartY = rect.top;
-            e.preventDefault();
-        });
-
-        document.addEventListener('mousemove', function (e) {
-            if (!dragging) return;
-            lastClientX = e.clientX;
-            lastClientY = e.clientY;
-            var dx = e.clientX - dragStartX;
-            var dy = e.clientY - dragStartY;
-
-            var newX = elStartX + dx;
-            var newY = elStartY + dy;
-
-            // Clamp to viewport
-            newX = Math.max(0, Math.min(newX, window.innerWidth - el.offsetWidth));
-            newY = Math.max(0, Math.min(newY, window.innerHeight - el.offsetHeight));
-
-            el.style.left = newX + 'px';
-            el.style.top = newY + 'px';
-            el.style.right = 'auto';
-            el.style.bottom = 'auto';
-
-            pillPos = { x: newX, y: newY };
-        });
-
-        document.addEventListener('mouseup', function () {
-            if (!dragging) return;
-            dragging = false;
-            savePillPos();
-
-            // Use net displacement from mousedown to distinguish click from drag
-            var displacement = Math.abs(lastClientX - dragStartX) + Math.abs(lastClientY - dragStartY);
-            if (displacement < 4) {
-                toggleExpanded();
-            } else if (expanded) {
-                renderPopover();
-            }
-        });
-    }
-
-    // ── Keyboard shortcut ────────────────────────────────────────────────
-
-    document.addEventListener('keydown', function (e) {
-        if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
-            e.preventDefault();
-            toggleExpanded();
+        if (drawerOpen) {
+            if (!drawerEl) buildDrawer();
+            drawerEl.classList.remove(CLS.hidden);
+            if (activeTab === 'data') renderDataSidebar();
+            if (activeTab === 'state') renderState();
+            if (activeTab === 'timeline') renderTimelineList();
         }
-    });
+    }
 
-    // ── BroadcastChannel ─────────────────────────────────────────────────
+    // ── BroadcastChannel ──────────────────────────────────────────────────
 
     var bc = new BroadcastChannel('syncengine-devtools');
 
@@ -892,71 +721,102 @@
         if (!data || !data.type) return;
 
         if (data.type === 'devtools-status') {
-            // Merge status, preserving defaults for missing fields
-            if (data.connection !== undefined) status.connection = data.connection;
-            if (data.sync) {
-                status.sync = Object.assign({}, status.sync, data.sync);
+            // Connection
+            if (data.connection !== undefined) connStatus = data.connection;
+            if (data.peerId !== undefined) peerId = data.peerId || '';
+            if (data.serverUrl !== undefined) serverUrl = data.serverUrl || '';
+            // Sync
+            if (data.sync) syncPhase = data.sync.phase || 'idle';
+            if (data.hlc) hlc = data.hlc;
+            if (data.offlineQueue !== undefined) offlineQueue = data.offlineQueue;
+            // Schema & tables
+            if (data.schema) schemaInfo = data.schema;
+            if (Array.isArray(data.tables)) tables = data.tables;
+            if (Array.isArray(data.viewDefs)) viewDefs = data.viewDefs;
+            // View row counts
+            if (data.views) viewRowCounts = data.views;
+            // Channels
+            if (Array.isArray(data.channels)) {
+                data.channels.forEach(function (ch) {
+                    if (typeof ch === 'string' && !channelSeqs[ch]) channelSeqs[ch] = 0;
+                });
             }
-            if (data.hlc) status.hlc = data.hlc;
-            if (data.conflicts !== undefined) status.conflicts = data.conflicts;
-            if (data.offlineQueue !== undefined) status.offlineQueue = data.offlineQueue;
-            if (data.undoDepth !== undefined) status.undoDepth = data.undoDepth;
-            if (data.schema) status.schema = data.schema;
-            if (data.entities !== undefined) status.entities = data.entities;
-            if (data.channels !== undefined) status.channels = data.channels;
-            if (data.views !== undefined) status.views = data.views;
             render();
         }
 
-        if (data.type === 'devtools-message' && !messagePaused) {
-            messageLog.push({
+        if (data.type === 'devtools-message') {
+            var entry = {
                 ts: data.ts || Date.now(),
                 kind: data.kind || 'unknown',
-                channel: data.channel || '',
-                entity: data.entity || '',
+                channelId: data.channel || data.channelId || '',
                 seq: data.seq,
+                opCount: data.opCount,
+                table: data.table || data.entity || '',
+                id: data.id || '',
+                fields: data.fields || [],
+                rowCount: data.rowCount,
+                localCount: data.localCount,
+                topic: data.topic || '',
+                event: data.event || '',
+                granted: data.granted,
+                collected: data.collected,
                 payload: data.payload,
-            });
-            // Ring buffer
-            while (messageLog.length > MESSAGE_LOG_MAX) {
-                messageLog.shift();
-                // Adjust expanded index
-                if (expandedMessageIndex >= 0) expandedMessageIndex--;
-                if (expandedMessageIndex < 0) expandedMessageIndex = -1;
+            };
+            timeline.push(entry);
+            while (timeline.length > TIMELINE_MAX) timeline.shift();
+
+            // Update derived state from message
+            if (data.kind === 'delta' && (data.channel || data.channelId) && data.seq != null) {
+                channelSeqs[data.channel || data.channelId] = data.seq;
             }
-            render();
+            if (data.kind === 'entity-state' && data.table) {
+                entityCounts[data.table] = { rowCount: data.rowCount || 0, localCount: data.localCount || 0 };
+            }
+            if (data.kind === 'gc' && data.collected != null) {
+                lastGcCollected = data.collected;
+            }
+
+            if (drawerOpen && activeTab === 'timeline') renderTimelineList();
+            renderPill();
+        }
+
+        if (data.type === 'devtools-query-result') {
+            var qid = data.id;
+            var pending = pendingQueryIds[qid];
+            if (pending) {
+                delete pendingQueryIds[qid];
+                tableRows[pending.name] = {
+                    columns: data.columns || [],
+                    rows: data.rows || [],
+                    localIds: data.localIds || [],
+                };
+                if (drawerOpen && activeTab === 'data') renderDataGrid();
+            }
         }
     });
 
-    // Send initial ping, re-ping every 5s
+    // ── Ping heartbeat ────────────────────────────────────────────────────
+
     function sendPing() {
-        try { bc.postMessage({ type: 'devtools-ping' }); } catch (_) { /* ignore */ }
+        try { bc.postMessage({ type: 'devtools-ping' }); } catch (_) {}
     }
     sendPing();
     setInterval(sendPing, 5000);
 
-    // ── Server metrics polling ───────────────────────────────────────────
+    // ── Keyboard shortcut ─────────────────────────────────────────────────
 
-    function pollServerMetrics() {
-        var wsParam = getWorkspaceId();
-        fetch('/__syncengine/devtools/metrics' + (wsParam ? '?wsId=' + encodeURIComponent(wsParam) : ''))
-            .then(function (res) {
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                return res.json();
-            })
-            .then(function (data) {
-                serverMetrics = data;
-                render();
-            })
-            .catch(function () {
-                // Silently ignore — server may not be ready yet
-            });
+    document.addEventListener('keydown', function (e) {
+        if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+            e.preventDefault();
+            toggleDrawer();
+        }
+    });
+
+    // ── Initial render ────────────────────────────────────────────────────
+
+    if (drawerOpen) {
+        buildDrawer();
     }
-
-    pollServerMetrics();
-    setInterval(pollServerMetrics, 3000);
-
-    // ── Initial render ───────────────────────────────────────────────────
     render();
 
 })();
