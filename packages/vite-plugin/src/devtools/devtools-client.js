@@ -82,6 +82,7 @@
 
     // ── App state ────────────────────────────────────────────────────────
     var connStatus = 'connecting';
+    var knownWorkerTs = 0; // newest worker timestamp — ignore older workers
     var peerId = '';
     var serverUrl = '';
     var tables = [];          // Array<{ name, columns, sql }>
@@ -777,6 +778,9 @@
         if (!data || !data.type) return;
 
         if (data.type === 'devtools-status') {
+            // Ignore messages from stale workers (HMR can leave old workers alive)
+            if (data._workerTs && data._workerTs < knownWorkerTs) return;
+            if (data._workerTs && data._workerTs > knownWorkerTs) knownWorkerTs = data._workerTs;
             // Connection
             if (data.connection !== undefined) connStatus = data.connection;
             if (data.peerId !== undefined) peerId = data.peerId || '';

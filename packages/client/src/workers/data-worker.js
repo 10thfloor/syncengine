@@ -191,6 +191,7 @@ const topicState = {
 // ── Connection status (tracked for devtools) ─────────────────────────────────
 
 let connectionStatus = 'disconnected';
+const workerInitTs = Date.now();
 
 // ── Conflict log (accumulated for devtools) ──────────────────────────────────
 
@@ -324,6 +325,7 @@ function broadcastDevtoolsStatus() {
             : [];
         devtoolsChannel.postMessage({
             type: 'devtools-status',
+            _workerTs: workerInitTs,
             sync: {
                 phase: sync.phase,
                 messagesReplayed: sync.messagesReplayed || 0,
