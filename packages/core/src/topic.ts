@@ -23,6 +23,7 @@
 
 import type { EntityStateShape, EntityState } from "./entity";
 import { buildInitialState } from "./entity";
+import { errors, SchemaCode } from './errors/index.js';
 
 // ── Topic definition ──────────────────────────────────────────────────────
 
@@ -64,26 +65,38 @@ export function topic<
     TShape extends EntityStateShape,
 >(name: TName, state: TShape): TopicDef<TName, TShape> {
     if (!name || typeof name !== "string") {
-        throw new Error(`topic: name must be a non-empty string.`);
+        throw errors.schema(SchemaCode.INVALID_TOPIC_NAME, {
+            message: `topic: name must be a non-empty string.`,
+            hint: `Pass a valid name: topic('myTopic', { ... })`,
+        });
     }
     if (name.startsWith("$")) {
-        throw new Error(
-            `topic('${name}'): names may not start with '$' ` +
-            `(reserved for framework metadata).`,
-        );
+        throw errors.schema(SchemaCode.INVALID_TOPIC_NAME, {
+            message:
+                `topic('${name}'): names may not start with '$' ` +
+                `(reserved for framework metadata).`,
+            hint: `Remove the '$' prefix.`,
+            context: { topic: name },
+        });
     }
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
-        throw new Error(
-            `topic('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/ ` +
-            `so it can be used as a NATS subject token.`,
-        );
+        throw errors.schema(SchemaCode.INVALID_TOPIC_NAME, {
+            message:
+                `topic('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/ ` +
+                `so it can be used as a NATS subject token.`,
+            hint: `Use only letters, numbers, and underscores. Must start with a letter.`,
+            context: { topic: name },
+        });
     }
     for (const fieldName of Object.keys(state)) {
         if (fieldName.startsWith("$")) {
-            throw new Error(
-                `topic('${name}'): state field '${fieldName}' may not start ` +
-                `with '$' (reserved for framework metadata).`,
-            );
+            throw errors.schema(SchemaCode.RESERVED_COLUMN_PREFIX, {
+                message:
+                    `topic('${name}'): state field '${fieldName}' may not start ` +
+                    `with '$' (reserved for framework metadata).`,
+                hint: `Rename the field to remove the '$' prefix.`,
+                context: { topic: name, field: fieldName },
+            });
         }
     }
 

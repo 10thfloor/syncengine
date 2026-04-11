@@ -62,6 +62,10 @@ importers:
         version: 1.6.1(@types/node@25.6.0)
 
   packages/bin-utils:
+    dependencies:
+      '@syncengine/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -131,6 +135,9 @@ importers:
       typescript:
         specifier: ~5.9.3
         version: 5.9.3
+      vitest:
+        specifier: ^1.0.4
+        version: 1.6.1(@types/node@25.6.0)
 
   packages/nats-bin:
     dependencies:
@@ -150,6 +157,9 @@ importers:
       '@syncengine/bin-utils':
         specifier: workspace:*
         version: link:../bin-utils
+      '@syncengine/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

@@ -20,6 +20,7 @@
  */
 
 import { createContext, useContext, type ReactNode, type ReactElement } from 'react';
+import { errors, CliCode } from '@syncengine/core';
 import type { Store } from './store';
 
 type AnyStore = Store<any, any>;
@@ -43,10 +44,10 @@ export function StoreProvider({ store, children }: StoreProviderProps): ReactEle
 export function useStore<T extends AnyStore = AnyStore>(): T {
     const ctx = useContext(StoreContext);
     if (!ctx) {
-        throw new Error(
-            'useStore() must be called inside a <StoreProvider store={...}>. ' +
-            'Wrap your app root in <StoreProvider> or use the module-level store instance directly.',
-        );
+        throw errors.cli(CliCode.PROVIDER_MISSING, {
+            message: `useStore() must be called inside a <StoreProvider store={...}>.`,
+            hint: `Wrap your app:\n\n  <StoreProvider store={store}>\n    <App />\n  </StoreProvider>\n\nOr use the module-level store instance directly.`,
+        });
     }
     return ctx as T;
 }

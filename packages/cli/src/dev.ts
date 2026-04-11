@@ -56,6 +56,7 @@ import {
     provisionWorkspace,
 } from './client';
 import { hashWorkspaceId } from '@syncengine/core/http';
+import { errors, CliCode } from '@syncengine/core';
 
 // ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -71,10 +72,11 @@ export async function devCommand(args: string[]): Promise<void> {
     if (fresh) {
         const existing = readPids(stateDir);
         if (existing && isAlive(existing.orchestrator)) {
-            throw new Error(
-                `--fresh refused: a syncengine dev stack (pid ${existing.orchestrator}) is already running.\n` +
-                `Run \`syncengine down\` first, then retry with \`syncengine dev --fresh\`.`,
-            );
+            throw errors.cli(CliCode.STACK_ALREADY_RUNNING, {
+                message: `--fresh refused: a syncengine dev stack (pid ${existing.orchestrator}) is already running.`,
+                hint: `Run \`syncengine down\` first, then retry with \`syncengine dev --fresh\`.`,
+                context: { pid: existing.orchestrator },
+            });
         }
 
         // Safety guard: `rmSync` with `recursive: true, force: true` is a
@@ -82,11 +84,11 @@ export async function devCommand(args: string[]): Promise<void> {
         // a misconfigured env var could point it at `/` or `$HOME`. Refuse to
         // wipe anything that isn't clearly a syncengine state directory.
         if (!isSafeStateDirToWipe(stateDir, repoRoot)) {
-            throw new Error(
-                `--fresh refused: state dir ${stateDir} is outside the expected locations.\n` +
-                `Expected either <repoRoot>/.syncengine/dev or ~/.syncengine/dev.\n` +
-                `Remove SYNCENGINE_STATE_DIR or delete the directory manually.`,
-            );
+            throw errors.cli(CliCode.FRESH_REFUSED, {
+                message: `--fresh refused: state dir ${stateDir} is outside the expected locations.`,
+                hint: `Expected either <repoRoot>/.syncengine/dev or ~/.syncengine/dev. Remove SYNCENGINE_STATE_DIR or delete the directory manually.`,
+                context: { stateDir },
+            });
         }
 
         if (existsSync(stateDir)) {
@@ -204,9 +206,10 @@ async function boot(
     //    processes if there's no config to be found.
     const appDir = resolveAppDir(repoRoot);
     if (!appDir) {
-        throw new Error(
-            'No app directory found. Run syncengine dev from a directory containing syncengine.config.ts (or .js/.mjs).',
-        );
+        throw errors.cli(CliCode.APP_DIR_NOT_FOUND, {
+            message: `No app directory found. Run syncengine dev from a directory containing syncengine.config.ts (or .js/.mjs).`,
+            hint: `Create a syncengine.config.ts in your project root.`,
+        });
     }
 
     // 4. Workspace service (tsx directly — going through pnpm breaks the
@@ -533,10 +536,11 @@ logtime: true
 function resolveServerDir(appDir: string): string {
     const candidate = join(appDir, 'node_modules', '@syncengine', 'server');
     if (existsSync(candidate)) return resolve(candidate);
-    throw new Error(
-        `Cannot find @syncengine/server from ${appDir}.\n` +
-        `Make sure it's installed (npm install @syncengine/server).`,
-    );
+    throw errors.cli(CliCode.DEPENDENCY_NOT_FOUND, {
+        message: `Cannot find @syncengine/server from ${appDir}.`,
+        hint: `Make sure it's installed: pnpm add @syncengine/server`,
+        context: { package: '@syncengine/server', appDir },
+    });
 }
 
 /**
@@ -552,9 +556,11 @@ function resolveLocalBin(name: string, appDir: string): string {
     for (const bin of candidates) {
         if (existsSync(bin)) return bin;
     }
-    throw new Error(
-        `Cannot find ${name} binary. Install tsx as a devDependency.`,
-    );
+    throw errors.cli(CliCode.DEPENDENCY_NOT_FOUND, {
+        message: `Cannot find ${name} binary. Install tsx as a devDependency.`,
+        hint: `Run: pnpm add -D tsx`,
+        context: { binary: name },
+    });
 }
 
 function printReadyBanner(ports: Ports, rawNats: boolean): void {

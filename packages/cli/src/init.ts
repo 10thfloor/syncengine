@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 
 import { banner, note } from './runner';
+import { errors, CliCode } from '@syncengine/core';
 
 export async function initCommand(args: string[]): Promise<void> {
     const target = resolve(args[0] ?? '.');
@@ -27,9 +28,10 @@ export async function initCommand(args: string[]): Promise<void> {
         // Allow empty dirs or dirs with only dotfiles
         const nonDot = contents.filter((f) => !f.startsWith('.'));
         if (nonDot.length > 0) {
-            throw new Error(
-                `Directory ${target} is not empty. Pick an empty directory or a new name.`,
-            );
+            throw errors.cli(CliCode.DIRECTORY_NOT_EMPTY, {
+                message: `Directory ${target} is not empty. Pick an empty directory or a new name.`,
+                context: { directory: target },
+            });
         }
     }
 

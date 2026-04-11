@@ -12,6 +12,33 @@
 
 ---
 
+## Execution Invariants
+
+**Every commit must leave the build green.** The deprecated classes (`EntityError` in core, `StackNotRunningError` in cli) stay alive through Tasks 1–9 while call sites are migrated, and are deleted only in Task 10 once nothing references them. Do NOT delete either class inside Tasks 4–9 even if individual files look "done".
+
+**Two orthogonal error systems.** The platform error system (`SyncEngineError`, `errors.*`, code registries, `formatError`) is a one-way conversation from the *framework* to the *developer*: "this is what broke, this is how to fix it." User handler code should NOT throw `SyncEngineError` — those are for framework failures. User domain errors (e.g., `'OUT_OF_STOCK'`, `'RESERVATION_EXPIRED'`) use the existing `EntityError(code, message)` class, modeled on Meteor's `Meteor.Error`. `EntityError` is a user-facing public API and **is not deleted** by this plan — it's orthogonal to the platform error system.
+
+**`applyHandler` catch-site propagation:** typed errors (both `SyncEngineError` from framework code bubbling through, and `EntityError` from user domain code) propagate unchanged. Everything else gets wrapped in a `UserHandlerError` with the original as `cause`.
+
+```ts
+} catch (err) {
+    if (err instanceof SyncEngineError) throw err;  // framework re-throw
+    if (err instanceof EntityError) throw err;      // user domain error
+    const message = err instanceof Error ? err.message : String(err);
+    throw errors.handler(HandlerCode.USER_HANDLER_ERROR, {
+        message: `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
+        context: { entity: entity.$name, handler: handlerName },
+        cause: err instanceof Error ? err : new Error(String(err)),
+    });
+}
+```
+
+**Restate boundary loses structure.** `restate.TerminalError` is a stringly-typed wire boundary. `SyncEngineError` encodes as `[CATEGORY::CODE] message`; `EntityError` encodes as `[CODE] message` (matching the pre-existing format so clients that already parse this format don't break). `hint`/`context` drop at the boundary. Re-hydrating structure on the client is out of scope for this plan.
+
+**Design-spec code regrouping (deviation, intentional).** The design spec §2 keeps definition-time errors like `INVALID_ENTITY_NAME`, `HANDLER_NAME_*`, `STATE_FIELD_COLLISION`, `TRANSITION_*` under `EntityCode`. This plan moves them to `SchemaCode` so that the split is definition-time (schema) vs runtime-validation (entity). `EntityCode` becomes the narrow runtime-state set: `INVALID_TRANSITION`, `MISSING_REQUIRED_FIELD`, `TYPE_MISMATCH`, `ENUM_VIOLATION`. The design spec should be updated to match.
+
+---
+
 ## File Map
 
 ```
@@ -25,21 +52,23 @@ packages/core/src/errors/
 packages/core/src/__tests__/
 ├── errors.test.ts  — tests for error classes, factory, codes, format
 
-packages/core/src/index.ts          — add error exports, remove EntityError
-packages/core/src/entity.ts         — delete EntityError, convert throws
+packages/core/src/index.ts          — add error exports (Task 4). EntityError export stays.
+packages/core/src/entity.ts         — convert framework-internal throws, update catch-site propagation (Task 5). EntityError class stays (public user-domain API, Meteor-style).
 packages/core/src/schema.ts         — convert throws
 packages/core/src/sql-gen.ts        — convert throws
 packages/core/src/topic.ts          — convert throws
 packages/core/src/http.ts           — convert throws
 packages/core/src/migrations.ts     — convert throws
-packages/server/src/entity-runtime.ts  — convert throws
+packages/core/src/__tests__/entity.test.ts — update one test (framework-thrown INVALID_TRANSITION now comes as SyncEngineError). User-throw propagation tests stay.
+packages/server/src/entity-runtime.ts  — convert throws, update Restate catch-site (handles both SyncEngineError and EntityError)
 packages/server/src/entity-keys.ts     — convert throws
 packages/server/src/workflow.ts        — convert throws
 packages/server/src/workspace/workspace.ts — convert throws
 packages/client/src/store.ts           — convert throws
 packages/client/src/entity-client.ts   — convert throws
 packages/client/src/react.tsx          — convert throws
-packages/cli/src/client.ts            — delete StackNotRunningError, convert throws
+packages/cli/src/client.ts            — convert throws (Task 8); delete StackNotRunningError class (Task 10)
+packages/cli/src/workspace.ts         — update StackNotRunningError catch-site
 packages/cli/src/dev.ts               — convert throws
 packages/cli/src/build.ts             — convert throws
 packages/cli/src/init.ts              — convert throws
@@ -51,6 +80,11 @@ packages/vite-plugin/src/devtools/devtools-plugin.ts — convert throws
 packages/test-utils/src/test-store.ts  — convert throws
 packages/bin-utils/index.ts           — convert throws
 packages/restate-bin/index.ts         — convert throws
+
+Unchanged (user-facing code that uses EntityError as intended):
+- apps/test/src/entities/*.ts
+- apps/test/src/__tests__/*.ts
+- packages/test-utils/src/__tests__/test-store.test.ts
 ```
 
 ---
@@ -499,6 +533,25 @@ function make(
     });
 }
 
+// USER_HANDLER_ERROR requires a `cause` — enforced via an overloaded signature so
+// the factory can't silently downgrade to a non-UserHandlerError SyncEngineError.
+interface HandlerFactory {
+    (code: typeof HandlerCode.USER_HANDLER_ERROR, opts: ErrorOpts & { cause: Error }): UserHandlerError;
+    (code: Exclude<HandlerCodeValue, typeof HandlerCode.USER_HANDLER_ERROR>, opts: ErrorOpts): SyncEngineError;
+}
+
+const handler: HandlerFactory = ((code: HandlerCodeValue, opts: ErrorOpts & { cause?: Error }) => {
+    if (code === HandlerCode.USER_HANDLER_ERROR) {
+        // Overload guarantees cause is present at the type level.
+        return new UserHandlerError({
+            message: opts.message,
+            context: opts.context,
+            cause: opts.cause as Error,
+        });
+    }
+    return make(code, 'handler', 'fatal', opts);
+}) as HandlerFactory;
+
 export const errors = {
     schema(code: SchemaCodeValue, opts: ErrorOpts): SyncEngineError {
         return make(code, 'schema', 'fatal', opts);
@@ -512,16 +565,7 @@ export const errors = {
     connection(code: ConnectionCodeValue, opts: ErrorOpts): SyncEngineError {
         return make(code, 'connection', 'warning', opts);
     },
-    handler(code: HandlerCodeValue, opts: ErrorOpts & { cause?: Error }): SyncEngineError {
-        if (code === HandlerCode.USER_HANDLER_ERROR && opts.cause) {
-            return new UserHandlerError({
-                message: opts.message,
-                context: opts.context,
-                cause: opts.cause,
-            });
-        }
-        return make(code, 'handler', 'fatal', opts);
-    },
+    handler,
     cli(code: CliCodeValue, opts: ErrorOpts): SyncEngineError {
         return make(code, 'cli', 'fatal', opts);
     },
@@ -693,7 +737,9 @@ function parseStack(stack: string | undefined): ParsedFrame[] {
         .map((line) => line.trim())
         .filter((line) => line.startsWith('at '))
         .map((raw) => {
-            const match = raw.match(/\((.+)\)/) ?? raw.match(/at (.+)/);
+            // Non-greedy + end-anchored so "at foo (bar) (path)" (rare) captures the
+            // final parenthesized group, not everything between the first and last paren.
+            const match = raw.match(/\(([^)]+)\)$/) ?? raw.match(/at (.+)$/);
             const path = match?.[1] ?? raw;
             const isUserCode =
                 !path.includes('node_modules') && !path.startsWith('node:');
@@ -800,17 +846,18 @@ git commit -m "feat(errors): add console renderer with stack trace cleaning"
 
 ---
 
-### Task 4: Wire Exports from @syncengine/core
+### Task 4: Wire Exports from @syncengine/core (additive only)
 
 **Files:**
 - Modify: `packages/core/src/index.ts`
 
+**Invariant:** `EntityError` remains exported and defined until Task 10. This task is purely additive.
+
 - [ ] **Step 1: Add error exports to core barrel**
 
-In `packages/core/src/index.ts`, add a new export block and remove the `EntityError` export from the entity block:
+In `packages/core/src/index.ts`, add a new export block near the top of the file. Do NOT touch the existing `EntityError` export — it stays until Task 10.
 
 ```ts
-// Add near the top of the file:
 export {
     SyncEngineError,
     UserHandlerError,
@@ -832,18 +879,16 @@ export type {
 } from './errors/index.js';
 ```
 
-Remove `EntityError` from the entity export block (line 80 in current file). Also remove `EntityError` from `packages/core/src/entity.ts` — delete the class definition entirely (lines 34-45).
-
-- [ ] **Step 2: Run typecheck to verify no broken imports**
+- [ ] **Step 2: Run typecheck to verify build is clean**
 
 Run: `cd packages/core && npx tsc --noEmit`
-Expected: Some failures from files that still import `EntityError` — this is expected, we'll fix them in the conversion tasks.
+Expected: PASS. This task adds exports only; nothing existing changes.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add packages/core/src/index.ts packages/core/src/entity.ts
-git commit -m "feat(errors): wire error system exports from @syncengine/core, remove EntityError class"
+git add packages/core/src/index.ts
+git commit -m "feat(errors): export error system from @syncengine/core"
 ```
 
 ---
@@ -966,7 +1011,7 @@ throw errors.schema(SchemaCode.TRANSITION_NOT_EXHAUSTIVE, {
 });
 ```
 
-- [ ] **Step 2: Convert entity.ts runtime throws**
+- [ ] **Step 2: Convert entity.ts runtime throws and update catch-site propagation**
 
 Line 767 (`no handler named`):
 ```ts
@@ -977,16 +1022,30 @@ throw errors.handler(HandlerCode.HANDLER_NOT_FOUND, {
 });
 ```
 
-Line 793 (`handler rejected`):
+**Catch block around line 788–796** (currently propagates `EntityError` via `instanceof`). Extend the propagation check so **both** `SyncEngineError` (framework errors re-thrown through user code) and `EntityError` (user domain errors) pass through unchanged. Everything else gets wrapped in `UserHandlerError` with the original as `cause`.
+
 ```ts
-throw errors.handler(HandlerCode.USER_HANDLER_ERROR, {
-    message: `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
-    context: { entity: entity.$name, handler: handlerName },
-    cause: err instanceof Error ? err : new Error(String(err)),
-});
+// Add to imports at top of file:
+import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './errors/index.js';
+// (EntityError is already referenced in this file — keep that reference.)
+
+// Replace the existing catch block:
+} catch (err) {
+    // Typed errors propagate unchanged so callers can pattern-match on them.
+    if (err instanceof SyncEngineError) throw err;   // framework re-throw
+    if (err instanceof EntityError) throw err;       // user domain error
+    const message = err instanceof Error ? err.message : String(err);
+    throw errors.handler(HandlerCode.USER_HANDLER_ERROR, {
+        message: `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
+        context: { entity: entity.$name, handler: handlerName },
+        cause: err instanceof Error ? err : new Error(String(err)),
+    });
+}
 ```
 
-Line 830 (`EntityError INVALID_TRANSITION` — replace the old EntityError):
+`EntityError` stays as a public user-facing domain-error class — it is **not** deleted by Task 10. See Execution Invariants for rationale.
+
+Line 830 (framework-thrown INVALID_TRANSITION — this is the framework detecting an illegal transition, so it migrates to the platform error system):
 ```ts
 throw errors.entity(EntityCode.INVALID_TRANSITION, {
     message: `Cannot transition '${field}' from '${oldStatus}' to '${newStatus}'.`,
@@ -1107,22 +1166,54 @@ throw errors.schema(SchemaCode.UNKNOWN_MIGRATION_OP, {
 });
 ```
 
-- [ ] **Step 4: Update existing tests that assert on old error messages**
+- [ ] **Step 4: Update `entity.test.ts` for the framework-thrown INVALID_TRANSITION**
 
-In `packages/core/src/__tests__/entity.test.ts`, the construction guard tests use `.toThrow(/regex/)`. These still work — `SyncEngineError` extends `Error` and the `message` field is still the Error message. The regex patterns should still match. Verify by running tests.
+Two kinds of `EntityError` tests live in `packages/core/src/__tests__/entity.test.ts`:
 
-In `packages/core/src/__tests__/schema.test.ts`, same pattern — `.toThrow(...)` matchers test the message string, which hasn't changed.
+1. **User-throw propagation** (~lines 306–324): a handler fixture does `throw new EntityError('INVALID_TRANSITION', 'already done')` and the test asserts the error propagates. This is the *user contract* and **stays unchanged** — `EntityError` remains public API and the catch block still propagates it.
+
+2. **Framework-thrown INVALID_TRANSITION** (~lines 492–508): asserts that when the transition guard in `applyHandler` (line 830) rejects, the caller receives an `EntityError` with `code === 'INVALID_TRANSITION'`. After Task 5 Step 2, that throw migrates to `errors.entity(EntityCode.INVALID_TRANSITION, …)`, so the error is now a `SyncEngineError`. Rewrite this test only.
+
+Add `SyncEngineError` and `EntityCode` to the import block at line 8 (keep the existing `EntityError` import — group (1) still uses it):
+```ts
+import {
+    ..., EntityError, errors, EntityCode, SyncEngineError, ...
+} from '../index';
+```
+
+Rewrite the test at ~line 492:
+```ts
+it('rejects invalid transitions with SyncEngineError INVALID_TRANSITION', () => {
+    // ... existing setup ...
+    try {
+        applyHandler(e, 'finish', { status: 'idle' }, []);
+    } catch (err) {
+        expect(err).toBeInstanceOf(SyncEngineError);
+        expect((err as SyncEngineError).code).toBe(EntityCode.INVALID_TRANSITION);
+        expect((err as SyncEngineError).category).toBe('entity');
+        expect((err as SyncEngineError).message).toContain("'idle'");
+        expect((err as SyncEngineError).message).toContain("'done'");
+        return;
+    }
+    throw new Error('expected throw');
+});
+
+// Line 508 equivalent:
+expect(() => applyHandler(/* … */)).toThrow(SyncEngineError);
+```
+
+`packages/core/src/__tests__/schema.test.ts` — construction-guard tests use `.toThrow(/regex/)` to match message substrings. Messages are preserved verbatim, so these still pass without change. Verify by running tests.
 
 - [ ] **Step 5: Run all core tests**
 
 Run: `cd packages/core && npx vitest run`
-Expected: PASS — all existing tests still pass since messages are preserved.
+Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add packages/core/src/
-git commit -m "refactor(core): convert all throw sites to errors.* factories"
+git commit -m "refactor(core): convert throw sites to errors.* factories, propagate SyncEngineError from handlers"
 ```
 
 ---
@@ -1138,12 +1229,34 @@ git commit -m "refactor(core): convert all throw sites to errors.* factories"
 - [ ] **Step 1: Convert entity-runtime.ts**
 
 ```ts
-import { errors, HandlerCode, SchemaCode, SyncEngineError } from '@syncengine/core';
+// Update imports — KEEP EntityError (user domain errors flow through here too)
+// and add the SyncEngine types.
+import { errors, HandlerCode, SchemaCode, SyncEngineError, EntityError } from '@syncengine/core';
+```
 
-// Line 91 — TerminalError from handler: check if the caught error is already a SyncEngineError
-// and wrap accordingly in restate.TerminalError
+**Catch block around line 83–92** (currently builds `[CODE] message` from `EntityError.code` and throws `restate.TerminalError`). Both typed shapes need to survive the wire boundary; `TerminalError` is stringly-typed so `hint`/`context` drop. `SyncEngineError` encodes `[CATEGORY::CODE] message`; `EntityError` keeps the existing `[CODE] message` format to stay backwards-compatible with any client already parsing it.
 
-// Line 259 — not an entity definition
+```ts
+try {
+    validated = applyHandler(entity, handlerName, merged, args);
+} catch (err) {
+    // Typed errors carry structured fields; encode them into the TerminalError
+    // message so they survive the Restate wire boundary. hint/context drop here.
+    if (err instanceof SyncEngineError) {
+        throw new restate.TerminalError(`[${err.category}::${err.code}] ${err.message}`);
+    }
+    if (err instanceof EntityError) {
+        throw new restate.TerminalError(`[${err.code}] ${err.message}`);
+    }
+    // applyHandler wraps everything else as UserHandlerError (a SyncEngineError),
+    // so this fallback is defensive only.
+    const message = err instanceof Error ? err.message : String(err);
+    throw new restate.TerminalError(message);
+}
+```
+
+Line 259 (`not an entity definition`):
+```ts
 throw errors.schema(SchemaCode.NOT_ENTITY_DEFINITION, {
     message: `buildEntityObject: not an entity definition`,
     hint: `Pass a value created by defineEntity().`,
@@ -1349,21 +1462,24 @@ git commit -m "refactor(client): convert throw sites to errors.* factories"
 ### Task 8: Convert packages/cli Throw Sites
 
 **Files:**
-- Modify: `packages/cli/src/client.ts` — delete `StackNotRunningError`, convert throws
+- Modify: `packages/cli/src/client.ts` — convert throws; `StackNotRunningError` class stays until Task 10
+- Modify: `packages/cli/src/workspace.ts` — update `StackNotRunningError` catch-site
 - Modify: `packages/cli/src/dev.ts` (~6 throws)
 - Modify: `packages/cli/src/build.ts` (~3 throws)
 - Modify: `packages/cli/src/init.ts` (~1 throw)
 - Modify: `packages/cli/src/start.ts` (~1 throw)
 - Modify: `packages/cli/src/runner.ts` (~3 throws)
 
-- [ ] **Step 1: Convert client.ts and delete StackNotRunningError**
+**Invariant:** Do NOT delete the `StackNotRunningError` class in this task. The class stays until Task 10. This task only changes the `throw` and `catch` sites so that no code path constructs or checks against the class — but the class definition remains so the file compiles.
 
-Delete the `StackNotRunningError` class (lines 35-44). Replace its usage:
+- [ ] **Step 1: Convert client.ts throws**
+
+Replace the `throw new StackNotRunningError(...)` site (line 48) with the `errors.cli(...)` factory. Do NOT delete the `StackNotRunningError` class definition (lines 35–44) — Task 10 removes it.
 
 ```ts
 import { errors, CliCode, ConnectionCode } from '@syncengine/core';
 
-// Line 48 — stack not running (was StackNotRunningError)
+// Line 48 — stack not running (was `throw new StackNotRunningError(...)`)
 throw errors.cli(CliCode.STACK_NOT_RUNNING, {
     message: `No syncengine dev stack is running.`,
     hint: `Start one with: pnpm dev\n\n  Restate admin on :${ports.restateAdmin} is unreachable.`,
@@ -1389,7 +1505,26 @@ throw errors.connection(ConnectionCode.NATS_UNREACHABLE, {
 });
 ```
 
-Update any imports of `StackNotRunningError` elsewhere to catch `SyncEngineError` with `code === CliCode.STACK_NOT_RUNNING` instead.
+- [ ] **Step 1b: Update the `StackNotRunningError` catch-site in workspace.ts**
+
+`packages/cli/src/workspace.ts:30` imports `StackNotRunningError` from `./client.js` and does `err instanceof StackNotRunningError` at line 66. Switch to checking `SyncEngineError` with `code === CliCode.STACK_NOT_RUNNING`:
+
+```ts
+// Replace the import:
+import { SyncEngineError, CliCode } from '@syncengine/core';
+// (drop the `StackNotRunningError` import from './client.js')
+
+// Replace the catch block:
+} catch (err) {
+    if (err instanceof SyncEngineError && err.code === CliCode.STACK_NOT_RUNNING) {
+        process.stderr.write(`\n\x1b[1;31m${err.message}\x1b[0m\n\n`);
+        process.exit(1);
+    }
+    throw err;
+}
+```
+
+After this change no code references `StackNotRunningError` except its own class definition in `client.ts`, which Task 10 removes.
 
 - [ ] **Step 2: Convert dev.ts**
 
@@ -1512,7 +1647,7 @@ Expected: PASS.
 
 ```bash
 git add packages/cli/src/
-git commit -m "refactor(cli): convert throw sites to errors.* factories, delete StackNotRunningError"
+git commit -m "refactor(cli): convert throw/catch sites to errors.* factories"
 ```
 
 ---
@@ -1589,6 +1724,8 @@ throw errors.store(StoreCode.TEST_STORE_UNKNOWN_TABLE, {
 });
 ```
 
+Note: `packages/test-utils/src/__tests__/test-store.test.ts` uses `EntityError` as the public user-domain API (throwing `new EntityError('OUT_OF_STOCK', 'No stock')` inside a handler fixture, then asserting `.toThrow(EntityError)`). That is the correct pattern and **stays unchanged**.
+
 - [ ] **Step 3: Convert bin-utils and restate-bin**
 
 `packages/bin-utils/index.ts`:
@@ -1658,7 +1795,60 @@ git commit -m "refactor: convert remaining packages to errors.* factories"
 
 ---
 
-### Task 10: Final Verification and Cleanup
+### Task 10: Delete StackNotRunningError
+
+`EntityError` stays — it is a public user-domain error class (Meteor-style), orthogonal to the platform error system. This task deletes only `StackNotRunningError`, which was pure framework-internal infrastructure with no user-facing surface.
+
+**Preconditions (verify before editing):** no non-definition references to `StackNotRunningError` remain in `packages/*/src/`:
+
+```bash
+grep -rn "StackNotRunningError" packages/*/src/ --include="*.ts" --include="*.tsx" | grep -v node_modules
+```
+
+Expected: the only match is the class definition itself in `packages/cli/src/client.ts`. If anything else matches, go back to Task 8 Step 1b and finish the catch-site migration.
+
+**Files:**
+- Modify: `packages/cli/src/client.ts` — delete the `StackNotRunningError` class (lines 35–44)
+
+- [ ] **Step 1: Delete `StackNotRunningError` class**
+
+Delete the class definition in `packages/cli/src/client.ts` (lines 35–44).
+
+- [ ] **Step 2: Add a doc-comment to `EntityError`**
+
+Add or update the comment banner above the `EntityError` class in `packages/core/src/entity.ts` (lines 32–38) so the distinction from the platform error system is explicit:
+
+```ts
+// ── EntityError ──────────────────────────────────────────────────────────────
+// Public user-facing error class for DOMAIN errors thrown from entity handlers.
+// Modeled on Meteor.Error: `throw new EntityError('OUT_OF_STOCK', 'No stock')`.
+// Propagates through applyHandler unchanged so callers can pattern-match on .code.
+//
+// This is ORTHOGONAL to the platform error system (SyncEngineError, errors.*).
+// The platform system is framework→developer ("this is what syncengine broke");
+// EntityError is user→user ("this is what my app's domain rejected").
+```
+
+- [ ] **Step 3: Run typecheck across all packages**
+
+Run: `pnpm -r run typecheck`
+Expected: PASS.
+
+- [ ] **Step 4: Run all tests**
+
+Run: `pnpm -r test` (or the equivalent root command)
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/cli/src/client.ts packages/core/src/entity.ts
+git commit -m "refactor(cli): delete StackNotRunningError (migrated to errors.cli); document EntityError as user-domain API"
+```
+
+---
+
+### Task 11: Final Verification
 
 **Files:**
 - All packages
@@ -1668,14 +1858,25 @@ git commit -m "refactor: convert remaining packages to errors.* factories"
 Run: `grep -r "throw new Error" packages/*/src/ --include="*.ts" --include="*.tsx" | grep -v __tests__ | grep -v node_modules`
 Expected: No results (all converted).
 
-- [ ] **Step 2: Verify no EntityError or StackNotRunningError references remain**
+- [ ] **Step 2: Verify no `StackNotRunningError` references remain**
 
-Run: `grep -r "EntityError\|StackNotRunningError" packages/*/src/ --include="*.ts" --include="*.tsx" | grep -v __tests__ | grep -v node_modules`
-Expected: No results (all removed).
+Run:
+```bash
+grep -rn "StackNotRunningError" packages --include="*.ts" --include="*.tsx" | grep -v node_modules | grep -v dist
+```
+Expected: No results.
+
+- [ ] **Step 2b: Verify `EntityError` is still exported and used by user code**
+
+Run:
+```bash
+grep -rn "EntityError" packages apps --include="*.ts" --include="*.tsx" | grep -v node_modules | grep -v dist
+```
+Expected: matches in `packages/core/src/entity.ts` (class + export), `packages/core/src/index.ts` (barrel re-export), `packages/core/src/__tests__/entity.test.ts` (user-throw propagation tests), `packages/test-utils/src/__tests__/test-store.test.ts` (domain-error fixtures), and `apps/test/` (entity files + tests). Zero matches in framework `src/` outside of the class definition and its export.
 
 - [ ] **Step 3: Run all tests**
 
-Run: `pnpm --filter @syncengine/example test` (root test command)
+Run: `pnpm -r test`
 Also: `cd packages/core && npx vitest run` (error system tests)
 Expected: All PASS.
 
@@ -1684,9 +1885,4 @@ Expected: All PASS.
 Run: `pnpm -r run typecheck`
 Expected: PASS.
 
-- [ ] **Step 5: Final commit if any cleanup needed**
-
-```bash
-git add -A
-git commit -m "chore: error system cleanup — verify no stale references"
-```
+No final commit — if earlier tasks are clean, there's nothing to clean up.

@@ -28,6 +28,10 @@ import {
     tableToCreateSQL,
     tableToInsertSQL,
     CONFLICT_LOG_MAX,
+    errors,
+    SchemaCode,
+    StoreCode,
+    HandlerCode,
     type AnyTable,
     type Table,
     type ColumnDef,
@@ -290,10 +294,11 @@ export function validateStoreConfig(config: StoreConfig): void {
     for (const t of config.tables) {
         const hasPk = Object.values(t.$columns).some((c) => (c as ColumnDef<unknown>).primaryKey);
         if (!hasPk) {
-            throw new Error(
-                `Table '${t.$name}' has no primary key column — use id() for an ` +
-                `auto-generated integer PK.`,
-            );
+            throw errors.schema(SchemaCode.MISSING_PRIMARY_KEY, {
+                message: `Table '${t.$name}' has no primary key column.`,
+                hint: `Add id() for an auto-generated integer PK.`,
+                context: { table: t.$name },
+            });
         }
     }
 
@@ -301,7 +306,10 @@ export function validateStoreConfig(config: StoreConfig): void {
     const tableNames = new Set<string>();
     for (const t of config.tables) {
         if (tableNames.has(t.$name)) {
-            throw new Error(`Duplicate table name: '${t.$name}'.`);
+            throw errors.schema(SchemaCode.DUPLICATE_TABLE_NAME, {
+                message: `Duplicate table name: '${t.$name}'.`,
+                context: { table: t.$name },
+            });
         }
         tableNames.add(t.$name);
     }
@@ -314,7 +322,10 @@ export function validateStoreConfig(config: StoreConfig): void {
     const viewIds = new Set<string>();
     for (const v of viewsForValidation) {
         if (viewIds.has(v.$id)) {
-            throw new Error(`Duplicate view id: '${v.$id}' (internal bug, please report).`);
+            throw errors.schema(SchemaCode.DUPLICATE_VIEW_ID, {
+                message: `Duplicate view id: '${v.$id}' (internal bug, please report).`,
+                context: { view: v.$id },
+            });
         }
         viewIds.add(v.$id);
     }
@@ -324,10 +335,11 @@ export function validateStoreConfig(config: StoreConfig): void {
     for (const v of viewsForValidation) {
         for (const tableName of v.$sourceTables) {
             if (!tableNames.has(tableName)) {
-                throw new Error(
-                    `View '${v.$id}' references unknown table '${tableName}'. ` +
-                    `Add the table to config.tables, or remove the reference.`,
-                );
+                throw errors.schema(SchemaCode.VIEW_TABLE_NOT_FOUND, {
+                    message: `View '${v.$id}' references unknown table '${tableName}'.`,
+                    hint: `Add '${tableName}' to your store config tables array, or remove the reference.`,
+                    context: { view: v.$id, table: tableName },
+                });
             }
         }
     }
@@ -337,16 +349,20 @@ export function validateStoreConfig(config: StoreConfig): void {
         const channelNames = new Set<string>();
         for (const ch of config.channels) {
             if (channelNames.has(ch.name)) {
-                throw new Error(`Duplicate channel name: '${ch.name}'.`);
+                throw errors.schema(SchemaCode.DUPLICATE_CHANNEL_NAME, {
+                    message: `Duplicate channel name: '${ch.name}'.`,
+                    context: { channel: ch.name },
+                });
             }
             channelNames.add(ch.name);
 
             for (const t of ch.tables) {
                 if (!tableNames.has(t.$name)) {
-                    throw new Error(
-                        `Channel '${ch.name}' references unknown table '${t.$name}'. ` +
-                        `Add the table to config.tables, or remove it from the channel.`,
-                    );
+                    throw errors.schema(SchemaCode.CHANNEL_TABLE_NOT_FOUND, {
+                        message: `Channel '${ch.name}' references unknown table '${t.$name}'.`,
+                        hint: `Add '${t.$name}' to your store config tables array, or remove it from the channel.`,
+                        context: { channel: ch.name, table: t.$name },
+                    });
                 }
             }
         }
@@ -358,9 +374,11 @@ export function validateStoreConfig(config: StoreConfig): void {
     if (config.seed) {
         for (const seedKey of Object.keys(config.seed)) {
             if (!tableNames.has(seedKey)) {
-                throw new Error(
-                    `seed key '${seedKey}' does not correspond to any table in config.tables.`,
-                );
+                throw errors.store(StoreCode.INVALID_SEED_KEY, {
+                    message: `seed key '${seedKey}' does not correspond to any table in config.tables.`,
+                    hint: `Available tables: ${[...tableNames].join(', ')}`,
+                    context: { seedKey },
+                });
             }
         }
     }
@@ -1181,7 +1199,10 @@ export function store<
             });
             if (!res.ok) {
                 const text = await res.text().catch(() => '<no body>');
-                throw new Error(`workflow '${workflow.$name}' failed: ${res.status} ${text}`);
+                throw errors.handler(HandlerCode.WORKFLOW_FAILED, {
+                    message: `workflow '${workflow.$name}' failed: ${res.status} ${text}`,
+                    context: { workflow: workflow.$name, status: res.status },
+                });
             }
         },
         tables: tableNs as TableNamespace<TTables>,

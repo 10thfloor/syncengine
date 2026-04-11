@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 
 import { banner, note } from './runner';
 import { findAppRoot } from './state';
+import { errors, CliCode } from '@syncengine/core';
 
 interface Manifest {
     actors: string[];
@@ -28,9 +29,10 @@ export async function buildCommand(_args: string[]): Promise<void> {
     // 1. Find the app directory
     const appDir = findAppDir(repoRoot);
     if (!appDir) {
-        throw new Error(
-            `Could not find an app directory with vite.config.ts under ${repoRoot}`,
-        );
+        throw errors.cli(CliCode.APP_DIR_NOT_FOUND, {
+            message: `Could not find an app directory with vite.config.ts under ${repoRoot}`,
+            context: { repoRoot },
+        });
     }
     note(`app directory: ${relative(repoRoot, appDir)}`);
 
@@ -55,9 +57,11 @@ export async function buildCommand(_args: string[]): Promise<void> {
     // 3. Read manifest
     const manifestPath = join(distDir, '.syncengine', 'manifest.json');
     if (!existsSync(manifestPath)) {
-        throw new Error(
-            `Plugin did not write ${manifestPath} — is @syncengine/vite-plugin in your vite.config.ts?`,
-        );
+        throw errors.cli(CliCode.BUILD_OUTPUT_MISSING, {
+            message: `Plugin did not write ${manifestPath} — is @syncengine/vite-plugin in your vite.config.ts?`,
+            hint: `Add the syncengine plugin to your vite.config.ts.`,
+            context: { manifestPath },
+        });
     }
     const manifest: Manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     note(`found ${manifest.actors.length} actor file(s)`);
@@ -154,7 +158,10 @@ function resolveEsbuild(repoRoot: string): string {
     for (const p of candidates) {
         if (existsSync(p)) return p;
     }
-    throw new Error('esbuild not found — run pnpm install');
+    throw errors.cli(CliCode.DEPENDENCY_NOT_FOUND, {
+        message: `esbuild not found — run pnpm install`,
+        hint: `Run: pnpm install`,
+    });
 }
 
 function generateServerEntry(

@@ -1,4 +1,5 @@
 import * as restate from '@restatedev/restate-sdk';
+import { errors, SchemaCode } from '@syncengine/core';
 
 export interface WorkflowDef<TName extends string = string, TInput = unknown> {
     readonly $tag: 'workflow';
@@ -21,12 +22,17 @@ export function defineWorkflow<const TName extends string, TInput>(
     handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
 ): WorkflowDef<TName, TInput> {
     if (!name || typeof name !== 'string') {
-        throw new Error('defineWorkflow: name must be a non-empty string.');
+        throw errors.schema(SchemaCode.INVALID_WORKFLOW_NAME, {
+            message: `defineWorkflow: name must be a non-empty string.`,
+            hint: `Pass a valid name: defineWorkflow('myWorkflow', { ... })`,
+        });
     }
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
-        throw new Error(
-            `defineWorkflow('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/.`,
-        );
+        throw errors.schema(SchemaCode.INVALID_WORKFLOW_NAME, {
+            message: `defineWorkflow('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/.`,
+            hint: `Use only letters, numbers, and underscores. Must start with a letter.`,
+            context: { workflow: name },
+        });
     }
     return { $tag: 'workflow', $name: name, $handler: handler };
 }

@@ -45,6 +45,7 @@ import {
     escapeAttr,
     provisionWorkspace,
 } from '@syncengine/core/http';
+import { errors, SchemaCode } from '@syncengine/core';
 
 // Structural types mirroring `@syncengine/core`'s `config.ts`. The
 // plugin intentionally does not take a dep on core to keep the
@@ -152,13 +153,21 @@ async function loadConfig(
                 default?: SyncengineConfig;
             };
             if (!mod.default) {
-                throw new Error(`${path} has no default export`);
+                throw errors.schema(SchemaCode.CONFIG_NO_DEFAULT_EXPORT, {
+                    message: `${path} has no default export`,
+                    hint: `Add: export default defineConfig({ ... })`,
+                    context: { path },
+                });
             }
             return mod.default;
         } catch (err) {
             // Preserve the underlying stack trace so the developer can
             // see the actual line in their config file that failed.
-            throw new Error(`[syncengine] failed to load ${path}`, { cause: err });
+            throw errors.schema(SchemaCode.CONFIG_LOAD_FAILED, {
+                message: `[syncengine] failed to load ${path}`,
+                context: { path },
+                cause: err instanceof Error ? err : new Error(String(err)),
+            });
         }
     }
     return DEFAULT_CONFIG;

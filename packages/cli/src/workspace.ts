@@ -27,10 +27,10 @@ import {
     natsListStreams,
     streamNameToWorkspaceId,
     requireStackRunning,
-    StackNotRunningError,
     type WorkspaceState,
     type WorkspaceMember,
 } from './client';
+import { SyncEngineError, CliCode } from '@syncengine/core';
 
 export async function workspaceCommand(args: string[]): Promise<void> {
     const [sub, ...rest] = args;
@@ -63,7 +63,7 @@ export async function workspaceCommand(args: string[]): Promise<void> {
                 process.exit(1);
         }
     } catch (err) {
-        if (err instanceof StackNotRunningError) {
+        if (err instanceof SyncEngineError && err.code === CliCode.STACK_NOT_RUNNING) {
             process.stderr.write(`\n\x1b[1;31m${err.message}\x1b[0m\n\n`);
             process.exit(1);
         }

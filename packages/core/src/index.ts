@@ -1,3 +1,30 @@
+// ── Error System ────────────────────────────────────────────────────────────
+export {
+    SyncEngineError,
+    UserHandlerError,
+    errors,
+    formatError,
+    SchemaCode,
+    EntityCode,
+    StoreCode,
+    ConnectionCode,
+    HandlerCode,
+    CliCode,
+} from './errors/index.js';
+
+export type {
+    ErrorCategory,
+    ErrorSeverity,
+    ErrorOpts,
+    SyncEngineErrorInit,
+    SchemaCodeValue,
+    EntityCodeValue,
+    StoreCodeValue,
+    ConnectionCodeValue,
+    HandlerCodeValue,
+    CliCodeValue,
+} from './errors/index.js';
+
 // ── Schema DSL ──────────────────────────────────────────────────────────────
 export {
     table,

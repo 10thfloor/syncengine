@@ -3,6 +3,7 @@
 // All identifier/value interpolation goes through escaping helpers.
 
 import type { AnyTable, ColumnDef } from './schema';
+import { errors, SchemaCode } from './errors/index.js';
 
 // ── Escaping ────────────────────────────────────────────────────────────────
 
@@ -14,7 +15,11 @@ const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
  */
 export function escapeIdentifier(name: string): string {
     if (!IDENT_RE.test(name)) {
-        throw new Error(`Invalid SQL identifier: "${name}"`);
+        throw errors.schema(SchemaCode.INVALID_SQL_IDENTIFIER, {
+            message: `Invalid SQL identifier: "${name}"`,
+            hint: `Use only letters, numbers, and underscores.`,
+            context: { identifier: name },
+        });
     }
     return `"${name}"`;
 }

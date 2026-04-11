@@ -3,6 +3,7 @@
 // framework dependencies — only `node:crypto` for hashing.
 
 import { createHash } from 'node:crypto';
+import { errors, ConnectionCode } from './errors/index.js';
 
 // ── wsKey derivation ────────────────────────────────────────────────────────
 
@@ -46,7 +47,10 @@ export async function provisionWorkspace(
     });
     if (!res.ok) {
         const text = await res.text().catch(() => '<no body>');
-        throw new Error(`workspace.provision(${wsKey}) → HTTP ${res.status}: ${text}`);
+        throw errors.connection(ConnectionCode.HTTP_ERROR, {
+            message: `workspace.provision(${wsKey}) → HTTP ${res.status}: ${text}`,
+            context: { workspace: wsKey, status: res.status },
+        });
     }
 }
 

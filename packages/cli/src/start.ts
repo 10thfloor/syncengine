@@ -12,6 +12,7 @@ import { execFileSync } from 'node:child_process';
 
 import { banner, note } from './runner';
 import { findAppRoot } from './state';
+import { errors, CliCode } from '@syncengine/core';
 
 export async function startCommand(_args: string[]): Promise<void> {
     const repoRoot = await findAppRoot();
@@ -19,9 +20,10 @@ export async function startCommand(_args: string[]): Promise<void> {
     // Find the built server entry
     const appDir = findBuiltApp(repoRoot);
     if (!appDir) {
-        throw new Error(
-            `No dist/server/index.mjs found. Run \`syncengine build\` first.`,
-        );
+        throw errors.cli(CliCode.BUILD_OUTPUT_MISSING, {
+            message: `No dist/server/index.mjs found. Run \`syncengine build\` first.`,
+            hint: `Run: syncengine build`,
+        });
     }
 
     const serverEntry = join(appDir, 'dist', 'server', 'index.mjs');

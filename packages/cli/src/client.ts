@@ -9,6 +9,7 @@
  */
 
 import type { Ports } from './state';
+import { errors, CliCode, ConnectionCode } from '@syncengine/core';
 
 /** Timeout used for all "is the service up?" soft probes. */
 const PROBE_TIMEOUT_MS = 2000;
@@ -32,22 +33,13 @@ async function softFetch(url: string, init?: RequestInit): Promise<Response | nu
 
 // ── Stack reachability ────────────────────────────────────────────────────
 
-export class StackNotRunningError extends Error {
-    constructor(detail: string) {
-        super(
-            `No syncengine dev stack is running.\n` +
-            `  ${detail}\n\n` +
-            `Start one with: \x1b[1mpnpm dev\x1b[0m`,
-        );
-        this.name = 'StackNotRunningError';
-    }
-}
-
 export async function requireStackRunning(ports: Ports): Promise<void> {
     if (await restateHealth(ports)) return;
-    throw new StackNotRunningError(
-        `Restate admin on :${ports.restateAdmin} is unreachable`,
-    );
+    throw errors.cli(CliCode.STACK_NOT_RUNNING, {
+        message: `No syncengine dev stack is running.`,
+        hint: `Start one with: pnpm dev\n\n  Restate admin on :${ports.restateAdmin} is unreachable.`,
+        context: { port: ports.restateAdmin },
+    });
 }
 
 // ── Restate admin ─────────────────────────────────────────────────────────
@@ -81,7 +73,10 @@ export async function restateRegisterDeployment(
     );
     if (!res.ok) {
         const body = await res.text();
-        throw new Error(`restate deployment registration failed (HTTP ${res.status}): ${body}`);
+        throw errors.connection(ConnectionCode.RESTATE_UNREACHABLE, {
+            message: `restate deployment registration failed (HTTP ${res.status}): ${body}`,
+            context: { status: res.status },
+        });
     }
 }
 
@@ -114,7 +109,10 @@ async function invokeWorkspace<T>(
     });
     if (!res.ok) {
         const text = await res.text();
-        throw new Error(`workspace.${handler}('${workspaceId}') → HTTP ${res.status}: ${text}`);
+        throw errors.connection(ConnectionCode.HTTP_ERROR, {
+            message: `workspace.${handler}('${workspaceId}') → HTTP ${res.status}: ${text}`,
+            context: { handler, workspace: workspaceId, status: res.status },
+        });
     }
     return (await res.json()) as T;
 }
@@ -188,7 +186,12 @@ export async function natsListStreams(ports: Ports): Promise<JetStreamStreamEntr
     const res = await fetch(
         `http://127.0.0.1:${ports.natsMonitor}/jsz?streams=true&config=true`,
     );
-    if (!res.ok) throw new Error(`nats /jsz returned HTTP ${res.status}`);
+    if (!res.ok) {
+        throw errors.connection(ConnectionCode.NATS_UNREACHABLE, {
+            message: `nats /jsz returned HTTP ${res.status}`,
+            context: { status: res.status },
+        });
+    }
     const body = (await res.json()) as {
         account_details?: Array<{
             stream_detail?: JetStreamStreamEntry[];
