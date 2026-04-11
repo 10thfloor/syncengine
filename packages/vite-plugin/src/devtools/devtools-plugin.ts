@@ -301,7 +301,7 @@ export function devtoolsMiddleware(
                             await jsm.streams.purge(targetStream);
                             result = { ok: true, message: `purged stream ${targetStream}` };
                         } finally {
-                            await nc.drain().catch(() => { /* ignore */ });
+                            await nc.close();
                         }
                         break;
                     }
@@ -332,8 +332,10 @@ export function devtoolsMiddleware(
                         const wsId = resolvedWsId;
                         const base = restateUrl.replace(/\/+$/, '');
                         const wsEnc = encodeURIComponent(wsId);
+                        const _t = (l: string) => { const s = Date.now(); return () => console.log(`[devtools:reset] ${l}: ${Date.now() - s}ms`); };
 
                         // 1. Purge the WS_ stream
+                        let _d = _t('purge stream');
                         const streamToPurge = `WS_${wsId.replace(/-/g, '_')}`;
                         try {
                             const { connect } = await import('@nats-io/transport-node');
@@ -343,7 +345,7 @@ export function devtoolsMiddleware(
                                 const jsm = await jetstreamManager(nc);
                                 await jsm.streams.purge(streamToPurge);
                             } finally {
-                                await nc.drain().catch(() => { /* ignore */ });
+                                await nc.close();
                             }
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : String(err);
@@ -351,22 +353,29 @@ export function devtoolsMiddleware(
                             console.warn(`[syncengine:devtools] purge stream ${streamToPurge} failed: ${msg}`);
                         }
 
+                        _d();
                         // 2. Clear all entity/workflow state in Restate
+                        _d = _t('clear entity state');
                         const cleared = await clearAllEntityState(restateUrl);
                         if (cleared > 0) {
                             console.log(`[syncengine:devtools] cleared ${cleared} entity state entries`);
                         }
 
+                        _d();
                         // 3. Teardown workspace
+                        _d = _t('teardown');
                         await restatePost(base, `workspace/${wsEnc}/teardown`, null);
 
+                        _d();
                         // 4. Re-provision
+                        _d = _t('provision');
                         await restatePost(
                             base,
                             `workspace/${wsEnc}/provision`,
                             { tenantId: 'default' },
                         );
 
+                        _d();
                         result = { ok: true, message: `reset workspace ${wsId}` };
                         break;
                     }
