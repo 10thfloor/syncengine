@@ -20,6 +20,7 @@ import { join, dirname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { errors, CliCode, ConnectionCode } from '@syncengine/core';
 
 // ── Platform detection ─────────────────────────────────────────────────────
 
@@ -39,12 +40,18 @@ export function detectHost(): Host {
     if (rawOs === 'darwin') os = 'darwin';
     else if (rawOs === 'linux') os = 'linux';
     else if (rawOs === 'win32') os = 'windows';
-    else throw new Error(`Unsupported OS: ${rawOs}`);
+    else throw errors.cli(CliCode.UNSUPPORTED_PLATFORM, {
+        message: `Unsupported OS: ${rawOs}`,
+        context: { os: rawOs },
+    });
 
     let arch: HostArch;
     if (rawArch === 'x64') arch = 'amd64';
     else if (rawArch === 'arm64') arch = 'arm64';
-    else throw new Error(`Unsupported arch: ${rawArch}`);
+    else throw errors.cli(CliCode.UNSUPPORTED_PLATFORM, {
+        message: `Unsupported arch: ${rawArch}`,
+        context: { arch: rawArch },
+    });
 
     return { os, arch };
 }
@@ -120,10 +127,12 @@ export async function ensureBinary(spec: BinarySpec): Promise<string> {
     if (pinned) {
         const actual = await sha256File(archivePath);
         if (actual !== pinned) {
-            throw new Error(
-                `${spec.tool}@${spec.version}: checksum mismatch for ${host.os}-${host.arch}\n` +
-                `  expected: ${pinned}\n  actual:   ${actual}`,
-            );
+            throw errors.cli(CliCode.CHECKSUM_MISMATCH, {
+                message:
+                    `${spec.tool}@${spec.version}: checksum mismatch for ${host.os}-${host.arch}\n` +
+                    `  expected: ${pinned}\n  actual:   ${actual}`,
+                context: { tool: spec.tool, version: spec.version, os: host.os, arch: host.arch },
+            });
         }
         log(`${spec.tool}@${spec.version}: checksum verified`);
     }
@@ -131,9 +140,10 @@ export async function ensureBinary(spec: BinarySpec): Promise<string> {
     await extractArchive(archivePath, dir);
 
     if (!existsSync(entry)) {
-        throw new Error(
-            `${spec.tool}@${spec.version}: expected binary at ${entry} after extraction but it was not found`,
-        );
+        throw errors.cli(CliCode.BINARY_NOT_FOUND, {
+            message: `${spec.tool}@${spec.version}: expected binary at ${entry} after extraction but it was not found`,
+            context: { tool: spec.tool, entry },
+        });
     }
 
     // Ensure executable bit is set on Unix
@@ -151,7 +161,10 @@ async function downloadTo(url: string, dest: string): Promise<void> {
     // Node 20+ has global fetch
     const res = await fetch(url, { redirect: 'follow' });
     if (!res.ok || !res.body) {
-        throw new Error(`download failed: ${url} (HTTP ${res.status})`);
+        throw errors.connection(ConnectionCode.HTTP_ERROR, {
+            message: `download failed: ${url} (HTTP ${res.status})`,
+            context: { url, status: res.status },
+        });
     }
 
     mkdirSync(dirname(dest), { recursive: true });
@@ -185,6 +198,9 @@ async function extractArchive(archivePath: string, destDir: string): Promise<voi
     } else if (archivePath.endsWith('.zip')) {
         execFileSync('unzip', ['-q', '-o', archivePath, '-d', destDir], { stdio: 'inherit' });
     } else {
-        throw new Error(`unsupported archive format: ${archivePath}`);
+        throw errors.cli(CliCode.UNSUPPORTED_ARCHIVE, {
+            message: `unsupported archive format: ${archivePath}`,
+            context: { path: archivePath },
+        });
     }
 }

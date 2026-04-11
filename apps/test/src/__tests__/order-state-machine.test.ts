@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createTestStore } from '@syncengine/test-utils';
-import { EntityError } from '@syncengine/core';
+import { SyncEngineError } from '@syncengine/core';
 import { orderIndex, allOrders } from '../schema';
 import { order } from '../entities/order.actor';
 
@@ -70,11 +70,12 @@ describe('Order State Machine', () => {
       const t = createTestStore({ tables: [], views: {} });
       expect(() =>
         t.applyHandler(order, handlerName, state, handlerName === 'place' ? ['u', 'kb', 79, 1] : []),
-      ).toThrow(EntityError);
+      ).toThrow(SyncEngineError);
       try {
         t.applyHandler(order, handlerName, state, handlerName === 'place' ? ['u', 'kb', 79, 1] : []);
       } catch (err) {
-        expect((err as EntityError).code).toBe('INVALID_TRANSITION');
+        expect((err as SyncEngineError).code).toBe('INVALID_TRANSITION');
+        expect((err as SyncEngineError).category).toBe('entity');
       }
     };
 

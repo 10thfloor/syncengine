@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@syncengine/bin-utils": "workspace:*"
+    "@syncengine/bin-utils": "workspace:*",
+    "@syncengine/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

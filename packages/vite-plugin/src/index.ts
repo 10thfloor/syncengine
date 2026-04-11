@@ -32,6 +32,7 @@ import topLevelAwait from 'vite-plugin-top-level-await';
 import { actorsPlugin, type ActorsPluginOptions } from './actors.ts';
 import { devtoolsPlugin } from './devtools/devtools-plugin.ts';
 import { workspacesPlugin, type WorkspacesPluginOptions } from './workspaces.ts';
+import { errors, CliCode } from '@syncengine/core';
 
 // ── Virtual module ids ────────────────────────────────────────────────────
 
@@ -222,10 +223,10 @@ function loadRuntimeConfig(path: string, isDev: boolean): RuntimeConfig {
     const natsUrl = process.env.SYNCENGINE_NATS_URL;
     const restateUrl = process.env.SYNCENGINE_RESTATE_URL;
     if (!natsUrl || !restateUrl) {
-        throw new Error(
-            `[syncengine] production build requires SYNCENGINE_NATS_URL and ` +
-            `SYNCENGINE_RESTATE_URL to be set.`,
-        );
+        throw errors.cli(CliCode.ENV_MISSING, {
+            message: `[syncengine] production build requires SYNCENGINE_NATS_URL and SYNCENGINE_RESTATE_URL environment variables.`,
+            hint: `Set these in your deployment environment.`,
+        });
     }
     return {
         workspaceId: process.env.SYNCENGINE_WORKSPACE_ID ?? 'default',

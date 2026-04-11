@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createTestStore } from '@syncengine/test-utils';
-import { EntityError } from '@syncengine/core';
+import { SyncEngineError } from '@syncengine/core';
 import { transactions, orderIndex, salesByProduct, totalSales, allOrders } from '../schema';
 import { inventory } from '../entities/inventory.actor';
 import { order } from '../entities/order.actor';
@@ -70,7 +70,7 @@ describe('Workflows', () => {
       const placedOrder = { ...ORD_INITIAL, status: 'placed', productSlug: 'keyboard', userId: 'alice', price: 79, createdAt: 1000 };
       expect(() =>
         t.applyHandler(order, 'place', placedOrder, ['alice', 'keyboard', 79, 1001]),
-      ).toThrow(EntityError);
+      ).toThrow(SyncEngineError);
 
       // Step 3: Compensate — release reservation
       // After sell, reservedBy is already cleared. The compensation is about

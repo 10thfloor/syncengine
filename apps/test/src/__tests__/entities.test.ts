@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createTestStore } from '@syncengine/test-utils';
-import { EntityError } from '@syncengine/core';
+import { SyncEngineError } from '@syncengine/core';
 import { transactions, orderIndex, salesByProduct, allOrders } from '../schema';
 import { inventory } from '../entities/inventory.actor';
 import { order } from '../entities/order.actor';
@@ -48,12 +48,12 @@ describe('Entity Handlers', () => {
             expect(result.state.status).toBe('cancelled');
         });
 
-        it('invalid transition throws EntityError', () => {
+        it('invalid transition throws SyncEngineError', () => {
             const t = createTestStore({ tables: [], views: {} });
             expect(() =>
                 t.applyHandler(order, 'deliver',
                     { status: 'placed', productSlug: 'kb', userId: 'a', price: 79, createdAt: 1 }, []),
-            ).toThrow(EntityError);
+            ).toThrow(SyncEngineError);
         });
     });
 });

@@ -7,6 +7,8 @@ import {
     extractMergeConfig,
     applyHandler as coreApplyHandler,
     extractEmits,
+    errors,
+    StoreCode,
 } from '@syncengine/core';
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -136,7 +138,10 @@ export class TestStore {
         const tableRows = this.rowStore.get(tableName);
         const existing = tableRows?.get(id);
         if (!existing) {
-            throw new Error(`TestStore.delete: no row with id=${id} in table '${tableName}'`);
+            throw errors.store(StoreCode.TEST_STORE_ROW_NOT_FOUND, {
+                message: `TestStore.delete: no row with id=${id} in table '${tableName}'`,
+                context: { table: tableName, id },
+            });
         }
         tableRows!.delete(id);
         this.step([{ source: tableName, record: existing, weight: -1 }]);
@@ -173,7 +178,10 @@ export class TestStore {
             const tableName = resolveTableName(emitItem);
             const tableRef = this.tableMap.get(tableName);
             if (!tableRef) {
-                throw new Error(`TestStore.applyEmits: unknown table '${tableName}'`);
+                throw errors.store(StoreCode.TEST_STORE_UNKNOWN_TABLE, {
+                    message: `TestStore.applyEmits: unknown table '${tableName}'`,
+                    context: { table: tableName },
+                });
             }
 
             const record = { ...emitItem.record };

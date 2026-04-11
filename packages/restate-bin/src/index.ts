@@ -7,6 +7,7 @@
  */
 
 import { ensureBinary, type BinarySpec, type Host } from '@syncengine/bin-utils';
+import { errors, CliCode } from '@syncengine/core';
 
 const VERSION = '1.6.2';
 
@@ -51,10 +52,11 @@ function rustTargetTriple(host: Host): string {
             ? 'aarch64-unknown-linux-musl'
             : 'x86_64-unknown-linux-musl';
     }
-    throw new Error(
-        `restate-server prebuilt binary not available for ${host.os}-${host.arch}. ` +
-        `Supported: darwin-arm64, darwin-amd64, linux-arm64, linux-amd64.`,
-    );
+    throw errors.cli(CliCode.BINARY_NOT_FOUND, {
+        message: `restate-server prebuilt binary not available for ${host.os}-${host.arch}.`,
+        hint: `Supported: darwin-arm64, darwin-amd64, linux-arm64, linux-amd64. Build from source or use a supported platform.`,
+        context: { os: host.os, arch: host.arch },
+    });
 }
 
 /**

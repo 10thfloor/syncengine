@@ -31,6 +31,7 @@ function restateAdminUrl(restateIngressUrl: string): string {
 }
 
 import { readDevRuntime, type DevRuntimeJson } from '../dev-runtime.ts';
+import { errors, ConnectionCode } from '@syncengine/core';
 
 // ── NATS monitor helpers ──────────────────────────────────────────────────────
 
@@ -114,7 +115,10 @@ async function restatePost(
     });
     if (!res.ok) {
         const text = await res.text().catch(() => '<no body>');
-        throw new Error(`POST ${url} → HTTP ${res.status}: ${text}`);
+        throw errors.connection(ConnectionCode.HTTP_ERROR, {
+            message: `POST ${url} → HTTP ${res.status}: ${text}`,
+            context: { url, status: res.status },
+        });
     }
     return res.json();
 }
