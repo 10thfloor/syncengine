@@ -10,3 +10,4 @@ export type {
 } from './codes.js';
 export { errors } from './factory.js';
 export type { ErrorOpts } from './factory.js';
+export { formatError } from './format.js';

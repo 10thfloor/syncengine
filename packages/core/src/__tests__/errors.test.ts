@@ -177,3 +177,80 @@ describe('errors factory', () => {
         expect(err.hint).toBe('Start one with: pnpm dev');
     });
 });
+
+import { formatError } from '../errors';
+
+describe('formatError', () => {
+    it('formats a fatal error with hint', () => {
+        const err = errors.schema(SchemaCode.MISSING_PRIMARY_KEY, {
+            message: "Table 'cart' has no primary key column.",
+            hint: "Add id() to your table definition:\n\n  const cart = table('cart', { id: id(), ... })",
+            context: { table: 'cart' },
+        });
+
+        const output = formatError(err, { color: false });
+
+        expect(output).toContain('SE::schema MISSING_PRIMARY_KEY');
+        expect(output).toContain("Table 'cart' has no primary key column.");
+        expect(output).toContain('hint:');
+        expect(output).toContain('Add id() to your table definition:');
+    });
+
+    it('formats a warning with warning icon', () => {
+        const err = errors.connection(ConnectionCode.NATS_UNREACHABLE, {
+            message: 'Could not connect to NATS at localhost:4222.',
+        });
+
+        const output = formatError(err, { color: false });
+        expect(output).toMatch(/⚠/);
+        expect(output).toContain('SE::connection NATS_UNREACHABLE');
+    });
+
+    it('omits hint section when hint is undefined', () => {
+        const err = errors.entity(EntityCode.INVALID_TRANSITION, {
+            message: "Cannot transition 'status'.",
+        });
+
+        const output = formatError(err, { color: false });
+        expect(output).not.toContain('hint:');
+    });
+
+    it('cleans stack traces — collapses syncengine internals', () => {
+        const err = errors.schema(SchemaCode.MISSING_PRIMARY_KEY, {
+            message: 'test',
+        });
+        err.stack = [
+            'Error: test',
+            '    at Object.<anonymous> (src/schema.ts:14:9)',
+            '    at Module._compile (node_modules/@syncengine/core/dist/index.js:100:10)',
+            '    at Module._compile (node_modules/@syncengine/core/dist/index.js:200:10)',
+            '    at Object.<anonymous> (src/schema.ts:8:3)',
+            '    at Module.load (node:internal/modules/cjs/loader:1200:32)',
+        ].join('\n');
+
+        const output = formatError(err, { color: false });
+
+        expect(output).toContain('src/schema.ts:14:9');
+        expect(output).toContain('src/schema.ts:8:3');
+        expect(output).toMatch(/→.*src\/schema\.ts:14:9/);
+        expect(output).toMatch(/syncengine internals hidden/);
+        expect(output).not.toContain('node:internal');
+    });
+
+    it('handles errors with no stack gracefully', () => {
+        const err = errors.schema(SchemaCode.MISSING_PRIMARY_KEY, {
+            message: 'test',
+        });
+        err.stack = undefined;
+
+        const output = formatError(err, { color: false });
+        expect(output).toContain('MISSING_PRIMARY_KEY');
+        expect(output).toContain('test');
+    });
+
+    it('formats plain Error with basic output', () => {
+        const err = new Error('plain error');
+        const output = formatError(err, { color: false });
+        expect(output).toContain('plain error');
+    });
+});
