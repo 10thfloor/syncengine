@@ -1,9 +1,23 @@
 import { useEffect, useRef, useMemo, useState } from "react";
 import { store, useStore, useEntity } from "@syncengine/client";
+
+// ── Schema: tables, views, channels ─────────────────────────────
+// Tables are CRDT-replicated rows synced via JetStream. Views are
+// incremental projections computed by the DBSP engine in the worker.
 import { clicks, totalsView, channels } from "./schema";
+
+// ── Entities: durable single-writer actors (Restate) ────────────
+// Each entity is a virtual object with serialized handler execution.
+// State persists across restarts; mutations go through HTTP → Restate.
 import { counter } from "./entities/counter.actor";
 import { account } from "./entities/account.actor";
+
+// ── Topics: ephemeral multi-writer pub/sub (NATS core) ──────────
+// Topics broadcast transient per-peer state directly over NATS with
+// no persistence, no Restate, no HTTP. Ideal for cursors, typing
+// indicators, selections — anything high-frequency and short-lived.
 import { cursorTopic } from "./topics/cursors";
+
 import { CursorLayer, type CursorPos } from "./CursorLayer";
 
 // ── Store ────────────────────────────────────────────────────────
@@ -29,6 +43,8 @@ function randomColor(): string {
 // ── App ──────────────────────────────────────────────────────────
 export default function App() {
   const s = useStore<DB>();
+
+  // ── Tables + Views: CRDT rows with incremental projections ────
   const { views, ready } = s.use({ totalsView });
   const total = views.totalsView[0]?.total ?? 0;
   const numClicks = views.totalsView[0]?.numClicks ?? 0;
@@ -36,14 +52,17 @@ export default function App() {
   const userId = useMemo(getUserId, []);
   const color = useMemo(randomColor, []);
 
+  // ── Entities: durable actors via Restate ──────────────────────
   const { state: counterState, actions: counterActions } = useEntity(
     counter,
     "global",
   );
-  const { peers: cursorPeers, publish: publishCursor, leave: leaveCursor } =
-    s.useTopic(cursorTopic, "global");
   const { state: acctState, actions: acctActions } = useEntity(account, userId);
   const [acctError, setAcctError] = useState<string | null>(null);
+
+  // ── Topics: ephemeral peer state via NATS core ────────────────
+  const { peers: cursorPeers, publish: publishCursor, leave: leaveCursor } =
+    s.useTopic(cursorTopic, "global");
   const publishRef = useRef(publishCursor);
   publishRef.current = publishCursor;
   const leaveRef = useRef(leaveCursor);
