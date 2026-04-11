@@ -43,6 +43,9 @@ import { useCallback, useRef, useSyncExternalStore } from 'react';
 import {
     applyHandler,
     rebase,
+    errors,
+    ConnectionCode,
+    SyncEngineError,
     type AnyEntity,
     type EntityDef,
     type EntityState,
@@ -94,7 +97,7 @@ export interface UseEntityResult<TState, THandlers> {
     /** True after the initial read has completed. */
     readonly ready: boolean;
     /** Last handler error, if any. Cleared on the next successful call. */
-    readonly error: Error | null;
+    readonly error: SyncEngineError | null;
     /** Number of in-flight local actions that haven't been confirmed yet.
      *  Useful for showing a "saving" indicator in the UI. */
     readonly pending: number;
@@ -127,7 +130,7 @@ interface EntitySubscription {
      *  subscription but not yet confirmed by the server. Rebased on every
      *  confirmed-state change. */
     pending: PendingAction[];
-    error: Error | null;
+    error: SyncEngineError | null;
     ready: boolean;
     listeners: Set<() => void>;
     /** Monotonic id for tagging pending actions. Restart-safe because
@@ -272,7 +275,12 @@ function getOrCreateSubscription(
             notify(sub);
         })
         .catch((err: unknown) => {
-            sub.error = err instanceof Error ? err : new Error(String(err));
+            sub.error =
+                err instanceof SyncEngineError
+                    ? err
+                    : errors.connection(ConnectionCode.HTTP_ERROR, {
+                          message: err instanceof Error ? err.message : String(err),
+                      });
             sub.ready = true;
             notify(sub);
         });
@@ -462,16 +470,18 @@ async function invokeHandler(
 
     if (!res.ok) {
         const text = await res.text().catch(() => '<no body>');
-        throw new Error(
-            `entity '${entity.$name}'.${handlerName}('${key}') failed: ${res.status} ${text}`,
-        );
+        throw errors.connection(ConnectionCode.HTTP_ERROR, {
+            message: `entity '${entity.$name}'.${handlerName}('${key}') failed: ${res.status} ${text}`,
+            context: { entity: entity.$name, handler: handlerName, key, status: res.status },
+        });
     }
 
     const body = (await res.json()) as { state: Record<string, unknown> };
     if (!body || typeof body !== 'object' || !body.state) {
-        throw new Error(
-            `entity '${entity.$name}'.${handlerName}('${key}') returned malformed body.`,
-        );
+        throw errors.connection(ConnectionCode.MALFORMED_RESPONSE, {
+            message: `entity '${entity.$name}'.${handlerName}('${key}') returned malformed body.`,
+            context: { entity: entity.$name, handler: handlerName, key },
+        });
     }
     return body.state;
 }
@@ -662,7 +672,12 @@ function buildActionProxy<TState, THandlers>(
                 const prevOptimistic = sub.optimistic;
                 sub.pending = sub.pending.filter((a) => a.id !== action.id);
                 rebaseSub(sub, entity);
-                const error = err instanceof Error ? err : new Error(String(err));
+                const error =
+                    err instanceof SyncEngineError
+                        ? err
+                        : errors.connection(ConnectionCode.HTTP_ERROR, {
+                              message: err instanceof Error ? err.message : String(err),
+                          });
                 sub.error = error;
                 // Always notify on error — the UI needs to show it.
                 if (sub.optimistic !== prevOptimistic || sub.error) notify(sub);
