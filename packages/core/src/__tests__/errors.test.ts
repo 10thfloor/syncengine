@@ -95,3 +95,85 @@ describe('code registries', () => {
         expect(Object.isFrozen(CliCode)).toBe(true);
     });
 });
+
+import { errors } from '../errors';
+
+describe('errors factory', () => {
+    it('errors.schema() creates a schema-category SyncEngineError', () => {
+        const err = errors.schema(SchemaCode.MISSING_PRIMARY_KEY, {
+            message: "Table 'cart' has no primary key.",
+            hint: 'Add id().',
+            context: { table: 'cart' },
+        });
+
+        expect(err).toBeInstanceOf(SyncEngineError);
+        expect(err.code).toBe('MISSING_PRIMARY_KEY');
+        expect(err.category).toBe('schema');
+        expect(err.severity).toBe('fatal');
+        expect(err.hint).toBe('Add id().');
+    });
+
+    it('errors.entity() creates an entity-category SyncEngineError', () => {
+        const err = errors.entity(EntityCode.INVALID_TRANSITION, {
+            message: "Cannot transition 'status' from 'draft' to 'shipped'.",
+        });
+        expect(err.category).toBe('entity');
+        expect(err.severity).toBe('fatal');
+    });
+
+    it('errors.connection() defaults to warning severity', () => {
+        const err = errors.connection(ConnectionCode.NATS_UNREACHABLE, {
+            message: 'Cannot connect.',
+        });
+        expect(err.severity).toBe('warning');
+    });
+
+    it('severity can be overridden', () => {
+        const err = errors.connection(ConnectionCode.NATS_UNREACHABLE, {
+            message: 'Cannot connect.',
+            severity: 'fatal',
+        });
+        expect(err.severity).toBe('fatal');
+    });
+
+    it('errors.handler() creates a UserHandlerError with cause', () => {
+        const original = new Error('boom');
+        const err = errors.handler(HandlerCode.USER_HANDLER_ERROR, {
+            message: "Entity 'order' handler 'place' failed: boom",
+            context: { entity: 'order', handler: 'place' },
+            cause: original,
+        });
+
+        expect(err).toBeInstanceOf(UserHandlerError);
+        expect(err.code).toBe('USER_HANDLER_ERROR');
+        expect(err.cause).toBe(original);
+    });
+
+    it('errors.handler() also works with HANDLER_NOT_FOUND', () => {
+        const err = errors.handler(HandlerCode.HANDLER_NOT_FOUND, {
+            message: "entity 'cart': no handler named 'foo'.",
+            context: { entity: 'cart', handler: 'foo' },
+        });
+        expect(err).toBeInstanceOf(SyncEngineError);
+        expect(err.code).toBe('HANDLER_NOT_FOUND');
+        expect(err.category).toBe('handler');
+    });
+
+    it('errors.store() creates a store-category error', () => {
+        const err = errors.store(StoreCode.INVALID_SEED_KEY, {
+            message: "seed key 'foo' does not match any table.",
+        });
+        expect(err.category).toBe('store');
+        expect(err.severity).toBe('fatal');
+    });
+
+    it('errors.cli() creates a cli-category error', () => {
+        const err = errors.cli(CliCode.STACK_NOT_RUNNING, {
+            message: 'No syncengine dev stack is running.',
+            hint: 'Start one with: pnpm dev',
+        });
+        expect(err.category).toBe('cli');
+        expect(err.severity).toBe('fatal');
+        expect(err.hint).toBe('Start one with: pnpm dev');
+    });
+});

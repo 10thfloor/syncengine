@@ -8,3 +8,5 @@ export type {
     SchemaCodeValue, EntityCodeValue, StoreCodeValue,
     ConnectionCodeValue, HandlerCodeValue, CliCodeValue,
 } from './codes.js';
+export { errors } from './factory.js';
+export type { ErrorOpts } from './factory.js';
