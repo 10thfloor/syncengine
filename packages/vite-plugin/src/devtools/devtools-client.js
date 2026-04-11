@@ -367,9 +367,13 @@
             dataSidebarEl.appendChild(el('div', CLS.dataSidebarGroup, 'Views'));
             viewDefs.forEach(function (v) {
                 var item = el('div', CLS.dataSidebarItem + (selectedTable === ('view:' + v.name) ? ' active' : ''));
-                var dot = el('span', CLS.syncDot + ' yellow');
-                item.appendChild(dot);
                 item.appendChild(el('span', null, v.name));
+                var count = viewRowCounts[v.name];
+                if (count != null) {
+                    var lbl = el('span', CLS.syncLabel);
+                    lbl.textContent = count + ' rows';
+                    item.appendChild(lbl);
+                }
                 item.addEventListener('click', function () {
                     selectedTable = 'view:' + v.name;
                     renderDataSidebar();
@@ -507,7 +511,7 @@
         }
     }
 
-    function buildTimelineEntry(entry, idx) {
+    function buildTimelineEntry(entry) {
         var wrap = el('div');
 
         var row = el('div', CLS.timelineEntry);
@@ -615,28 +619,12 @@
         clearChildren(actionsEl);
 
         var ACTION_DEFS = [
-            {
-                label: 'Reconnect',
-                desc: 'Force gateway reconnect',
-                variant: null,
-                action: 'reconnect',
-                clientSide: true,
-            },
-            {
-                label: 'Force Full Sync',
-                desc: 'Discard local state, re-sync',
-                variant: 'yellow',
-                action: 'force-full-sync',
-                clientSide: true,
-            },
-            {
-                label: 'Clear Client DB',
-                desc: 'Delete OPFS database & reload',
-                variant: 'red',
-                action: 'clear-client-db',
-                clientSide: true,
-                confirm: true,
-            },
+            { label: 'Force Reconnect', desc: 'Drop and re-establish the NATS connection', action: 'force-reconnect', clientSide: true },
+            { label: 'Trigger GC', desc: 'Run garbage collection on the workspace stream', action: 'trigger-gc' },
+            { label: 'Clear Client DB', desc: 'Wipe local SQLite/OPFS and reload', variant: 'yellow', action: 'clear-client-db', clientSide: true },
+            { label: 'Purge Stream', desc: 'Delete all messages from the NATS stream', variant: 'yellow', action: 'purge-stream' },
+            { label: 'Teardown Workspace', desc: 'Delete workspace and its stream', variant: 'red', action: 'teardown', confirm: true },
+            { label: 'Reset Everything', desc: 'Teardown + clear entity state + re-provision + clear client DB', variant: 'red', action: 'reset', confirm: true },
         ];
 
         ACTION_DEFS.forEach(function (def) {
@@ -661,15 +649,15 @@
                 bc.postMessage({ type: 'devtools-action', action: def.action });
                 showToast(def.label + ': sent', true);
                 if (def.action === 'clear-client-db') {
+                    var dbCleared = false;
                     var onCleared = function (e) {
                         if (e.data && e.data.type === 'devtools-db-cleared') {
-                            bc.removeEventListener('message', onCleared);
+                            dbCleared = true;
                             location.reload();
                         }
                     };
                     bc.addEventListener('message', onCleared);
-                    // Fallback reload after 2s
-                    setTimeout(function () { location.reload(); }, 2000);
+                    setTimeout(function () { if (!dbCleared) location.reload(); }, 1000);
                 }
             } catch (err) {
                 showToast(def.label + ': ' + err.message, false);
@@ -677,12 +665,51 @@
             return;
         }
 
-        // Server-side actions
         var wsParam = getWorkspaceId();
+        var payload = { action: def.action, workspaceId: wsParam };
+
+        // Reset/teardown: fire OPFS clear in parallel with server call
+        if (def.action === 'reset' || def.action === 'teardown') {
+            var dbCleared = false;
+            var serverDone = false;
+            var reloadOnce = function () { if (dbCleared && serverDone) location.reload(); };
+            var onDbCleared = function (e) {
+                if (e.data && e.data.type === 'devtools-db-cleared') {
+                    dbCleared = true;
+                    reloadOnce();
+                }
+            };
+            try {
+                bc.addEventListener('message', onDbCleared);
+                bc.postMessage({ type: 'devtools-action', action: 'clear-client-db' });
+            } catch (_) { /* */ }
+            setTimeout(function () { if (!dbCleared) { dbCleared = true; reloadOnce(); } }, 1000);
+
+            fetch('/__syncengine/devtools/action', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+                .then(function (res) { return res.json(); })
+                .then(function (data) {
+                    serverDone = true;
+                    if (data.ok) showToast(data.message || (def.label + ': OK'), true);
+                    else showToast(data.message || (def.label + ': failed'), false);
+                    reloadOnce();
+                })
+                .catch(function (err) {
+                    serverDone = true;
+                    showToast(def.label + ': ' + err.message, false);
+                    reloadOnce();
+                });
+            return;
+        }
+
+        // Other server-side actions
         fetch('/__syncengine/devtools/action', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ action: def.action, workspaceId: wsParam }),
+            body: JSON.stringify(payload),
         })
             .then(function (res) { return res.json(); })
             .then(function (data) {
