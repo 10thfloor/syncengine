@@ -367,7 +367,9 @@
             dataSidebarEl.appendChild(el('div', CLS.dataSidebarGroup, 'Views'));
             viewDefs.forEach(function (v) {
                 var item = el('div', CLS.dataSidebarItem + (selectedTable === ('view:' + v.name) ? ' active' : ''));
-                item.appendChild(el('span', null, v.name));
+                var label = v.name;
+                if (v.sourceTable) label += ' (' + v.sourceTable + ')';
+                item.appendChild(el('span', null, label));
                 var count = viewRowCounts[v.name];
                 if (count != null) {
                     var lbl = el('span', CLS.syncLabel);
@@ -388,13 +390,16 @@
 
     function requestRows(tableName, isView) {
         if (!tableName) return;
-        var sql = isView
-            ? 'SELECT * FROM "' + tableName.replace(/"/g, '""') + '" LIMIT 500'
-            : 'SELECT * FROM "' + tableName.replace(/"/g, '""') + '" LIMIT 500';
         var qid = 'dq_' + Date.now() + '_' + Math.random().toString(36).slice(2);
         pendingQueryIds[qid] = { name: tableName, isView: !!isView };
         try {
-            bc.postMessage({ type: 'devtools-query', id: qid, sql: sql });
+            if (isView) {
+                // Views aren't SQL tables — query the worker's in-memory cache
+                bc.postMessage({ type: 'devtools-query', id: qid, view: tableName });
+            } else {
+                var sql = 'SELECT * FROM "' + tableName.replace(/"/g, '""') + '" LIMIT 500';
+                bc.postMessage({ type: 'devtools-query', id: qid, sql: sql });
+            }
         } catch (_) {}
     }
 

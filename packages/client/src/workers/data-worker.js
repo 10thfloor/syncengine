@@ -37,9 +37,12 @@ let schemaTables = [];
 
 const undoStack = [];
 
-// ── View row counts (devtools) ───────────────────────────────────────────────
+// ── View state (devtools) ────────────────────────────────────────────────────
 
 const viewRowCounts = {};
+// Materialized view rows keyed by view name, then row ID.
+// Updated incrementally alongside viewRowCounts so the devtools can query views.
+const viewRowCache = {}; // { [viewName]: { [idKey]: rowObject } }
 
 // ── CALM / Authority state ──────────────────────────────────────────────────
 
@@ -272,7 +275,23 @@ function handleDevtoolsAction(action) {
 }
 
 function handleDevtoolsQuery(msg) {
-    if (!db || !msg.id || !msg.sql) return;
+    if (!msg.id) return;
+
+    // View queries: return from in-memory cache (views aren't SQL tables)
+    if (msg.view && viewRowCache[msg.view]) {
+        const rows = Object.values(viewRowCache[msg.view]);
+        const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+        devtoolsChannel.postMessage({
+            type: 'devtools-query-result',
+            id: msg.id,
+            columns,
+            rows,
+        });
+        return;
+    }
+
+    // SQL queries: run against client SQLite
+    if (!db || !msg.sql) return;
     try {
         const rows = db.exec(msg.sql, { rowMode: 'object' });
         const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
@@ -1292,11 +1311,21 @@ function stepEmitBroadcast(deltas, nonce) {
     // Emit to main thread (using owned copies, not WASM references)
     for (const [viewName, viewDeltas] of Object.entries(normalized)) {
         if (viewDeltas.length > 0) {
-            // Update row count estimate for devtools
+            // Update view row cache + count for devtools
             if (!(viewName in viewRowCounts)) viewRowCounts[viewName] = 0;
+            if (!(viewName in viewRowCache)) viewRowCache[viewName] = {};
             for (const d of viewDeltas) {
                 viewRowCounts[viewName] += (d.weight > 0 ? 1 : -1);
                 if (viewRowCounts[viewName] < 0) viewRowCounts[viewName] = 0;
+                // Maintain materialized view: weight>0 = upsert, weight<0 = delete
+                const rowId = d.record && d.record.id != null ? String(d.record.id)
+                    : d.record ? JSON.stringify(Object.values(d.record).slice(0, 2))
+                    : String(Math.random());
+                if (d.weight > 0) {
+                    viewRowCache[viewName][rowId] = d.record;
+                } else {
+                    delete viewRowCache[viewName][rowId];
+                }
             }
             self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: viewDeltas });
         }
@@ -1635,6 +1664,8 @@ function handleReset() {
     undoStack.length = 0;
     causalQueue.length = 0;
     for (const s of Object.keys(nats.outboundQueues)) nats.outboundQueues[s] = [];
+    for (const k of Object.keys(viewRowCache)) viewRowCache[k] = {};
+    for (const k of Object.keys(viewRowCounts)) viewRowCounts[k] = 0;
 
     // Break out of replay if stuck — discard any queued local mutations
     sync.isReplaying = false;
