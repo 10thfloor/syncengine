@@ -1,6 +1,7 @@
 // ── Migration types ─────────────────────────────────────────────────────────
 
 import { escapeIdentifier, escapeLiteral } from './sql-gen';
+import { errors, SchemaCode } from './errors/index.js';
 
 export type MigrationStep =
     | { op: 'addColumn'; table: string; column: string; type: string; default?: string | number | boolean; nullable?: boolean }
@@ -45,7 +46,11 @@ export function migrationStepToSQL(step: MigrationStep): string {
             return `CREATE TABLE IF NOT EXISTS ${escapeIdentifier(step.table)} (${cols})`;
         }
         default:
-            throw new Error(`Unknown migration op: ${(step as any).op}`);
+            throw errors.schema(SchemaCode.UNKNOWN_MIGRATION_OP, {
+                message: `Unknown migration op: ${(step as any).op}`,
+                hint: `Valid ops: addColumn, dropColumn, renameColumn, addTable.`,
+                context: { op: (step as any).op },
+            });
     }
 }
 

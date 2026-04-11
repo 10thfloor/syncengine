@@ -12,6 +12,7 @@ import {
     type EntityHandlers,
 } from '../entity';
 import { integer, text, real, boolean } from '../schema';
+import { SyncEngineError, EntityCode } from '../errors';
 
 describe('defineEntity (Phase 4)', () => {
     // ── Construction ────────────────────────────────────────────────────────
@@ -489,23 +490,26 @@ describe('defineEntity (Phase 4)', () => {
             expect(r.count).toBe(6);
         });
 
-        it('rejects invalid transitions with EntityError INVALID_TRANSITION', () => {
-            // idle -> done is not allowed (must go through running)
+        it('rejects invalid transitions with SyncEngineError INVALID_TRANSITION', () => {
+            // idle -> done is not allowed (must go through running).
+            // The framework's own transition guard emits a SyncEngineError
+            // (platform error — developer diagnostic), not an EntityError.
             try {
                 applyHandler(machine, 'finish', { phase: 'idle', count: 0 }, []);
                 expect.unreachable('should have thrown');
             } catch (e) {
-                expect(e).toBeInstanceOf(EntityError);
-                expect((e as EntityError).code).toBe('INVALID_TRANSITION');
-                expect((e as EntityError).message).toContain("'idle'");
-                expect((e as EntityError).message).toContain("'done'");
+                expect(e).toBeInstanceOf(SyncEngineError);
+                expect((e as SyncEngineError).code).toBe(EntityCode.INVALID_TRANSITION);
+                expect((e as SyncEngineError).category).toBe('entity');
+                expect((e as SyncEngineError).message).toContain("'idle'");
+                expect((e as SyncEngineError).message).toContain("'done'");
             }
         });
 
         it('rejects transitions from terminal states', () => {
             expect(() =>
                 applyHandler(machine, 'start', { phase: 'done', count: 0 }, []),
-            ).toThrow(EntityError);
+            ).toThrow(SyncEngineError);
         });
 
         it('allows retry from failed (non-terminal) back to idle', () => {

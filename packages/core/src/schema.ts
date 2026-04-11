@@ -19,6 +19,8 @@
 //    Runtime guard rejects `$`-prefixed column names at `table()` construction.
 
 /** Sentinel id_key for zero-group-by (global) aggregates — a single output row. */
+import { errors, SchemaCode } from './errors/index.js';
+
 export const GLOBAL_AGG_KEY = '$agg';
 
 export type MergeStrategy = 'lww' | 'set_union' | 'max' | 'min' | 'add';
@@ -213,20 +215,24 @@ export function table<
     // Runtime guard: column keys must not collide with $-prefixed metadata.
     for (const key of Object.keys(columns)) {
         if (key.startsWith('$')) {
-            throw new Error(
-                `Invalid column name '${key}' in table '${name}': column names ` +
-                `may not start with '$' (reserved for table metadata).`,
-            );
+            throw errors.schema(SchemaCode.INVALID_COLUMN_NAME, {
+                message:
+                    `Invalid column name '${key}' in table '${name}': column names ` +
+                    `may not start with '$' (reserved for table metadata).`,
+                hint: `Rename the column to remove the '$' prefix.`,
+                context: { table: name, column: key },
+            });
         }
     }
 
     // Find the primary key.
     const idKeyEntry = Object.entries(columns).find(([, col]) => col.primaryKey);
     if (!idKeyEntry) {
-        throw new Error(
-            `Table '${name}' has no primary key column. Use id() for an ` +
-            `auto-generated integer PK.`,
-        );
+        throw errors.schema(SchemaCode.MISSING_PRIMARY_KEY, {
+            message: `Table '${name}' has no primary key column.`,
+            hint: `Add id() for an auto-generated integer PK:\n\n  const ${name} = table('${name}', { id: id(), ... })`,
+            context: { table: name },
+        });
     }
     const idKey = idKeyEntry[0];
 

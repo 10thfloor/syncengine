@@ -28,6 +28,7 @@
 //    and server (Restate object factory). No codegen, no IDL.
 
 import type { ColumnDef, ColumnRef, InferRecord, AnyTable } from "./schema";
+import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './errors/index.js';
 
 // ── EntityError ──────────────────────────────────────────────────────────────
 
@@ -174,22 +175,30 @@ export function validateEntityState<TShape extends EntityStateShape>(
         out[name] = null;
         continue;
       }
-      throw new Error(
-        `Entity '${entityName}': column '${name}' is required but missing.`,
-      );
+      throw errors.entity(EntityCode.MISSING_REQUIRED_FIELD, {
+        message: `Entity '${entityName}': column '${name}' is required but missing.`,
+        hint: `Ensure your handler returns a value for '${name}'.`,
+        context: { entity: entityName, field: name },
+      });
     }
     const expectedType = jsTypeForKind(col.kind);
     if (expectedType && typeof value !== expectedType) {
-      throw new Error(
-        `Entity '${entityName}': column '${name}' expects ${expectedType}, ` +
+      throw errors.entity(EntityCode.TYPE_MISMATCH, {
+        message:
+          `Entity '${entityName}': column '${name}' expects ${expectedType}, ` +
           `got ${typeof value} (${JSON.stringify(value)}).`,
-      );
+        hint: `Return the correct type from your handler.`,
+        context: { entity: entityName, field: name, expected: expectedType, got: typeof value },
+      });
     }
     if (col.enum && !col.enum.includes(value as never)) {
-      throw new Error(
-        `Entity '${entityName}': column '${name}' must be one of ` +
+      throw errors.entity(EntityCode.ENUM_VIOLATION, {
+        message:
+          `Entity '${entityName}': column '${name}' must be one of ` +
           `${JSON.stringify(col.enum)}, got ${JSON.stringify(value)}.`,
-      );
+        hint: `Return one of the allowed enum values.`,
+        context: { entity: entityName, field: name, allowed: col.enum, got: value },
+      });
     }
     out[name] = value;
   }
@@ -285,49 +294,69 @@ export function entity<
   // Runtime guards: catch the easy mistakes at construction time so the
   // user sees them on import, not on first handler call.
   if (!name || typeof name !== "string") {
-    throw new Error("defineEntity: name must be a non-empty string.");
+    throw errors.schema(SchemaCode.INVALID_ENTITY_NAME, {
+      message: `defineEntity: name must be a non-empty string.`,
+      hint: `Pass a valid name: defineEntity('myEntity', { ... })`,
+    });
   }
   if (name.startsWith("$")) {
-    throw new Error(
-      `defineEntity('${name}'): names may not start with '$' ` +
+    throw errors.schema(SchemaCode.INVALID_ENTITY_NAME, {
+      message:
+        `defineEntity('${name}'): names may not start with '$' ` +
         `(reserved for framework metadata).`,
-    );
+      hint: `Remove the '$' prefix from the entity name.`,
+      context: { entity: name },
+    });
   }
   if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
-    throw new Error(
-      `defineEntity('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/ ` +
+    throw errors.schema(SchemaCode.INVALID_ENTITY_NAME, {
+      message:
+        `defineEntity('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/ ` +
         `so it can be used as a Restate object name and a NATS subject token.`,
-    );
+      hint: `Use only letters, numbers, and underscores. Must start with a letter.`,
+      context: { entity: name },
+    });
   }
   for (const colName of Object.keys(config.state)) {
     if (colName.startsWith("$")) {
-      throw new Error(
-        `defineEntity('${name}'): state field '${colName}' may not start ` +
+      throw errors.schema(SchemaCode.RESERVED_COLUMN_PREFIX, {
+        message:
+          `defineEntity('${name}'): state field '${colName}' may not start ` +
           `with '$' (reserved for framework metadata).`,
-      );
+        hint: `Rename the state field to remove the '$' prefix.`,
+        context: { entity: name, field: colName },
+      });
     }
   }
   for (const [handlerName, fn] of Object.entries(config.handlers)) {
     if (typeof fn !== "function") {
-      throw new Error(
-        `defineEntity('${name}'): handler '${handlerName}' must be a function.`,
-      );
+      throw errors.schema(SchemaCode.HANDLER_NOT_FUNCTION, {
+        message: `defineEntity('${name}'): handler '${handlerName}' must be a function.`,
+        hint: `Provide a function: handlers: { ${handlerName}(state, ...args) { return newState; } }`,
+        context: { entity: name, handler: handlerName },
+      });
     }
     // Restate's handler-name regex is ^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$.
     // Names starting with `_` (single underscore + letter/digit) are
     // reserved for the framework's built-in handlers (`_read`, `_init`,
     // any future additions). `$` is reserved for metadata fields.
     if (handlerName.startsWith("_") || handlerName.startsWith("$")) {
-      throw new Error(
-        `defineEntity('${name}'): handler name '${handlerName}' is reserved ` +
+      throw errors.schema(SchemaCode.HANDLER_NAME_RESERVED, {
+        message:
+          `defineEntity('${name}'): handler name '${handlerName}' is reserved ` +
           `(framework uses '_'/'$' prefixes for internal handlers).`,
-      );
+        hint: `Choose a handler name that doesn't start with '_' or '$'.`,
+        context: { entity: name, handler: handlerName },
+      });
     }
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(handlerName)) {
-      throw new Error(
-        `defineEntity('${name}'): handler name '${handlerName}' must match ` +
+      throw errors.schema(SchemaCode.HANDLER_NAME_INVALID, {
+        message:
+          `defineEntity('${name}'): handler name '${handlerName}' must match ` +
           `/^[a-zA-Z][a-zA-Z0-9_]*$/ (Restate's handler-name regex).`,
-      );
+        hint: `Use only letters, numbers, and underscores. Must start with a letter.`,
+        context: { entity: name, handler: handlerName },
+      });
     }
   }
 
@@ -337,10 +366,13 @@ export function entity<
   // The merged state object would silently overwrite one with the other.
   for (const projName of Object.keys(source)) {
     if (projName in config.state) {
-      throw new Error(
-        `defineEntity('${name}'): source projection '${projName}' collides ` +
+      throw errors.schema(SchemaCode.STATE_FIELD_COLLISION, {
+        message:
+          `defineEntity('${name}'): source projection '${projName}' collides ` +
           `with state field of the same name. Rename one.`,
-      );
+        hint: `Rename either the state field or the source projection to avoid the collision.`,
+        context: { entity: name, field: projName },
+      });
     }
   }
 
@@ -366,17 +398,22 @@ export function entity<
     }
 
     if (candidates.length === 0) {
-      throw new Error(
-        `defineEntity('${name}'): transitions values don't match any state ` +
+      throw errors.schema(SchemaCode.TRANSITION_NO_MATCH, {
+        message:
+          `defineEntity('${name}'): transitions values don't match any state ` +
           `field's enum. Ensure a state field has an enum containing all ` +
           `transition states.`,
-      );
+        context: { entity: name },
+      });
     }
     if (candidates.length > 1) {
-      throw new Error(
-        `defineEntity('${name}'): transitions map is ambiguous — matches ` +
+      throw errors.schema(SchemaCode.TRANSITION_AMBIGUOUS, {
+        message:
+          `defineEntity('${name}'): transitions map is ambiguous — matches ` +
           `state fields: ${candidates.join(", ")}. Use distinct enums.`,
-      );
+        hint: `Ensure only one state field has an enum that matches the transition keys.`,
+        context: { entity: name, candidates },
+      });
     }
     statusField = candidates[0]!;
 
@@ -385,11 +422,14 @@ export function entity<
     const enumValues = col.enum as readonly string[];
     for (const ev of enumValues) {
       if (!(ev in transitions)) {
-        throw new Error(
-          `defineEntity('${name}'): transitions map is missing state ` +
+        throw errors.schema(SchemaCode.TRANSITION_NOT_EXHAUSTIVE, {
+          message:
+            `defineEntity('${name}'): transitions map is missing state ` +
             `'${ev}'. All enum values of '${statusField}' must be listed ` +
             `(use an empty array for terminal states).`,
-        );
+          hint: `Add '${ev}' to your transitions map:\n\n  transitions: { ..., ${ev}: [...] }`,
+          context: { entity: name, missing: ev, statusField },
+        });
       }
     }
 
@@ -764,9 +804,11 @@ export function applyHandler(
     | EntityHandler<Record<string, unknown>, readonly unknown[]>
     | undefined;
   if (!handlerFn) {
-    throw new Error(
-      `entity '${entity.$name}': no handler named '${handlerName}'.`,
-    );
+    throw errors.handler(HandlerCode.HANDLER_NOT_FOUND, {
+      message: `entity '${entity.$name}': no handler named '${handlerName}'.`,
+      hint: `Available handlers: ${Object.keys(entity.$handlers).join(', ')}`,
+      context: { entity: entity.$name, handler: handlerName },
+    });
   }
 
   const base =
@@ -786,13 +828,18 @@ export function applyHandler(
     // record. Returning the full state also works (the spread is a no-op).
     next = { ...base, ...result };
   } catch (err) {
-    // EntityErrors propagate directly — the typed `code` field is
-    // accessible via `instanceof EntityError` without casts.
+    // Typed errors propagate unchanged so callers can pattern-match on them.
+    //   - SyncEngineError: framework errors re-thrown through user code.
+    //   - EntityError: user domain errors (Meteor-style, orthogonal to the
+    //     platform error system — see docs/.../error-system.md).
+    if (err instanceof SyncEngineError) throw err;
     if (err instanceof EntityError) throw err;
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
-    );
+    throw errors.handler(HandlerCode.USER_HANDLER_ERROR, {
+      message: `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
+      context: { entity: entity.$name, handler: handlerName },
+      cause: err instanceof Error ? err : new Error(String(err)),
+    });
   }
 
   // Validate declared state fields but preserve extra fields (e.g.,
@@ -827,10 +874,11 @@ export function applyHandler(
       const newStatus = validated[field] as string;
       const allowed = entity.$transitions[oldStatus];
       if (!allowed || !(allowed as readonly string[]).includes(newStatus)) {
-        throw new EntityError(
-          "INVALID_TRANSITION",
-          `Cannot transition '${field}' from '${oldStatus}' to '${newStatus}'`,
-        );
+        throw errors.entity(EntityCode.INVALID_TRANSITION, {
+          message: `Cannot transition '${field}' from '${oldStatus}' to '${newStatus}'.`,
+          hint: `Valid transitions from '${oldStatus}': ${(allowed ?? []).join(', ')}.`,
+          context: { entity: entity.$name, field, from: oldStatus, to: newStatus },
+        });
       }
     }
   }
