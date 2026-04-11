@@ -7,6 +7,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
+import { errors, CliCode } from '@syncengine/core';
 
 // ── ANSI colors for log prefixes ──────────────────────────────────────────
 
@@ -240,7 +241,10 @@ export async function waitForHttp(
         await sleep(intervalMs);
     }
     const tag = label ? ` (${label})` : '';
-    throw new Error(`timed out waiting for ${url}${tag}: ${String(lastErr)}`);
+    throw errors.cli(CliCode.TIMEOUT, {
+        message: `timed out waiting for ${url}${tag}: ${String(lastErr)}`,
+        context: { url },
+    });
 }
 
 /**
@@ -295,7 +299,10 @@ export async function waitForTcp(
         await sleep(intervalMs);
     }
     const tag = label ? ` (${label})` : '';
-    throw new Error(`timed out waiting for tcp :${port}${tag} on [${hosts.join(', ')}]`);
+    throw errors.cli(CliCode.TIMEOUT, {
+        message: `timed out waiting for tcp :${port}${tag} on [${hosts.join(', ')}]`,
+        context: { port, hosts },
+    });
 }
 
 // ── Preflight port checks ─────────────────────────────────────────────────
@@ -360,7 +367,11 @@ Hint: if these were started by docker compose earlier, stop them with:
 Or if they were started by a previous \`syncengine dev\` that crashed:
   pkill -f "syncengine dev" ; pkill -f "nats-server" ; pkill -f "restate-server"
 \n`);
-    throw new Error(`${taken.length} port${taken.length === 1 ? '' : 's'} already in use`);
+    throw errors.cli(CliCode.PORT_CONFLICT, {
+        message: `${taken.length} port${taken.length === 1 ? '' : 's'} already in use`,
+        hint: `Free the ports or let syncengine pick random ones.`,
+        context: { ports: taken },
+    });
 }
 
 async function describePortOwner(port: number): Promise<string | null> {
