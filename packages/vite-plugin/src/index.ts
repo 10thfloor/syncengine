@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import type { Plugin, ViteDevServer } from 'vite';
 
 import { actorsPlugin, type ActorsPluginOptions } from './actors.ts';
+import { devtoolsPlugin } from './devtools/devtools-plugin.ts';
 import { workspacesPlugin, type WorkspacesPluginOptions } from './workspaces.ts';
 
 // ── Virtual module ids ────────────────────────────────────────────────────
@@ -86,6 +87,7 @@ export default function syncengine(opts: SyncenginePluginOptions = {}): Plugin[]
         runtimeConfigPlugin(opts),
         actorsPlugin(opts.actors ?? {}),
         workspacesPlugin(opts.workspaces ?? {}),
+        devtoolsPlugin(),
     ];
 }
 

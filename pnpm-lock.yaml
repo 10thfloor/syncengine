@@ -210,6 +210,12 @@ importers:
 
   packages/vite-plugin:
     dependencies:
+      '@nats-io/jetstream':
+        specifier: ^3.3.1
+        version: 3.3.1
+      '@nats-io/transport-node':
+        specifier: ^3.3.1
+        version: 3.3.1
       '@syncengine/core':
         specifier: workspace:*
         version: link:../core
