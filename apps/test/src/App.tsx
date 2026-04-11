@@ -51,6 +51,17 @@ function getUserId(): string {
 const TABS = ["Catalog", "Orders", "Checkout", "Activity"] as const;
 type Tab = (typeof TABS)[number];
 
+// ── Error Banner ────────────────────────────────────────────────
+
+function ErrorBanner({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="error-banner">
+      <span className="error-banner-icon">!</span>
+      {children}
+    </div>
+  );
+}
+
 // ── Workspace Switcher ──────────────────────────────────────────
 
 const STATUS_CLASS: Record<string, string> = {
@@ -131,20 +142,74 @@ function WorkspaceSwitcher() {
   );
 }
 
+// ── Conflict Indicator ──────────────────────────────────────────
+
+function ConflictIndicator() {
+  const s = useStore<DB>();
+  const { conflicts, actions } = s.use({});
+  const active = conflicts.filter((c) => !c.dismissed);
+  const [open, setOpen] = useState(false);
+
+  if (active.length === 0) return null;
+
+  return (
+    <div className="conflict-indicator">
+      <button className="conflict-trigger" onClick={() => setOpen((o) => !o)}>
+        <span className="conflict-count">{active.length}</span>
+        conflicts
+      </button>
+      {open && (
+        <div className="conflict-dropdown">
+          <div className="ws-section-label">Merge Conflicts</div>
+          {active.map((c, i) => (
+            <div key={`${c.table}-${c.recordId}-${c.field}`} className="conflict-item">
+              <div className="conflict-detail">
+                <span className="conflict-field">{c.table}.{c.field}</span>
+                <span className="conflict-strategy">{c.strategy}</span>
+              </div>
+              <div className="conflict-values">
+                <span className="conflict-winner">winner: {String(c.winner.value)}</span>
+                <span className="conflict-loser">loser: {String(c.loser.value)}</span>
+              </div>
+              <button
+                className="btn btn-sm"
+                onClick={() => { actions.dismissConflict(i); }}
+              >
+                Dismiss
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────
 
 export default function App() {
   const s = useStore<DB>();
-  const { ready, workspace } = s.use({ totalSales });
+  const { ready, workspace, workerHealth, connection, connectionError } = s.use({ totalSales });
 
   const userId = useMemo(getUserId, []);
   const [activeTab, setActiveTab] = useState<Tab>("Catalog");
 
   return (
     <div className="app-shell">
+      {workerHealth === 'dead' && (
+        <ErrorBanner>
+          Worker crashed — <button className="btn btn-sm" onClick={() => window.location.reload()}>reload page</button>
+        </ErrorBanner>
+      )}
+      {connection === 'auth_failed' && (
+        <ErrorBanner>
+          Authentication failed{connectionError ? `: ${connectionError}` : ''}
+        </ErrorBanner>
+      )}
       <div className="app-header">
         <h1>syncengine storefront</h1>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <ConflictIndicator />
           <span className="user-tag">{userId}</span>
           <WorkspaceSwitcher />
         </div>

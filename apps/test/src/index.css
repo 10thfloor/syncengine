@@ -162,4 +162,66 @@ body {
 .ws-new input:focus { border-color: var(--accent); }
 .ws-new input::placeholder { color: var(--muted); }
 
+/* ── Error Banners ──────────────────────────────────────────── */
+
+.error-banner {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius); color: var(--red);
+  font-size: 0.8rem; margin-bottom: 1rem;
+}
+.error-banner-icon {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--red); color: white;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.7rem; font-weight: 700; flex-shrink: 0;
+}
+
+/* ── Conflict Indicator ─────────────────────────────────────── */
+
+.conflict-indicator { position: relative; }
+
+.conflict-trigger {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: 6px; padding: 0.2rem 0.5rem;
+  color: var(--yellow); font-size: 0.75rem; cursor: pointer;
+}
+.conflict-count {
+  background: var(--yellow); color: var(--bg);
+  width: 16px; height: 16px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.65rem; font-weight: 700;
+}
+
+.conflict-dropdown {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 100;
+  min-width: 280px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  padding: 0.5rem; overflow: hidden;
+}
+
+.conflict-item {
+  padding: 0.5rem; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 0.3rem;
+}
+.conflict-item:last-child { border-bottom: none; }
+.conflict-detail { display: flex; justify-content: space-between; align-items: center; }
+.conflict-field { font-family: var(--mono); font-size: 0.75rem; color: var(--fg); }
+.conflict-strategy { font-family: var(--mono); font-size: 0.65rem; color: var(--muted); }
+.conflict-values { font-size: 0.7rem; color: var(--fg-dim); display: flex; gap: 0.75rem; }
+.conflict-winner { color: var(--green); }
+.conflict-loser { color: var(--red); text-decoration: line-through; }
+
+/* ── Staleness Badge ────────────────────────────────────────── */
+
+.stale-badge {
+  display: inline-block; font-family: var(--mono); font-size: 0.6rem;
+  padding: 1px 5px; border-radius: 3px;
+  background: rgba(234, 179, 8, 0.12); color: var(--yellow);
+  margin-left: 0.4rem; vertical-align: middle;
+}
+
 .select { appearance: none; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 2rem 0.4rem 0.6rem; font-size: 0.8rem; color: var(--fg); cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2371717a' d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.5rem center; }
