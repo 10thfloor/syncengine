@@ -327,9 +327,8 @@ export function devtoolsMiddleware(
         if (url === STREAM_PATH && req.method === 'GET') {
             const qs = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
             const limit = Math.min(parseInt(qs.get('limit') ?? '100', 10), 500);
-            const runtime = getRuntimeFn();
-            const natsUrl = (runtime.natsUrl ?? 'ws://localhost:9222')
-                .replace(/^ws:\/\//, 'nats://').replace(/^wss:\/\//, 'nats://');
+            // Use NATS TCP port (4222), not the WebSocket port from runtime.json
+            const natsUrl = 'nats://127.0.0.1:4222';
 
             try {
                 const streams = await fetchNatsStreams();
