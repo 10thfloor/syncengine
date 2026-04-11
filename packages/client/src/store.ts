@@ -349,12 +349,21 @@ function synthesizeId(): number {
     return Date.now() * 1000 + (nextSynthId++ % 1000);
 }
 
+// HMR guard: terminate previous store's worker when store() is called again
+// during Vite hot module replacement. Without this, the old worker stays alive
+// on the BroadcastChannel and races with the new one.
+let _prevStoreDestroy: (() => void) | null = null;
+
 export function store<
     const TTables extends readonly AnyTable[],
     const TChannels extends readonly ChannelConfig[] = readonly [],
 >(
     config: StoreConfig<TTables, TChannels>,
 ): Store<TTables, TChannels> {
+    if (_prevStoreDestroy) {
+        _prevStoreDestroy();
+        _prevStoreDestroy = null;
+    }
     validateStoreConfig(config);
 
     // ── Auto-channeling: tables not assigned to an explicit channel
@@ -942,7 +951,7 @@ export function store<
     // ── Bootstrap + return ─────────────────────────────────────────────
     getWorker();
 
-    return {
+    const storeHandle: Store<TTables, TChannels> = {
         useView: useHook,
         use: useHook,
         useEntity: useEntityImpl as Store<TTables, TChannels>['useEntity'],
@@ -971,10 +980,6 @@ export function store<
             worker = null;
             ready = false;
             seedsApplied = false;
-            // Clear every subscriber set so stale useSyncExternalStore
-            // closures don't keep firing against a dead store. Components
-            // still mounted at destroy time will naturally re-subscribe on
-            // the next render if they receive a new Store via context.
             readyListeners.clear();
             viewSubscribers.clear();
             viewSnapshots.clear();
@@ -982,7 +987,6 @@ export function store<
             syncStatusSubscribers.clear();
             conflictSubscribers.clear();
             undoSubscribers.clear();
-            // Topic cleanup
             for (const timer of topicTimers.values()) clearInterval(timer);
             topicTimers.clear();
             topicPeers.clear();
@@ -990,6 +994,9 @@ export function store<
             topicRefCounts.clear();
         },
     };
+
+    _prevStoreDestroy = storeHandle.destroy;
+    return storeHandle;
 }
 
 // ── Re-exports of user-facing types ───────────────────────────────────────
