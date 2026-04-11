@@ -125,6 +125,59 @@ async function restatePost(
     return res.json();
 }
 
+/**
+ * Clear all Restate virtual object state for entity_ and workflow_ services.
+ * Uses the admin API: POST /services/{service}/state with { object_key, new_state: {} }.
+ * First queries all deployments to find entity/workflow services, then uses
+ * the SQL query endpoint to find all keys, then clears each.
+ */
+async function clearAllEntityState(restateUrl: string): Promise<number> {
+    const adminUrl = restateAdminUrl(restateUrl);
+    let cleared = 0;
+
+    // 1. Get all registered services
+    let services: Array<{ name: string; ty: string }> = [];
+    try {
+        const res = await fetch(`${adminUrl}/services`);
+        if (res.ok) {
+            const data = (await res.json()) as { services: Array<{ name: string; ty: string }> };
+            services = (data.services ?? []).filter(
+                (s) => s.name.startsWith('entity_') || s.name.startsWith('workflow_') || s.name === 'workspace',
+            );
+        }
+    } catch { /* admin unreachable */ }
+
+    // 2. For each service, query keys and clear state
+    for (const svc of services) {
+        try {
+            // Use the Restate SQL query to find all object keys
+            const qRes = await fetch(`${adminUrl}/query`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', 'accept': 'application/json' },
+                body: JSON.stringify({ query: `SELECT DISTINCT service_key FROM state WHERE service_name = '${svc.name}'` }),
+            });
+            if (!qRes.ok) continue;
+
+            // The query endpoint returns Arrow IPC by default; with accept: application/json it returns JSON
+            const qData = await qRes.json() as { rows?: string[][] };
+            const keys = (qData.rows ?? []).map((r: string[]) => r[0]).filter(Boolean);
+
+            for (const key of keys) {
+                try {
+                    await fetch(`${adminUrl}/services/${svc.name}/state`, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ object_key: key, new_state: {} }),
+                    });
+                    cleared++;
+                } catch { /* individual clear failure */ }
+            }
+        } catch { /* query failure */ }
+    }
+
+    return cleared;
+}
+
 // ── Workspace info ────────────────────────────────────────────────────────────
 
 async function fetchWorkspaceInfo(
@@ -296,10 +349,16 @@ export function devtoolsMiddleware(
                             console.warn(`[syncengine:devtools] purge stream ${streamToPurge} failed: ${msg}`);
                         }
 
-                        // 2. Teardown
+                        // 2. Clear all entity/workflow state in Restate
+                        const cleared = await clearAllEntityState(restateUrl);
+                        if (cleared > 0) {
+                            console.log(`[syncengine:devtools] cleared ${cleared} entity state entries`);
+                        }
+
+                        // 3. Teardown workspace
                         await restatePost(base, `workspace/${wsEnc}/teardown`, null);
 
-                        // 3. Re-provision
+                        // 4. Re-provision
                         await restatePost(
                             base,
                             `workspace/${wsEnc}/provision`,
