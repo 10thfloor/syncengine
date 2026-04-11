@@ -339,31 +339,25 @@ export function devtoolsMiddleware(
                     res.end(JSON.stringify({ messages: [], stream: null }));
                     return;
                 }
-                const stream = [...streams].sort((a, b) => b.messages - a.messages)[0]!;
+                const streamMeta = [...streams].sort((a, b) => b.messages - a.messages)[0]!;
 
                 const { connect } = await import('@nats-io/transport-node');
-                const { jetstream, DeliverPolicy } = await import('@nats-io/jetstream');
+                const { jetstream } = await import('@nats-io/jetstream');
                 const nc = await connect({ servers: natsUrl });
-                const messages: Array<{ seq: number; subject: string; ts: string; data: unknown }> = [];
+                const messages: Array<{ seq: number; subject: string; data: unknown }> = [];
 
                 try {
                     const js = jetstream(nc);
-                    const startSeq = Math.max(1, stream.lastSeq - limit + 1);
-                    const consumer = await js.consumers.get(stream.name, {
-                        deliver_policy: DeliverPolicy.StartSequence,
-                        opt_start_seq: startSeq,
-                        inactive_threshold: 5_000_000_000, // 5s nanos
-                    });
-                    const iter = await consumer.fetch({ max_messages: limit, expires: 3000 });
-                    for await (const msg of iter) {
-                        let data: unknown;
-                        try { data = msg.json(); } catch { data = msg.string(); }
-                        messages.push({
-                            seq: msg.seq,
-                            subject: msg.subject,
-                            ts: new Date(msg.info.timestampNanos / 1_000_000).toISOString(),
-                            data,
-                        });
+                    const stream = await js.streams.get(streamMeta.name);
+                    const startSeq = Math.max(streamMeta.firstSeq, streamMeta.lastSeq - limit + 1);
+                    for (let seq = startSeq; seq <= streamMeta.lastSeq; seq++) {
+                        try {
+                            const msg = await stream.getMessage({ seq });
+                            if (!msg) continue;
+                            let data: unknown;
+                            try { data = msg.json(); } catch { data = msg.string(); }
+                            messages.push({ seq, subject: msg.subject, data });
+                        } catch { /* skip gaps from GC */ }
                     }
                 } finally {
                     await nc.close();
@@ -373,7 +367,7 @@ export function devtoolsMiddleware(
                 res.setHeader('content-type', 'application/json');
                 res.end(JSON.stringify({
                     messages,
-                    stream: { name: stream.name, messages: stream.messages, firstSeq: stream.firstSeq, lastSeq: stream.lastSeq },
+                    stream: { name: streamMeta.name, messages: streamMeta.messages, firstSeq: streamMeta.firstSeq, lastSeq: streamMeta.lastSeq },
                 }));
             } catch (err) {
                 res.statusCode = 500;
