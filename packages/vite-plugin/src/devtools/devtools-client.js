@@ -780,12 +780,6 @@
             if (Array.isArray(data.viewDefs)) viewDefs = data.viewDefs;
             // View row counts
             if (data.views) viewRowCounts = data.views;
-            // Auto-refresh selected table/view data while drawer is open
-            if (drawerOpen && activeTab === 'data' && selectedTable) {
-                var isView = selectedTable.indexOf('view:') === 0;
-                var key = isView ? selectedTable.replace(/^view:/, '') : selectedTable;
-                requestRows(key, isView);
-            }
             render();
         }
 
@@ -811,8 +805,16 @@
     }
     sendPing();
     setInterval(sendPing, 5000);
-    // Refresh stream timeline every 5s when timeline tab is active
-    setInterval(function () { if (drawerOpen && activeTab === 'timeline') fetchStreamMessages(); }, 5000);
+    // Periodic refresh for active tabs (not on every status update — that floods the worker)
+    setInterval(function () {
+        if (!drawerOpen) return;
+        if (activeTab === 'timeline') fetchStreamMessages();
+        if (activeTab === 'data' && selectedTable) {
+            var isView = selectedTable.indexOf('view:') === 0;
+            var key = isView ? selectedTable.replace(/^view:/, '') : selectedTable;
+            requestRows(key, isView);
+        }
+    }, 3000);
 
     // ── Keyboard shortcut ─────────────────────────────────────────────────
 
