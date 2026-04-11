@@ -153,9 +153,9 @@
     }
 
     function statusColor() {
-        if (connStatus === 'disconnected' || connStatus === 'error') return 'red';
-        if (connStatus === 'live' || connStatus === 'connected') return 'green';
-        return 'yellow';
+        if (connStatus === 'disconnected' || connStatus === 'error' || connStatus === 'auth_failed') return 'red';
+        if (connStatus === 'connected' || connStatus === 'live' || connStatus === 'syncing') return 'green';
+        return 'yellow'; // connecting, reconnecting, etc.
     }
 
     function savePrefs() {
