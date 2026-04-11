@@ -47,6 +47,33 @@ const authority = {
     restateUrl: 'http://localhost:8080',
 };
 
+// ── Schema fingerprinting (auto-wipe stale OPFS) ────────────────────────────
+
+/**
+ * Compute a stable hash of the schema shape: table SQL statements and
+ * view pipeline definitions. Any change to a table's columns, a view's
+ * aggregations, or even the ordering produces a different fingerprint,
+ * which triggers an automatic OPFS wipe on the next worker init.
+ *
+ * Uses a simple djb2-style string hash — no crypto needed; this is a
+ * fast equality check, not a security boundary.
+ */
+function computeSchemaFingerprint(schema) {
+    const parts = [];
+    for (const t of schema.tables) {
+        parts.push(t.sql);
+    }
+    for (const v of schema.views) {
+        parts.push(v.name + ':' + JSON.stringify(v.pipeline));
+    }
+    const str = parts.join('|');
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;
+    }
+    return hash.toString(36);
+}
+
 // ── Nonce deduplication ─────────────────────────────────────────────────────
 
 const CLIENT_ID = crypto.randomUUID();
@@ -435,10 +462,16 @@ async function connectNats() {
         nats.conn = await connect(connectOpts);
         console.log(`[nats] connected to ${natsUrl}`);
 
+        // Entity-writes subject: server-side entity handlers can emit
+        // table inserts via `emit()`. These publish to a well-known
+        // subject that we consume alongside the user's channel subjects.
+        const entityWritesSubject = `ws.${nats.config.workspaceId}.entity-writes`;
+        const allSubjects = [...channelSubjects, entityWritesSubject];
+
         // Initialize replay phase — consumers will flip this to false once
         // they've all reported caught-up via `markConsumerCaughtUp`.
         sync.isReplaying = true;
-        resetReplayCoord(channelSubjects.length);
+        resetReplayCoord(allSubjects.length);
         replayCoord.codec = codec;
         authority.backoff = 0;
         authority.backoffUntil = 0;
@@ -451,7 +484,7 @@ async function connectNats() {
         const js = nats.conn.jetstream();
         const streamName = `WS_${nats.config.workspaceId.replace(/-/g, '_')}`;
         const sources = [];
-        for (const s of channelSubjects) {
+        for (const s of allSubjects) {
             const lastSeq = sync.lastProcessedSeqs[s] || 0;
             const consumerOpts = lastSeq > 0
                 ? { filterSubjects: [s], deliver_policy: 'by_start_sequence', opt_start_seq: lastSeq + 1 }
@@ -814,6 +847,43 @@ async function handleInit(data) {
         console.log('SQLite initialized in-memory (OPFS unavailable)');
     }
 
+    // 2b. Schema fingerprint — auto-wipe on mismatch.
+    //
+    // Compute a hash of the current schema (table SQL + view pipelines)
+    // and compare against what's stored in the database. If they differ
+    // the OPFS state is from a previous schema version and the DBSP
+    // pipeline would panic on column-layout mismatches. Wiping is safe
+    // in dev (data resyncs from JetStream on reconnect) and avoids the
+    // dreaded "unreachable" WASM crash that requires manual devtools
+    // intervention.
+    const schemaFingerprint = computeSchemaFingerprint(schema);
+    try {
+        db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
+        const rows = db.exec(
+            "SELECT value FROM _dbsp_meta WHERE key = 'schema_fingerprint'",
+            { rowMode: 'object' },
+        );
+        const stored = rows.length > 0 ? rows[0].value : null;
+        if (stored && stored !== schemaFingerprint) {
+            console.log(`[worker] schema changed (${stored.slice(0, 8)}… → ${schemaFingerprint.slice(0, 8)}…), wiping OPFS`);
+            // Drop every user table and the meta table, then recreate meta
+            const existingTables = db.exec(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                { rowMode: 'object' },
+            );
+            for (const row of existingTables) {
+                db.exec(`DROP TABLE IF EXISTS "${row.name}"`);
+            }
+            db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
+        }
+        db.exec(
+            "INSERT OR REPLACE INTO _dbsp_meta (key, value) VALUES ('schema_fingerprint', ?)",
+            { bind: [schemaFingerprint] },
+        );
+    } catch (e) {
+        console.warn('[worker] schema fingerprint check failed, continuing:', e);
+    }
+
     // 3. Create tables
     for (const t of schema.tables) {
         db.exec(t.sql);
@@ -831,7 +901,6 @@ async function handleInit(data) {
             }
         }
     } else {
-        db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
         db.exec(`INSERT OR IGNORE INTO _dbsp_meta (key, value) VALUES ('schema_version', '${targetVersion}')`);
     }
 

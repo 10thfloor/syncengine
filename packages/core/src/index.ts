@@ -64,8 +64,21 @@ export {
     validateEntityState,
     applyHandler,
     rebase,
+    emit,
+    extractEmits,
+    EMIT_KEY,
 } from './entity';
+
+// ── Project config (PLAN Phase 8 — workspace resolution) ─────────────────
+export { defineConfig } from './config';
 export type {
+    SyncengineConfig,
+    SyncengineUser,
+    WorkspacesConfig,
+    WorkspaceResolveContext,
+} from './config';
+export type {
+    EmitInsert,
     EntityDef,
     AnyEntity,
     EntityState,
@@ -98,6 +111,12 @@ export {
     escapeIdentifier,
     escapeLiteral,
 } from './sql-gen';
+
+// ── HTTP helpers (shared between vite-plugin dev + production server) ───────
+// Exported via subpath `@syncengine/core/http` (not the main barrel)
+// because they depend on `node:crypto`, which breaks browser-only
+// consumers like `@syncengine/client`. Import as:
+//   import { hashWorkspaceId } from '@syncengine/core/http';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 export * from './constants';

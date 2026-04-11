@@ -116,6 +116,19 @@ interface EntitySubscription {
     nextActionId: number;
 }
 
+/**
+ * Entity subscription cache, keyed by `${entity.$name}:${entityKey}`.
+ *
+ * ⚠️  Assumption: the tab only ever talks to ONE workspace — the one
+ * resolved from the `<meta name="syncengine-workspace-id">` tag at
+ * boot time, exposed as `runtimeWorkspaceId`. That assumption is
+ * load-bearing for both this map and the NATS subject construction
+ * below. If a future phase allows a single tab to hold multiple
+ * workspaces (e.g. an admin view showing data from two users at
+ * once), this key and every `ws.${runtimeWorkspaceId}.*` subject
+ * need a workspace-id prefix, and the lazy NATS connection below
+ * needs one instance per workspace.
+ */
 const subscriptions = new Map<string, EntitySubscription>();
 
 /**
@@ -311,7 +324,16 @@ async function invokeHandler(
         `/${encodeURIComponent(key)}` +
         `/${handlerName}`;
 
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        // PLAN Phase 8: tell the dev middleware which workspace to
+        // target. The wsKey was resolved per-request by the plugin's
+        // workspaces sub-plugin and injected into the HTML as a meta
+        // tag; the runtime-config virtual module read it at boot and
+        // exported it as `workspaceId`, so this header is always
+        // accurate for the current user session.
+        'x-syncengine-workspace': runtimeWorkspaceId,
+    };
     if (runtimeAuthToken) headers.authorization = `Bearer ${runtimeAuthToken}`;
 
     const res = await fetch(url, {

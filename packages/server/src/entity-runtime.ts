@@ -30,7 +30,9 @@ import * as restate from "@restatedev/restate-sdk";
 import {
     isEntity,
     applyHandler,
+    extractEmits,
     type AnyEntity,
+    type EmitInsert,
 } from "@syncengine/core";
 
 const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
@@ -80,12 +82,23 @@ async function runHandler(
         throw new restate.TerminalError(message);
     }
 
+    // Check for emitted table inserts before persisting — the Symbol
+    // key is non-enumerable and invisible to JSON.stringify, so it
+    // won't leak into Restate's state storage.
+    const emits = extractEmits(validated);
+
     // Persist atomically (Restate's `ctx.set` is part of the same journal
     // record as the handler return; either both happen or neither does).
     ctx.set(STATE_KEY, validated);
 
     // Fan out via NATS so subscribed clients update without polling.
     await publishState(ctx, workspaceId, entity.$name, entityKey, validated);
+
+    // Publish emitted table deltas to the entity-writes subject so
+    // every client's data worker picks them up through JetStream.
+    if (emits && emits.length > 0) {
+        await publishTableDeltas(ctx, workspaceId, emits);
+    }
 
     return { state: validated };
 }
@@ -111,6 +124,36 @@ async function publishState(
             key: entityKey,
             state,
         }));
+        await nc.flush();
+        await nc.close();
+    });
+}
+
+/** Publish emitted table rows to the `entity-writes` subject. The data
+ *  worker subscribes to this subject alongside the channel subjects, so
+ *  the rows flow through the same JetStream → DBSP pipeline as client
+ *  inserts. Each insert gets its own message with a server-generated
+ *  nonce so client-side dedup works correctly. */
+async function publishTableDeltas(
+    ctx: restate.ObjectContext,
+    workspaceId: string,
+    inserts: readonly EmitInsert[],
+): Promise<void> {
+    const subject = `ws.${workspaceId}.entity-writes`;
+    await ctx.run("publish entity table deltas", async () => {
+        const { connect, JSONCodec } = await import("nats");
+        const nc = await connect({ servers: NATS_URL });
+        const codec = JSONCodec();
+        let seq = 0;
+        for (const insert of inserts) {
+            nc.publish(subject, codec.encode({
+                type: "INSERT",
+                table: insert.table,
+                record: insert.record,
+                _clientId: "restate-entity-runtime",
+                _nonce: `restate-${ctx.key}-${Date.now()}-${++seq}`,
+            }));
+        }
         await nc.flush();
         await nc.close();
     });

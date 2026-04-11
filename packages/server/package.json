@@ -7,7 +7,8 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./workspace": "./src/workspace/workspace.ts"
+    "./workspace": "./src/workspace/workspace.ts",
+    "./serve": "./src/serve.ts"
   },
   "scripts": {
     "build": "tsc",

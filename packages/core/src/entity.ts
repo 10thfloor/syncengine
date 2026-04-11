@@ -305,6 +305,62 @@ export function isEntity(x: unknown): x is AnyEntity {
 // instead, which preserves inference. See the review commit message
 // for the full rationale.
 
+// ── emit() — entity → table bridge ──────────────────────────────────────────
+//
+// `emit(newState, ...inserts)` lets a handler return new state AND declare
+// table rows that should be published as INSERT deltas to the sync pipeline.
+// The entity runtime extracts the inserts via `extractEmits()`, publishes
+// them to NATS, and persists only the clean state (Symbol keys are invisible
+// to JSON.stringify so they never leak into Restate's storage).
+//
+// Handlers stay pure — `emit()` is just a return-value wrapper, not a
+// side-effecting call. The framework does the I/O.
+
+/** Well-known Symbol key used to carry emitted table inserts on the
+ *  handler's return value. Non-enumerable, invisible to JSON.stringify. */
+export const EMIT_KEY: unique symbol = Symbol.for('syncengine.emit');
+
+/** A table row to publish as an INSERT delta. */
+export interface EmitInsert {
+    readonly table: string;
+    readonly record: Record<string, unknown>;
+}
+
+/**
+ * Wrap a handler's return state with table inserts that the entity
+ * runtime will publish to the sync pipeline. The returned object IS
+ * the new state — it just has a hidden Symbol property the framework
+ * reads.
+ *
+ * ```ts
+ * handlers: {
+ *   transfer: (state, toId, amount) => emit(
+ *     { ...state, balance: state.balance - amount },
+ *     { table: 'transactions', record: { to: toId, amount } },
+ *   ),
+ * }
+ * ```
+ */
+export function emit<S extends Record<string, unknown>>(
+    state: S,
+    ...inserts: EmitInsert[]
+): S {
+    const wrapped = { ...state };
+    Object.defineProperty(wrapped, EMIT_KEY, {
+        value: inserts,
+        enumerable: false,
+        configurable: true,
+    });
+    return wrapped as S;
+}
+
+/** Extract emitted inserts from a handler return value, if any. */
+export function extractEmits(
+    state: Record<string, unknown>,
+): EmitInsert[] | undefined {
+    return (state as Record<symbol, unknown>)[EMIT_KEY] as EmitInsert[] | undefined;
+}
+
 // ── Pure handler execution ─────────────────────────────────────────────────
 //
 // `applyHandler` runs one handler on a current state, validates the result,

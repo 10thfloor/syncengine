@@ -15,6 +15,7 @@
     "@syncengine/bin-utils": "workspace:*",
     "@syncengine/nats-bin": "workspace:*",
     "@syncengine/restate-bin": "workspace:*",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.0"
   },
   "devDependencies": {

@@ -62,7 +62,16 @@ export interface Pids {
  * module.
  */
 export interface RuntimeConfig {
-    workspaceId: string;
+    /**
+     * Optional fallback workspace id. Only consumed by
+     * `@syncengine/vite-plugin` when running outside a browser context
+     * (SSR, vitest, node scripts) — in a browser, the plugin injects
+     * the real wsKey via `<meta name="syncengine-workspace-id">` on
+     * every page load based on the user's `syncengine.config.ts`
+     * resolver. As of PLAN Phase 8 the CLI no longer writes this
+     * field because there is no single pinned workspace.
+     */
+    workspaceId?: string;
     /** WebSocket URL the browser connects to for NATS + JetStream. */
     natsUrl: string;
     /** Restate ingress HTTP URL for authority / workspace RPC. */

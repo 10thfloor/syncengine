@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import type { Plugin, ViteDevServer } from 'vite';
 
 import { actorsPlugin, type ActorsPluginOptions } from './actors.ts';
+import { workspacesPlugin, type WorkspacesPluginOptions } from './workspaces.ts';
 
 // ── Virtual module ids ────────────────────────────────────────────────────
 
@@ -63,19 +64,28 @@ export interface SyncenginePluginOptions {
     runtimeConfigPath?: string;
     /**
      * Options forwarded to the actors sub-plugin (`.actor.ts` discovery,
-     * `server({...})` stripping, `/__syncengine/rpc` middleware).
+     * handler-body stripping, `/__syncengine/rpc` middleware).
      */
     actors?: ActorsPluginOptions;
+    /**
+     * Options forwarded to the workspaces sub-plugin (PLAN Phase 8:
+     * `syncengine.config.ts` loading, `workspaces.resolve` invocation,
+     * lazy provisioning, HTML meta-tag injection).
+     */
+    workspaces?: WorkspacesPluginOptions;
 }
 
 /**
  * Default export: returns an array of plugins so Vite can treat each
- * concern independently (runtime-config virtual module + actors
- * discovery/stripping/middleware). This stays a single user-facing
- * import: `syncengine()` in vite.config.ts.
+ * concern independently. This stays a single user-facing import:
+ * `syncengine()` in vite.config.ts.
  */
 export default function syncengine(opts: SyncenginePluginOptions = {}): Plugin[] {
-    return [runtimeConfigPlugin(opts), actorsPlugin(opts.actors ?? {})];
+    return [
+        runtimeConfigPlugin(opts),
+        actorsPlugin(opts.actors ?? {}),
+        workspacesPlugin(opts.workspaces ?? {}),
+    ];
 }
 
 function runtimeConfigPlugin(opts: SyncenginePluginOptions): Plugin {
@@ -179,20 +189,26 @@ function loadRuntimeConfig(path: string, isDev: boolean): RuntimeConfig {
         return defaultDevConfig();
     }
 
-    // Production: env vars are the source of truth. Missing vars throw
-    // at module load time so deployments fail loudly instead of silently
-    // pointing at localhost.
-    const workspaceId = process.env.SYNCENGINE_WORKSPACE_ID;
+    // Production: env vars provide the NATS / Restate URLs. The
+    // workspace id is NOT baked in — as of PLAN Phase 8 workspaces are
+    // resolved per request, so the production deployment (Phase 9)
+    // injects the same `<meta name="syncengine-*">` tags at serve time
+    // from an edge function. The compile-time fallback below is only
+    // consumed when `document` is undefined (SSR, prerender) and
+    // mirrors the dev default.
+    //
+    // Missing URL vars throw so deployments fail loudly instead of
+    // silently pointing at localhost.
     const natsUrl = process.env.SYNCENGINE_NATS_URL;
     const restateUrl = process.env.SYNCENGINE_RESTATE_URL;
-    if (!workspaceId || !natsUrl || !restateUrl) {
+    if (!natsUrl || !restateUrl) {
         throw new Error(
-            `[syncengine] production build requires SYNCENGINE_WORKSPACE_ID, ` +
-            `SYNCENGINE_NATS_URL, and SYNCENGINE_RESTATE_URL to be set.`,
+            `[syncengine] production build requires SYNCENGINE_NATS_URL and ` +
+            `SYNCENGINE_RESTATE_URL to be set.`,
         );
     }
     return {
-        workspaceId,
+        workspaceId: process.env.SYNCENGINE_WORKSPACE_ID ?? 'default',
         natsUrl,
         restateUrl,
         authToken: process.env.SYNCENGINE_AUTH_TOKEN ?? null,
@@ -200,8 +216,14 @@ function loadRuntimeConfig(path: string, isDev: boolean): RuntimeConfig {
 }
 
 function defaultDevConfig(): RuntimeConfig {
+    // As of PLAN Phase 8 the browser path resolves workspaceId per
+    // request via `<meta name="syncengine-workspace-id">`. This
+    // fallback is only consumed when `document` is undefined
+    // (SSR, vitest, node scripts) and mirrors the default resolver
+    // in the workspaces sub-plugin, which returns the literal
+    // 'default' for apps without a syncengine.config.ts.
     return {
-        workspaceId: 'demo',
+        workspaceId: 'default',
         natsUrl: 'ws://localhost:9222',
         restateUrl: 'http://localhost:8080',
         authToken: null,
@@ -220,13 +242,45 @@ function normalizeConfig(raw: Partial<RuntimeConfig>): RuntimeConfig {
 
 // ── Module rendering ──────────────────────────────────────────────────────
 
+/**
+ * Emit the runtime-config virtual module.
+ *
+ * In dev (PLAN Phase 8), the workspace id is no longer a static value —
+ * it's resolved per-request by the workspaces plugin and injected into
+ * the served HTML via `<meta name="syncengine-*">` tags. This module
+ * reads those meta tags at load time in the browser so a single bundle
+ * can serve any number of users without a rebuild. The NATS and Restate
+ * URLs follow the same pattern, giving the CLI the freedom to pick
+ * different ports per dev run.
+ *
+ * In any non-browser context (SSR, vitest, node scripts), `document`
+ * is undefined and the module falls back to the compile-time values
+ * read from `runtime.json` / env vars — the same semantics as before
+ * Phase 8, so the existing test stub at
+ * `packages/client/src/__tests__/runtime-config.stub.ts` keeps working.
+ */
 function renderRuntimeConfigModule(config: RuntimeConfig): string {
     // JSON.stringify escapes for us — safe for both strings and null.
-    return (
-        `// Generated by @syncengine/vite-plugin — do not edit\n` +
-        `export const workspaceId = ${JSON.stringify(config.workspaceId)};\n` +
-        `export const natsUrl = ${JSON.stringify(config.natsUrl)};\n` +
-        `export const restateUrl = ${JSON.stringify(config.restateUrl)};\n` +
-        `export const authToken = ${JSON.stringify(config.authToken)};\n`
-    );
+    const fallbackWorkspaceId = JSON.stringify(config.workspaceId);
+    const fallbackNatsUrl = JSON.stringify(config.natsUrl);
+    const fallbackRestateUrl = JSON.stringify(config.restateUrl);
+    const fallbackAuthToken = JSON.stringify(config.authToken);
+
+    return [
+        `// Generated by @syncengine/vite-plugin — do not edit`,
+        ``,
+        `function readMeta(name, fallback) {`,
+        `    if (typeof document === 'undefined') return fallback;`,
+        `    const el = document.querySelector('meta[name="syncengine-' + name + '"]');`,
+        `    const value = el && el.getAttribute('content');`,
+        `    return value != null && value !== '' ? value : fallback;`,
+        `}`,
+        ``,
+        `export const workspaceId = readMeta('workspace-id', ${fallbackWorkspaceId});`,
+        `export const natsUrl = readMeta('nats-url', ${fallbackNatsUrl});`,
+        `export const restateUrl = readMeta('restate-url', ${fallbackRestateUrl});`,
+        `const _authTokenMeta = readMeta('auth-token', '');`,
+        `export const authToken = _authTokenMeta || ${fallbackAuthToken};`,
+        ``,
+    ].join('\n');
 }

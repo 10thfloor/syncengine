@@ -23,9 +23,11 @@
  * the two graphs.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Connect, Plugin } from 'vite';
+
+import { hashWorkspaceId } from '@syncengine/core/http';
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
@@ -62,11 +64,6 @@ export interface ActorsPluginOptions {
      * runtime-config plugin reads for the browser side).
      */
     restateUrl?: string;
-    /**
-     * Override the workspace ID used to namespace entity instance keys
-     * on the server. Defaults to reading `.syncengine/dev/runtime.json`.
-     */
-    workspaceId?: string;
 }
 
 // ── File discovery ──────────────────────────────────────────────────────────
@@ -535,14 +532,32 @@ function buildStubLiteral(handlerNames: readonly string[]): string {
 const NAME_REGEX = /^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$/;
 
 /**
+ * Validation regex for incoming `x-syncengine-workspace` headers.
+ * In browser traffic the client sends the per-user wsKey that the
+ * workspaces sub-plugin injected into the HTML — always a 16-char
+ * hex string produced by SHA-256 truncation. The fallback default
+ * resolver returns the literal `default` which is also safe. We
+ * conservatively allow `[a-zA-Z0-9_-]` up to 64 chars to cover both
+ * without opening the door to path traversal or CRLF injection.
+ */
+const WORKSPACE_HEADER_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/**
  * Build a Connect-style middleware that forwards
  * `/__syncengine/rpc/<entity>/<key>/<handler>` POSTs to the framework's
  * Restate entity runtime. The browser posts `[...args]` as the body;
  * we relay verbatim after validating the path components.
+ *
+ * The workspace id is read from the `x-syncengine-workspace` request
+ * header — the client picked it up from the `<meta>` tag injected by
+ * the workspaces sub-plugin, which resolved it from the user's
+ * `syncengine.config.ts` on the HTML request. `workspaceIdFallbackFn`
+ * is only consulted if the header is absent (older clients or direct
+ * curl calls).
  */
 export function buildRpcMiddleware(
     restateUrlFn: () => string,
-    workspaceIdFn: () => string,
+    workspaceIdFallbackFn: () => string,
 ): Connect.NextHandleFunction {
     return async (req, res, next) => {
         if (!req.url || !req.url.startsWith('/__syncengine/rpc/')) return next();
@@ -598,12 +613,29 @@ export function buildRpcMiddleware(
         for await (const chunk of req) chunks.push(chunk as Buffer);
         const body = Buffer.concat(chunks).toString('utf8') || '[]';
 
+        // Resolve workspace id: prefer the per-request header the
+        // client sends (derived from the injected meta tag), fall
+        // back to the runtime.json / plugin-option default for
+        // legacy clients or raw curl calls during debugging.
+        const headerWs = req.headers['x-syncengine-workspace'];
+        const headerWsValue = Array.isArray(headerWs) ? headerWs[0] : headerWs;
+        let workspaceId: string;
+        if (typeof headerWsValue === 'string' && headerWsValue.length > 0) {
+            if (!WORKSPACE_HEADER_REGEX.test(headerWsValue)) {
+                res.statusCode = 400;
+                res.end('Invalid x-syncengine-workspace header');
+                return;
+            }
+            workspaceId = headerWsValue;
+        } else {
+            workspaceId = workspaceIdFallbackFn();
+        }
+
         // Forward to Restate. `entityName` and `handlerName` are now
         // guaranteed identifiers, so the URL interpolation is safe.
         // The workspaceId+key composite gets encoded because the key
         // is user data.
         const restateUrl = restateUrlFn().replace(/\/+$/, '');
-        const workspaceId = workspaceIdFn();
         const targetUrl =
             `${restateUrl}/entity_${entityName}` +
             `/${encodeURIComponent(`${workspaceId}/${entityKey}`)}` +
@@ -634,9 +666,10 @@ export function buildRpcMiddleware(
 // ── Plugin factory ──────────────────────────────────────────────────────────
 
 /** Runtime-config dual: the dev orchestrator writes this file with the
- *  allocated Restate URL and workspace ID. */
+ *  allocated Restate / NATS URLs. Post-Phase-8 the `workspaceId` field
+ *  is no longer written — workspaces are resolved per request by the
+ *  workspaces sub-plugin. */
 interface DevRuntimeJson {
-    workspaceId?: string;
     natsUrl?: string;
     restateUrl?: string;
     authToken?: string | null;
@@ -656,6 +689,8 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
     const registry = emptyRegistry();
     let srcDir: string | null = null;
     let viteRoot: string | null = null;
+    let isBuild = false;
+    let outDir: string | null = null;
 
     return {
         name: 'syncengine:actors',
@@ -663,6 +698,10 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
         configResolved(config) {
             viteRoot = config.root;
             srcDir = opts.srcDir ?? resolve(config.root, 'src');
+            isBuild = config.command === 'build';
+            outDir = config.build?.outDir
+                ? resolve(config.root, config.build.outDir)
+                : resolve(config.root, 'dist');
         },
 
         buildStart() {
@@ -690,11 +729,42 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
         },
 
         configureServer(server) {
+            // The fallback workspace id used when an incoming RPC
+            // request doesn't carry an `x-syncengine-workspace` header
+            // (curl calls, tests, older clients). Hashing `'default'`
+            // gives the same wsKey the workspaces sub-plugin's default
+            // resolver produces for apps without a syncengine.config.ts,
+            // so the two paths stay consistent. Post-Phase-8 the CLI
+            // no longer writes `workspaceId` into runtime.json, and
+            // ActorsPluginOptions no longer exposes workspaceId, so
+            // this hashed default is the only fallback that makes sense.
+            const fallbackWsKey = hashWorkspaceId('default');
             const middleware = buildRpcMiddleware(
                 () => opts.restateUrl ?? readDevRuntime(viteRoot ?? server.config.root).restateUrl ?? 'http://localhost:8080',
-                () => opts.workspaceId ?? readDevRuntime(viteRoot ?? server.config.root).workspaceId ?? 'demo',
+                () => fallbackWsKey,
             );
             server.middlewares.use(middleware);
+        },
+
+        // ── Phase 9: emit server manifest during production build ──
+        closeBundle() {
+            if (!isBuild || !outDir || !viteRoot) return;
+
+            const actors = Array.from(registry.byPath.values()).map((a) => a.relPath);
+            const manifest = {
+                actors,
+                configCandidates: [
+                    'syncengine.config.ts',
+                    'syncengine.config.js',
+                    'syncengine.config.mjs',
+                ],
+            };
+            const manifestDir = join(outDir, '.syncengine');
+            mkdirSync(manifestDir, { recursive: true });
+            writeFileSync(
+                join(manifestDir, 'manifest.json'),
+                JSON.stringify(manifest, null, 2),
+            );
         },
     };
 }

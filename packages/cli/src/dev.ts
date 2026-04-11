@@ -9,7 +9,10 @@
  *   5. Spawn restate-server → wait for admin /health
  *   6. Spawn workspace service → wait for TCP (service speaks h2c)
  *   7. POST to Restate admin to register the workspace deployment
- *   8. POST workspace.provision() for the 'demo' workspace
+ *   8. Write runtime.json (NATS / Restate URLs only — workspace ids are
+ *      resolved per-request by the vite plugin's workspaces middleware
+ *      based on the user's syncengine.config.ts, and provisioned lazily
+ *      on first page load)
  *   9. Spawn Vite dev server
  *  10. Write pids.json with the full child set
  *
@@ -50,10 +53,7 @@ import {
 } from './state';
 import {
     restateRegisterDeployment,
-    provisionWorkspace,
 } from './client';
-
-const DEMO_WORKSPACE_ID = 'demo';
 
 // ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -219,30 +219,36 @@ async function boot(
     await restateRegisterDeployment(ports, `http://127.0.0.1:${ports.workspace}`);
     note('workspace service registered');
 
-    // 5. Auto-provision the default 'demo' workspace
-    banner(`provisioning workspace '${DEMO_WORKSPACE_ID}'`);
-    await provisionWorkspace(ports, DEMO_WORKSPACE_ID);
-    note(`workspace '${DEMO_WORKSPACE_ID}' ready`);
-
-    // 5b. Write runtime.json so @syncengine/vite-plugin can populate
-    //     `virtual:syncengine/runtime-config` when Vite boots. This must
-    //     happen BEFORE vite starts — otherwise the plugin reads a missing
-    //     file and falls back to the static defaults.
+    // 5. Write runtime.json so @syncengine/vite-plugin can pick up the
+    //    NATS / Restate URLs for the running stack. This must happen
+    //    BEFORE vite starts — otherwise the plugin reads a missing file
+    //    and falls back to the static defaults.
+    //
+    //    NOTE: workspace ids are NOT pinned here. As of PLAN Phase 8 the
+    //    vite plugin's workspaces sub-plugin calls the user's
+    //    `syncengine.config.ts` → `workspaces.resolve({ request, user })`
+    //    on every page load, hashes the result to a bounded wsKey, and
+    //    lazy-provisions the first time each wsKey is seen. This lets a
+    //    single dev run serve any number of users without restarts.
     writeRuntimeConfig(stateDir, {
-        workspaceId: DEMO_WORKSPACE_ID,
         natsUrl: `ws://localhost:${ports.natsWs}`,
         restateUrl: `http://localhost:${ports.restateIngress}`,
         authToken: null,
     });
-    note(`runtime.json → workspace=${DEMO_WORKSPACE_ID}, nats=ws://localhost:${ports.natsWs}`);
+    note(`runtime.json → nats=ws://localhost:${ports.natsWs}, workspaces resolved per request`);
 
     // 6. Vite
+    if (!appDir) {
+        throw new Error(
+            'No app directory found. Run from a directory with vite.config.ts, ' +
+            'or ensure apps/example exists in the repo.',
+        );
+    }
     banner('starting vite dev server');
-    const exampleDir = join(repoRoot, 'apps', 'example');
-    const viteBin = join(exampleDir, 'node_modules', '.bin', 'vite');
+    const viteBin = join(appDir, 'node_modules', '.bin', 'vite');
     const vite = spawnManaged(viteBin, [], {
         name: 'vite',
-        cwd: exampleDir,
+        cwd: appDir,
         env: { ...process.env, FORCE_COLOR: '1' },
     });
     processes.push(vite);
@@ -408,14 +414,23 @@ function isSafeStateDirToWipe(stateDir: string, repoRoot: string): boolean {
 }
 
 /**
- * Locate the user's app directory. Convention:
- *   apps/{app}
+ * Locate the user's app directory. Resolution order:
+ *   1. CWD — if it has a vite.config.ts (scaffolded project or standalone app)
+ *   2. apps/example — the monorepo's built-in example app
  *
  * The server walks `src/**\/*.actor.ts` relative to this path on startup
- * (PLAN.md Phase 4). apps/example is the only app today; if/when
- * multi-app lands the resolver can scan `apps/*` dynamically.
+ * (PLAN.md Phase 4).
  */
 function resolveAppDir(repoRoot: string): string | null {
+    // 1. CWD has a vite config → treat it as the app
+    const cwd = process.cwd();
+    if (
+        existsSync(join(cwd, 'vite.config.ts')) ||
+        existsSync(join(cwd, 'vite.config.js'))
+    ) {
+        return cwd;
+    }
+    // 2. Monorepo convention: apps/example
     const candidate = join(repoRoot, 'apps', 'example');
     return existsSync(candidate) ? candidate : null;
 }
@@ -484,7 +499,7 @@ ${bar}\x1b[0m
   \x1b[1mRestate\x1b[0m       → http://localhost:${ports.restateIngress}
   \x1b[1mRestate admin\x1b[0m → http://localhost:${ports.restateAdmin}
   \x1b[1mWorkspace svc\x1b[0m → http://localhost:${ports.workspace}
-  \x1b[1mDemo workspace\x1b[0m → ${DEMO_WORKSPACE_ID}
+  \x1b[1mWorkspaces\x1b[0m    → resolved per request via syncengine.config.ts
 \x1b[2m
   Ctrl-C to shut everything down.\x1b[0m
 
