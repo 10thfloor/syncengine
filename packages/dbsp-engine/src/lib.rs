@@ -832,7 +832,7 @@ fn apply_aggregate(
             .iter()
             .map(|k| d.record.get(k).map_or("null".to_string(), |v| v.to_string()))
             .collect::<Vec<_>>()
-            .join("|");
+            .join(&KEY_SEP.to_string());
 
         let sign = if d.weight > 0 { 1.0 } else { -1.0 };
 
@@ -1002,7 +1002,22 @@ fn merge_records(left: &Value, right: &Value) -> Value {
 
 /// Extract a string key from a JSON record. Used for both primary key lookup
 /// and sort-key extraction. Handles String/Number/other uniformly.
+/// ASCII Unit Separator — used as the join character for composite keys.
+/// Cannot appear in normal string values, unlike '|' which is ambiguous.
+const KEY_SEP: char = '\x1F';
+
 fn record_key(record: &Value, key: &str) -> String {
+    // Composite key: "col1\x1Fcol2\x1Fcol3" → join values with \x1F
+    if key.contains(KEY_SEP) {
+        return key.split(KEY_SEP)
+            .map(|k| record.get(k).map(|v| match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                other => other.to_string(),
+            }).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(&KEY_SEP.to_string());
+    }
     record.get(key).map(|v| match v {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),

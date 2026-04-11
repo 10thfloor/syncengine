@@ -1661,9 +1661,9 @@ async function handleInit(data) {
     // `left_index` dedup needs the source PK so a downstream aggregate
     // doesn't collapse all rows in a group to one entry.
     // WASM engine expects id_key as a string; composite keys (string[])
-    // are joined with '|' for the wire format. The engine uses source_id_key
-    // for join/merge dedup on aggregate views, so this is safe.
-    const wasmIdKey = (v) => Array.isArray(v.id_key) ? v.id_key.join('|') : v.id_key;
+    // are joined with \x1F (unit separator) for the wire format. The engine
+    // uses source_id_key for join/merge dedup on aggregate views, so this is safe.
+    const wasmIdKey = (v) => Array.isArray(v.id_key) ? v.id_key.join('\x1F') : v.id_key;
 
     dbsp = new DbspEngine(
         schema.views.map(v => ({

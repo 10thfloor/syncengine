@@ -9,12 +9,9 @@ describe('View Pipelines (edge cases)', () => {
   // The dedup aggregate collapses identical content rows (Restate replays).
   // The topN is configured for limit=10 desc by timestamp.
   //
-  // NOTE: The DBSP WASM engine's topN operator uses record_id() to track
-  // entries, which looks up a single field by the id_key string. When the
-  // preceding aggregate produces a composite id_key (pipe-delimited), the
-  // topN eviction does not kick in because record_id returns "" for all
-  // records. Tests below verify the dedup behavior (which works correctly)
-  // and the "no-filter" property of recentActivity.
+  // The DBSP WASM engine's record_id() now supports composite keys
+  // (pipe-delimited) so topN eviction works correctly with multi-column
+  // aggregates.
   describe('recentActivity', () => {
     it('dedup aggregate collapses identical content rows', () => {
       const t = createTestStore({ tables: [transactions], views: { recentActivity } });
@@ -63,6 +60,43 @@ describe('View Pipelines (edge cases)', () => {
       expect(rows).toHaveLength(1);
       // The _n aggregate counts how many duplicates were collapsed
       expect(Number(rows[0]!._n)).toBe(3);
+    });
+
+    it('topN limits to 10 rows with composite keys', () => {
+      const t = createTestStore({ tables: [transactions], views: { recentActivity } });
+      // Insert 15 distinct transactions
+      for (let i = 0; i < 15; i++) {
+        t.insert(transactions, {
+          productSlug: 'keyboard',
+          userId: `user-${i}`,
+          amount: 10 + i,
+          type: 'sale',
+          timestamp: 1000 + i,
+        });
+      }
+
+      const rows = t.view(recentActivity);
+      expect(rows.length).toBeLessThanOrEqual(10);
+    });
+
+    it('topN returns most recent (highest timestamp) entries', () => {
+      const t = createTestStore({ tables: [transactions], views: { recentActivity } });
+      // Insert 12 distinct transactions
+      for (let i = 0; i < 12; i++) {
+        t.insert(transactions, {
+          productSlug: 'keyboard',
+          userId: `user-${i}`,
+          amount: 10,
+          type: 'sale',
+          timestamp: 100 + i,
+        });
+      }
+
+      const rows = t.view(recentActivity);
+      // All returned rows should have timestamp >= 102 (the oldest two evicted)
+      for (const row of rows) {
+        expect(Number(row.timestamp)).toBeGreaterThanOrEqual(102);
+      }
     });
   });
 

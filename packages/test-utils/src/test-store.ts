@@ -23,9 +23,12 @@ export interface HandlerResult {
 
 // ── Record ID (mirrors store.ts recordId) ────────────────────────────────
 
+/** ASCII Unit Separator — unambiguous composite key join character. */
+const KEY_SEP = '\x1F';
+
 function recordId(record: Record<string, unknown>, idKey: string | string[]): string {
     if (Array.isArray(idKey)) {
-        return idKey.map((c) => String(record[c] ?? '')).join('|');
+        return idKey.map((c) => String(record[c] ?? '')).join(KEY_SEP);
     }
     return String(record[idKey]);
 }
@@ -33,7 +36,7 @@ function recordId(record: Record<string, unknown>, idKey: string | string[]): st
 // ── WASM id_key serialization (mirrors data-worker.js) ───────────────────
 
 function wasmIdKey(idKey: string | string[]): string {
-    return Array.isArray(idKey) ? idKey.join('|') : idKey;
+    return Array.isArray(idKey) ? idKey.join(KEY_SEP) : idKey;
 }
 
 // ── Deep conversion from WASM proxy to plain objects ─────────────────────

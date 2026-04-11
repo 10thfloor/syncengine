@@ -605,7 +605,7 @@ export function store<
      */
     function recordId(record: Record<string, unknown>, idKey: string | string[]): string {
         if (Array.isArray(idKey)) {
-            return idKey.map((c) => String(record[c] ?? '')).join('|');
+            return idKey.map((c) => String(record[c] ?? '')).join('\x1F');
         }
         return String(record[idKey]);
     }
