@@ -29,6 +29,7 @@ export interface GatewayConnectionConfig {
 export function connectToGateway(config: GatewayConnectionConfig): Promise<WebSocket> {
     return new Promise<WebSocket>((resolve, reject) => {
         const ws = new WebSocket(config.url);
+        let settled = false;
 
         ws.onopen = () => {
             ws.send(JSON.stringify({
@@ -46,6 +47,7 @@ export function connectToGateway(config: GatewayConnectionConfig): Promise<WebSo
                 typeof event.data === 'string' ? event.data : String(event.data),
             ) as Record<string, unknown>;
             if (msg['type'] === 'ready') {
+                settled = true;
                 // Switch to the permanent message handler before resolving so
                 // messages that arrive immediately after ready are not lost.
                 ws.onmessage = (e: MessageEvent) => {
@@ -57,11 +59,18 @@ export function connectToGateway(config: GatewayConnectionConfig): Promise<WebSo
                 };
                 resolve(ws);
             } else if (msg['type'] === 'error') {
+                settled = true;
                 reject(new Error(typeof msg['message'] === 'string' ? msg['message'] : 'Gateway error'));
             }
         };
 
-        ws.onerror = () => reject(new Error('Gateway connection failed'));
-        ws.onclose = () => config.onClose?.();
+        ws.onerror = () => {
+            if (!settled) { settled = true; reject(new Error('Gateway connection failed')); }
+        };
+        // Only fire onClose for established connections — during the handshake
+        // phase, the catch block in the caller handles reconnection. Without
+        // this guard, both onerror (→ catch) and onclose (→ onClose callback)
+        // would schedule reconnect timers, doubling on every failure.
+        ws.onclose = () => { if (settled) config.onClose?.(); };
     });
 }
