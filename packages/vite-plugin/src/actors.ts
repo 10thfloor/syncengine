@@ -546,6 +546,35 @@ function buildStubLiteral(handlerNames: readonly string[]): string {
     return `{\n${entries}\n  }`;
 }
 
+// ── Workflow stub ──────────────────────────────────────────────────────────
+
+/**
+ * Replace a `.workflow.ts` module with a client-safe stub. Scans for
+ * `defineWorkflow('name', ...)` calls and emits a module that exports
+ * `{ $tag: 'workflow', $name: 'name' }` for each — enough for the
+ * client's `runWorkflow()` RPC but without pulling in `@syncengine/server`.
+ */
+function stubWorkflowModule(source: string): string {
+    const exports: { exportName: string; workflowName: string }[] = [];
+    // Match: export const <ident> = defineWorkflow('<name>', ...)
+    const re = /export\s+const\s+(\w+)\s*=\s*defineWorkflow\(\s*['"]([^'"]+)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) {
+        exports.push({ exportName: m[1]!, workflowName: m[2]! });
+    }
+    if (exports.length === 0) {
+        // Can't parse — return empty module rather than pulling in server deps.
+        return '// workflow stub: no defineWorkflow calls found\n';
+    }
+    const lines = ['// Generated client stub — server code stripped by @syncengine/vite-plugin'];
+    for (const { exportName, workflowName } of exports) {
+        lines.push(
+            `export const ${exportName} = { $tag: 'workflow', $name: ${JSON.stringify(workflowName)} };`,
+        );
+    }
+    return lines.join('\n') + '\n';
+}
+
 // ── Dev middleware: /__syncengine/rpc/<entity>/<key>/<handler> ─────────────
 
 /**
@@ -681,6 +710,16 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
         },
 
         transform(code, id) {
+            // ── .workflow.ts: replace with a client-safe stub ──────────
+            // Workflow files are server-only (they import @syncengine/server
+            // which pulls in Node-only deps like nats). The client only
+            // needs { $tag, $name } for runWorkflow() RPC calls, so we
+            // replace the entire module with a lightweight stub that
+            // preserves the export names and their $name values.
+            if (id.endsWith('.workflow.ts')) {
+                return { code: stubWorkflowModule(code), map: null };
+            }
+
             if (!id.endsWith('.actor.ts')) return null;
             // Only transform files we discovered — otherwise unrelated
             // `.actor.ts` from deps could accidentally get stripped.

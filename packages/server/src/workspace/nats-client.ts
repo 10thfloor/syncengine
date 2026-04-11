@@ -1,9 +1,10 @@
+import { connect, type NatsConnection } from "@nats-io/transport-node";
 import {
-  connect,
-  type NatsConnection,
-  type JetStreamManager,
+  jetstream,
+  jetstreamManager,
   type JetStreamClient,
-} from "nats";
+  type JetStreamManager,
+} from "@nats-io/jetstream";
 
 let nc: NatsConnection | null = null;
 let jsm: JetStreamManager | null = null;
@@ -21,13 +22,13 @@ export async function getNatsConnection(): Promise<NatsConnection> {
 export async function getJetStreamManager(): Promise<JetStreamManager> {
   if (jsm) return jsm;
   const conn = await getNatsConnection();
-  jsm = await conn.jetstreamManager();
+  jsm = await jetstreamManager(conn);
   return jsm;
 }
 
 export async function getJetStream(): Promise<JetStreamClient> {
   if (js) return js;
   const conn = await getNatsConnection();
-  js = conn.jetstream();
+  js = jetstream(conn);
   return js;
 }

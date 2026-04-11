@@ -37,6 +37,7 @@ import {
     type AnyEntity,
     type EmitInsert,
 } from "@syncengine/core";
+import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
 
 const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
 
@@ -46,22 +47,6 @@ const SOURCE_KEY = "source";
 /** Result envelope returned by every entity handler. */
 interface HandlerResult {
     state: Record<string, unknown>;
-}
-
-/** Split a Restate virtual-object key of the form `{workspaceId}/{entityKey}`
- *  into its two components. The slash is the separator: workspace ids may
- *  not contain slashes (enforced upstream by the workspace provisioner). */
-export function splitObjectKey(objKey: string): { workspaceId: string; entityKey: string } {
-    const idx = objKey.indexOf("/");
-    if (idx < 0) {
-        throw new restate.TerminalError(
-            `Entity key '${objKey}' must be of the form 'workspaceId/entityKey'.`,
-        );
-    }
-    return {
-        workspaceId: objKey.slice(0, idx),
-        entityKey: objKey.slice(idx + 1),
-    };
 }
 
 /** Run a user handler on the current state, persist the result, and
@@ -155,10 +140,9 @@ async function publishState(
 ): Promise<void> {
     const subject = `ws.${workspaceId}.entity.${entityName}.${entityKey}.state`;
     await ctx.run("publish entity state", async () => {
-        const { connect, JSONCodec } = await import("nats");
+        const { connect } = await import("@nats-io/transport-node");
         const nc = await connect({ servers: NATS_URL });
-        const codec = JSONCodec();
-        nc.publish(subject, codec.encode({
+        nc.publish(subject, JSON.stringify({
             type: "ENTITY_STATE",
             entity: entityName,
             key: entityKey,
@@ -184,11 +168,10 @@ async function publishTableDeltas(
     // replay produces identical values. ctx.rand is deterministic.
     const nonces = inserts.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
     await ctx.run("publish entity table deltas", async () => {
-        const { connect, JSONCodec } = await import("nats");
+        const { connect } = await import("@nats-io/transport-node");
         const nc = await connect({ servers: NATS_URL });
-        const codec = JSONCodec();
         for (let i = 0; i < inserts.length; i++) {
-            nc.publish(subject, codec.encode({
+            nc.publish(subject, JSON.stringify({
                 type: "INSERT",
                 table: inserts[i]!.table,
                 record: inserts[i]!.record,
@@ -266,10 +249,6 @@ function buildHandlerBag(entity: AnyEntity): Record<
     return bag;
 }
 
-/** Prefix applied to every entity's Restate virtual-object name.
- *  Exported so other modules (e.g. entityRef) can build the canonical
- *  object name without duplicating the string literal. */
-export const ENTITY_OBJECT_PREFIX = 'entity_';
 
 /** Build the Restate object for one entity. Used by both `bindEntities`
  *  and tests that want to inspect the wrapped object directly. */

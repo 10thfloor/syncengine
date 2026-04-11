@@ -166,13 +166,19 @@ async function boot(
     const restateBaseDir = join(stateDir, 'restate');
     const restate = spawnManaged(
         restatePath,
-        ['--base-dir', restateBaseDir, '--node-name', 'syncengine-dev'],
+        [
+            '--base-dir', restateBaseDir,
+            '--node-name', 'syncengine-dev',
+            '--advertised-address', `http://127.0.0.1:${ports.restateNode}`,
+        ],
         {
             name: 'restate',
             cwd: repoRoot,
             env: {
                 ...process.env,
                 RESTATE_LOG_FILTER: process.env.RESTATE_LOG_FILTER ?? 'warn,restate=info',
+                RESTATE_AUTO_PROVISION: 'true',
+                RESTATE_CLUSTER_NAME: 'syncengine-dev',
             },
         },
     );
@@ -446,24 +452,16 @@ function isSafeStateDirToWipe(stateDir: string, repoRoot: string): boolean {
 
 /**
  * Locate the user's app directory. Resolution order:
- *   1. CWD — if it has a vite.config.ts (scaffolded project or standalone app)
- *   2. apps/example — the monorepo's built-in example app
+ * CWD if it has a syncengine.config.{ts,js,mjs}.
  *
- * The server walks `src/**\/*.actor.ts` relative to this path on startup
- * (PLAN.md Phase 4).
+ * The server walks `src/**\/*.actor.ts` relative to this path on startup.
  */
-function resolveAppDir(repoRoot: string): string | null {
-    // 1. CWD has a vite config → treat it as the app
+function resolveAppDir(_repoRoot: string): string | null {
     const cwd = process.cwd();
-    if (
-        existsSync(join(cwd, 'vite.config.ts')) ||
-        existsSync(join(cwd, 'vite.config.js'))
-    ) {
-        return cwd;
+    for (const ext of ['ts', 'js', 'mjs']) {
+        if (existsSync(join(cwd, `syncengine.config.${ext}`))) return cwd;
     }
-    // 2. Monorepo convention: apps/example
-    const candidate = join(repoRoot, 'apps', 'example');
-    return existsSync(candidate) ? candidate : null;
+    return null;
 }
 
 function buildPidsSnapshot(processes: ManagedProcess[]): Pids {

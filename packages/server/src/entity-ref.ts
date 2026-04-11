@@ -16,7 +16,7 @@ import type {
     EntityHandlerMap,
     EntityHandler,
 } from '@syncengine/core';
-import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-runtime.js';
+import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
 
 // ── Public types ────────────────────────────────────────────────────────────
 

@@ -1,12 +1,6 @@
 /**
  * Lazy downloader for `restate-server`.
  *
- * Pinned to v1.4.4 — the last release that ships prebuilt binaries as
- * GitHub release assets. Newer releases (v1.5+) ship source-only, so
- * upgrading will require either Docker, `cargo install`, or waiting for
- * Restate to restore binary releases. For Phase 1 we pin to a version
- * that Just Works.
- *
  * Consumers call `binaryPath()` (async) to get the absolute path to a cached
  * restate-server binary for the host platform. On first call, the binary is
  * downloaded and extracted; subsequent calls are O(1) existence checks.
@@ -14,10 +8,10 @@
 
 import { ensureBinary, type BinarySpec, type Host } from '@syncengine/bin-utils';
 
-const VERSION = '1.4.4';
+const VERSION = '1.6.2';
 
 // SHA-256 hashes pinned from the per-asset .sha256 files published at
-// https://github.com/restatedev/restate/releases/tag/v1.4.4
+// https://github.com/restatedev/restate/releases/tag/v1.6.2
 // Bumping VERSION requires re-fetching and updating every entry below.
 // Windows is not supported — Restate doesn't publish a Windows binary.
 const SPEC: BinarySpec = {
@@ -35,10 +29,10 @@ const SPEC: BinarySpec = {
         return `restate-server-${triple}/restate-server${exe}`;
     },
     sha256: {
-        'darwin-arm64': '9afa1f6359aa44c1f2d439a05a007f4220ebe5d432eceaa75a9595d43ab061fc',
-        'darwin-amd64': 'cd09421ec30cc850258c5a4a77184584de0fb88090b394f9f97515dc2ceb758f',
-        'linux-arm64':  '8a6e687d4ac976088cd23ec1c9636e14af45107025ca1137e919db7e2d4fd74a',
-        'linux-amd64':  '1835fed2e5d572016e535145a6af1312d4ad52a36b04cfc9e68e50ef933f608c',
+        'darwin-arm64': '126b4b03cf37cb5998c69ca94386ad321806124eb9b764b3b8a336303c30ef61',
+        'darwin-amd64': '44c9c93ecbe7c0fb11f1e550d99c49644d5f9ac92c3ef5cc979661eb75372ed5',
+        'linux-arm64':  'c35d548b3ebec13a3183c6acbbddc1c3656a1f26423d7d13af141773a09c6cf1',
+        'linux-amd64':  '0d022e8beefe4e61dda735450848395ac60e581add37ead023d8f813d3712be1',
     },
 };
 

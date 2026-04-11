@@ -1,16 +1,34 @@
-import { useEffect, useRef } from "react";
-
-// ── Cursor rendering (spring-damped interpolation) ──────────────
+// ── CursorLayer ─────────────────────────────────────────────────────────────
+//
+// Demonstrates that syncengine's topic layer can drive Figma/Miro-quality
+// collaborative cursors with minimal application code:
+//
+//   topic definition  → topics/cursors.ts (schema: x, y, color, userId)
+//   publish           → App.tsx: useTopic(cursorTopic, 'global').publish()
+//   render            → this file: pure rAF loop, no React re-renders
+//
+// The data path is: mousemove → NATS publish → peer subscription →
+// `cursorPeers` Map → `positions` record → this component. The entire
+// round-trip is typically <50ms on a local network; this renderer fills
+// the remaining visual gap with interpolation.
+//
+// ── Rendering technique (spring-damped interpolation) ───────────────────────
 //
 // Smooth collaborative cursors like Miro/Figma:
 //
-//   1. Each network sample (20fps) sets the TARGET position.
+//   1. Each network sample (~20 fps) sets the TARGET position.
 //   2. The rendered position CHASES the target using frame-rate-
 //      independent exponential smoothing (half-life based).
 //   3. Between samples, brief dead reckoning extrapolates using
 //      smoothed velocity — then the spring takes over.
 //   4. All DOM writes use CSS transforms (GPU-composited) and
 //      bypass React's reconciler entirely.
+//
+// This decoupling means the renderer is independent of React's render
+// cycle — it runs at the display's native refresh rate and never triggers
+// a component re-render, even with dozens of cursors moving simultaneously.
+
+import { useEffect, useRef } from "react";
 
 export interface CursorPos {
   x: number;

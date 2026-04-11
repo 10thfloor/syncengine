@@ -1,6 +1,6 @@
 import * as restate from "@restatedev/restate-sdk";
 import { getJetStreamManager } from "./nats-client.js";
-import { RetentionPolicy, StorageType } from "nats";
+import { RetentionPolicy, StorageType } from "@nats-io/jetstream";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -77,10 +77,9 @@ async function publishToNats(
   message: unknown,
 ) {
   await ctx.run(effectName, async () => {
-    const { connect, JSONCodec } = await import("nats");
+    const { connect } = await import("@nats-io/transport-node");
     const nc = await connect({ servers: NATS_URL });
-    const codec = JSONCodec();
-    nc.publish(subject, codec.encode(message));
+    nc.publish(subject, JSON.stringify(message));
     await nc.flush();
     await nc.close();
   });

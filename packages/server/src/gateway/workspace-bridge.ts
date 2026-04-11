@@ -1,19 +1,30 @@
 // packages/server/src/gateway/workspace-bridge.ts
-import {
-    connect,
-    JSONCodec,
-    type NatsConnection,
-    type JetStreamClient,
-    type Subscription,
-    DeliverPolicy,
-} from 'nats';
+import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
+import { jetstream, DeliverPolicy, type JetStreamClient } from '@nats-io/jetstream';
 import { RingBuffer } from './ring-buffer.js';
 import { ClientSession } from './client-session.js';
-
 
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;
 const ENTITY_WRITES_CONSUMER_KEY = '__entity-writes__';
+const STREAM_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000];
+
+/** Retry an async operation when the error is a JetStream 404 (stream not found). */
+async function withStreamRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    for (const delay of STREAM_RETRY_DELAYS_MS) {
+        try {
+            return await fn();
+        } catch (err: any) {
+            if (err?.api_error?.err_code === 10059) {
+                console.log(`[gateway] ${label}: stream not found, retrying in ${delay}ms...`);
+                await new Promise((r) => setTimeout(r, delay));
+                continue;
+            }
+            throw err;
+        }
+    }
+    return fn();
+}
 
 export interface BridgeConfig {
     natsUrl: string;
@@ -27,7 +38,6 @@ export class WorkspaceBridge {
     private readonly restateUrl: string;
     private nc: NatsConnection | null = null;
     private js: JetStreamClient | null = null;
-    private readonly codec = JSONCodec();
 
     private readonly sessions = new Set<ClientSession>();
     private readonly channelRings = new Map<string, RingBuffer>();
@@ -47,7 +57,7 @@ export class WorkspaceBridge {
 
     async start(): Promise<void> {
         this.nc = await connect({ servers: this.natsUrl });
-        this.js = this.nc.jetstream();
+        this.js = jetstream(this.nc);
         const wsId = this.workspaceId;
 
         this.subscribeCoreSubject(`ws.${wsId}.entity.>`, this.onEntityMessage.bind(this));
@@ -98,10 +108,13 @@ export class WorkspaceBridge {
         this.channelRings.set(channelName, ring);
 
         try {
-            const consumer = await this.js.consumers.get(streamName, {
-                filterSubjects: [subject],
-                deliver_policy: DeliverPolicy.New,
-            });
+            const consumer = await withStreamRetry(
+                () => this.js!.consumers.get(streamName, {
+                    filter_subjects: [subject],
+                    deliver_policy: DeliverPolicy.New,
+                }),
+                `channel ${channelName}`,
+            );
             const messages = await consumer.consume();
             const tracker = { stopped: false, stop() { this.stopped = true; messages.stop(); } };
             this.channelConsumers.set(channelName, tracker);
@@ -110,7 +123,7 @@ export class WorkspaceBridge {
                 for await (const raw of messages) {
                     if (tracker.stopped) break;
                     try {
-                        const payload = this.codec.decode(raw.data) as Record<string, unknown>;
+                        const payload = raw.json<Record<string, unknown>>();
                         const seq = raw.seq;
                         const msgClientId = (payload._clientId as string) ?? '';
                         ring.push(seq, payload, msgClientId);
@@ -143,10 +156,13 @@ export class WorkspaceBridge {
         this.channelRings.set(key, ring);
 
         try {
-            const consumer = await this.js.consumers.get(streamName, {
-                filterSubjects: [subject],
-                deliver_policy: DeliverPolicy.New,
-            });
+            const consumer = await withStreamRetry(
+                () => this.js!.consumers.get(streamName, {
+                    filter_subjects: [subject],
+                    deliver_policy: DeliverPolicy.New,
+                }),
+                'entity-writes',
+            );
             const messages = await consumer.consume();
             const tracker = { stopped: false, stop() { this.stopped = true; messages.stop(); } };
             this.channelConsumers.set(key, tracker);
@@ -155,7 +171,7 @@ export class WorkspaceBridge {
                 for await (const raw of messages) {
                     if (tracker.stopped) break;
                     try {
-                        const payload = this.codec.decode(raw.data) as Record<string, unknown>;
+                        const payload = raw.json<Record<string, unknown>>();
                         const seq = raw.seq;
                         const msgClientId = (payload._clientId as string) ?? '';
                         ring.push(seq, payload, msgClientId);
@@ -191,7 +207,7 @@ export class WorkspaceBridge {
 
     publishDelta(subject: string, payload: Record<string, unknown>): void {
         if (!this.nc || this.nc.isClosed()) return;
-        this.nc.publish(subject, this.codec.encode(payload));
+        this.nc.publish(subject, JSON.stringify(payload));
     }
 
     publishTopicLocal(name: string, key: string, payload: Record<string, unknown>, senderClientId: string): void {
@@ -208,7 +224,7 @@ export class WorkspaceBridge {
         // non-gateway subscribers receive the message.
         const subject = `ws.${this.workspaceId}.topic.${name}.${key}`;
         if (this.nc && !this.nc.isClosed()) {
-            this.nc.publish(subject, this.codec.encode(payload));
+            this.nc.publish(subject, JSON.stringify(payload));
         }
     }
 
@@ -230,7 +246,7 @@ export class WorkspaceBridge {
         (async () => {
             for await (const msg of sub) {
                 try {
-                    const data = this.codec.decode(msg.data) as Record<string, unknown>;
+                    const data = msg.json<Record<string, unknown>>();
                     handler(data, msg.subject.split('.'));
                 } catch { /* decode error */ }
             }

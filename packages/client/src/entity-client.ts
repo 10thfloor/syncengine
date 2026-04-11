@@ -141,20 +141,15 @@ const subscriptions = new Map<string, EntitySubscription>();
  * — without this, a transient NATS outage would permanently break
  * subsequent mounts with a settled-rejected cache entry.
  */
-let natsConnPromise: Promise<{
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    nc: any;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    codec: any;
-}> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let natsConnPromise: Promise<{ nc: any }> | null = null;
 
 async function getNats() {
     if (!natsConnPromise) {
         natsConnPromise = (async () => {
-            const { connect, JSONCodec } = await import('nats.ws');
+            const { wsconnect } = await import('@nats-io/transport-node');
             try {
-                const nc = await connect({ servers: runtimeNatsUrl });
-                const codec = JSONCodec();
+                const nc = await wsconnect({ servers: runtimeNatsUrl });
                 // Reset the cached promise when the connection closes,
                 // either gracefully or on error. The next getNats() call
                 // will re-dial.
@@ -164,7 +159,7 @@ async function getNats() {
                 }).catch(() => {
                     natsConnPromise = null;
                 });
-                return { nc, codec };
+                return { nc };
             } catch (err) {
                 // Connection failed outright — reset the cache so the
                 // next call can retry instead of returning this
@@ -300,7 +295,7 @@ function getOrCreateSubscription(
         let natsSub: { unsubscribe(): void } | null = null;
         (async () => {
             try {
-                const { nc, codec } = await getNats();
+                const { nc } = await getNats();
                 const subject = `ws.${runtimeWorkspaceId}.entity.${entity.$name}.${key}.state`;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 natsSub = nc.subscribe(subject) as any;
@@ -309,7 +304,7 @@ function getOrCreateSubscription(
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     for await (const msg of natsSub as any) {
                         try {
-                            const decoded = codec.decode(msg.data) as {
+                            const decoded = msg.json() as {
                                 type?: string;
                                 state?: Record<string, unknown>;
                             };
