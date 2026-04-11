@@ -224,6 +224,8 @@ function initDevtoolsChannel() {
                     }
                 } else if (msg.type === 'devtools-action') {
                     handleDevtoolsAction(msg.action);
+                } else if (msg.type === 'devtools-query') {
+                    handleDevtoolsQuery(msg);
                 }
             } catch (e) {
                 console.warn('[devtools] channel message error:', e);
@@ -269,6 +271,28 @@ function handleDevtoolsAction(action) {
     }
 }
 
+function handleDevtoolsQuery(msg) {
+    if (!db || !msg.id || !msg.sql) return;
+    try {
+        const rows = db.exec(msg.sql, { rowMode: 'object' });
+        const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+        devtoolsChannel.postMessage({
+            type: 'devtools-query-result',
+            id: msg.id,
+            columns,
+            rows,
+        });
+    } catch (e) {
+        devtoolsChannel.postMessage({
+            type: 'devtools-query-result',
+            id: msg.id,
+            columns: [],
+            rows: [],
+            error: e.message || String(e),
+        });
+    }
+}
+
 function broadcastDevtoolsStatus() {
     if (!devtoolsChannel || Date.now() - devtoolsLastPing >= DEVTOOLS_PING_TTL_MS) return;
     try {
@@ -289,12 +313,24 @@ function broadcastDevtoolsStatus() {
             connection: connectionStatus,
             hlc: { ts: hlcTs, counter: hlcCount },
             conflicts: conflictLog.filter(c => !c.dismissed),
-            offlineQueue: causalQueue.length,
             undoDepth: undoStack.length,
             schema: { version: schemaState.version || 0, fingerprint: schemaState.fingerprint || '' },
-            entities: [],
+            tables: (_schemaTables || []).map(t => ({
+                name: t.name,
+                columns: t.columns || [],
+                sql: t.sql,
+            })),
+            viewDefs: (_schemaViews || []).map(v => ({
+                name: v.name,
+                sourceTable: v.source_table,
+            })),
             channels,
             views: Object.assign({}, viewRowCounts),
+            offlineEntries: causalQueue.map(m => ({
+                table: m._table || m.table || '',
+                id: m._id || m.id || '',
+            })),
+            offlineQueue: causalQueue.length,
         });
     } catch (e) {
         console.warn('[devtools] broadcastDevtoolsStatus error:', e);
