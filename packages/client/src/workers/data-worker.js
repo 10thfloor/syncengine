@@ -287,8 +287,8 @@ function broadcastDevtoolsMessage(kind, detail) {
         devtoolsChannel.postMessage({
             type: 'devtools-message',
             kind,
-            detail,
             ts: Date.now(),
+            ...detail,
         });
     } catch (e) {
         console.warn('[devtools] broadcastDevtoolsMessage error:', e);
@@ -1240,6 +1240,7 @@ function stepEmitBroadcast(deltas, nonce) {
                 if (viewRowCounts[viewName] < 0) viewRowCounts[viewName] = 0;
             }
             self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: viewDeltas });
+            broadcastDevtoolsStatus();
         }
     }
 
