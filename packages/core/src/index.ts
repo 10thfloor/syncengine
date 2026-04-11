@@ -101,6 +101,10 @@ export type {
     RebaseResult,
 } from './entity';
 
+// ── Topic DSL (ephemeral pub/sub over NATS core) ────────────────────────────
+export { topic, isTopic } from './topic';
+export type { TopicDef, AnyTopic, TopicRecord } from './topic';
+
 // ── HLC ─────────────────────────────────────────────────────────────────────
 export { hlcTick, hlcMerge, hlcPack, hlcCompare } from './hlc';
 export type { HLCState } from './hlc';

@@ -2,8 +2,8 @@ import { useEffect, useRef, useMemo, useState } from "react";
 import { store, useStore, useEntity } from "@syncengine/client";
 import { clicks, totalsView, channels } from "./schema";
 import { counter } from "./entities/counter.actor";
-import { cursors } from "./entities/cursors.actor";
 import { account } from "./entities/account.actor";
+import { cursorTopic } from "./topics/cursors";
 
 // ── Store ────────────────────────────────────────────────────────
 export const db = store({
@@ -193,27 +193,23 @@ export default function App() {
     counter,
     "global",
   );
-  const { state: cursorState, actions: cursorActions } = useEntity(
-    cursors,
-    "global",
-  );
+  const { peers: cursorPeers, publish: publishCursor, leave: leaveCursor } =
+    s.useTopic(cursorTopic, "global");
   const { state: acctState, actions: acctActions } = useEntity(account, userId);
   const [acctError, setAcctError] = useState<string | null>(null);
-  const lastSend = useRef(0);
-  const actionsRef = useRef(cursorActions);
-  actionsRef.current = cursorActions;
+  const publishRef = useRef(publishCursor);
+  publishRef.current = publishCursor;
+  const leaveRef = useRef(leaveCursor);
+  leaveRef.current = leaveCursor;
 
-  // Track mouse position and broadcast
+  // Track mouse position and broadcast via topic
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
-      const now = Date.now();
-      if (now - lastSend.current < 50) return; // 20fps throttle
-      lastSend.current = now;
-      actionsRef.current.move(userId, e.clientX, e.clientY, color);
+      publishRef.current({ x: e.clientX, y: e.clientY, color });
     };
 
     const onMouseLeave = () => {
-      actionsRef.current.leave(userId);
+      leaveRef.current();
     };
 
     window.addEventListener("mousemove", onMouseMove);
@@ -221,21 +217,25 @@ export default function App() {
     return () => {
       window.removeEventListener("mousemove", onMouseMove);
       document.removeEventListener("mouseleave", onMouseLeave);
-      actionsRef.current.leave(userId);
+      leaveRef.current();
     };
-  }, [userId, color]);
+  }, [color]);
 
-  // Parse cursor positions
+  // Convert peers Map to positions object for CursorLayer
   const positions: Record<string, CursorPos> = useMemo(() => {
-    if (!cursorState?.positions) return {};
-    try {
-      return JSON.parse(cursorState.positions);
-    } catch {
-      return {};
+    const out: Record<string, CursorPos> = {};
+    for (const [peerId, data] of cursorPeers) {
+      out[peerId] = {
+        x: data.x as number,
+        y: data.y as number,
+        color: data.color as string,
+        ts: data.$ts,
+      };
     }
-  }, [cursorState?.positions]);
+    return out;
+  }, [cursorPeers]);
 
-  const otherCount = Object.keys(positions).filter((k) => k !== userId).length;
+  const otherCount = Object.keys(positions).length;
 
   if (!ready) {
     return (

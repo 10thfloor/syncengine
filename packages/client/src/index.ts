@@ -10,6 +10,7 @@ export type {
     StoreConfig,
     SeedMap,
     UseResult,
+    UseTopicResult,
     ConnectionStatus,
     SyncStatus,
     ConflictRecord,

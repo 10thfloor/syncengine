@@ -39,6 +39,9 @@ import {
     type ConnectionStatus,
     type SyncStatus,
     type ConflictRecord,
+    type TopicDef,
+    type EntityStateShape,
+    type EntityState,
 } from '@syncengine/core';
 import type { SyncConfig } from '@syncengine/core/internal';
 // Runtime-config virtual module — populated at bundle time by
@@ -86,6 +89,10 @@ interface InsertMessage { type: 'INSERT'; table: string; record: Record<string, 
 interface DeleteMessage { type: 'DELETE'; table: string; id: unknown }
 interface ResetMessage { type: 'RESET' }
 interface UndoMessage { type: 'UNDO' }
+interface TopicSubscribeMessage { type: 'TOPIC_SUBSCRIBE'; name: string; key: string }
+interface TopicPublishMessage { type: 'TOPIC_PUBLISH'; name: string; key: string; data: Record<string, unknown> }
+interface TopicLeaveMessage { type: 'TOPIC_LEAVE'; name: string; key: string }
+interface TopicUnsubscribeMessage { type: 'TOPIC_UNSUBSCRIBE'; name: string; key: string }
 
 type WorkerOutMessage =
     | { type: 'WORKER_LOADED' }
@@ -96,9 +103,11 @@ type WorkerOutMessage =
     | { type: 'CONNECTION_STATUS'; status: ConnectionStatus }
     | { type: 'SYNC_STATUS'; phase: 'idle' | 'replaying' | 'live'; messagesReplayed: number; totalMessages?: number; snapshotLoaded?: boolean }
     | { type: 'MIGRATION_STATUS'; fromVersion: number; toVersion: number; status: 'running' | 'complete' | 'failed'; stepsApplied: number; error?: string; failedAtVersion?: number }
-    | { type: 'CONFLICTS'; conflicts: Array<{ table: string; recordId: string; field: string; winner: unknown; loser: unknown; winnerHlc: number; loserHlc: number; strategy: string }> };
+    | { type: 'CONFLICTS'; conflicts: Array<{ table: string; recordId: string; field: string; winner: unknown; loser: unknown; winnerHlc: number; loserHlc: number; strategy: string }> }
+    | { type: 'TOPIC_UPDATE'; name: string; key: string; peerId: string; data: Record<string, unknown>; ts: number; leave: boolean };
 
-type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage;
+type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
+    | TopicSubscribeMessage | TopicPublishMessage | TopicLeaveMessage | TopicUnsubscribeMessage;
 
 // ── User-facing config types ─────────────────────────────────────────────
 
@@ -181,7 +190,17 @@ export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> 
     };
 }
 
-/** The returned `Store<T>` — top-level surface is `{ use, tables, channels, destroy }`. */
+/** Result of `db.useTopic(topicDef, key)`. */
+export interface UseTopicResult<TState> {
+    /** Map of every other peer's latest published state, keyed by peer ID. */
+    readonly peers: ReadonlyMap<string, TState & { readonly $ts: number }>;
+    /** Publish this peer's state to all subscribers. Internally throttled to 20fps. */
+    publish(data: TState): void;
+    /** Signal departure and unsubscribe. Called automatically on unmount. */
+    leave(): void;
+}
+
+/** The returned `Store<T>` — top-level surface is `{ use, useTopic, tables, channels, destroy }`. */
 export interface Store<
     TTables extends readonly AnyTable[] = readonly AnyTable[],
     TChannels extends readonly ChannelConfig[] = readonly ChannelConfig[],
@@ -189,6 +208,14 @@ export interface Store<
     /** Consolidated React hook. Select views by name; returns typed data
      *  and the full sync/status/conflict bundle. */
     use<TViews extends Record<string, ViewBuilder<unknown>>>(views: TViews): UseResult<TViews>;
+
+    /** Subscribe to an ephemeral topic. Returns a reactive peer map and
+     *  a publish function for broadcasting this peer's state. */
+    useTopic<TName extends string, TShape extends EntityStateShape>(
+        topicDef: TopicDef<TName, TShape>,
+        key: string,
+        opts?: { ttl?: number },
+    ): UseTopicResult<EntityState<TShape>>;
 
     /** Per-table typed imperative namespace. */
     readonly tables: TableNamespace<TTables>;
@@ -370,6 +397,14 @@ export function store<
 
     let conflictLog: ConflictRecord[] = [];
     const conflictSubscribers = new Set<() => void>();
+
+    // ── Topic state (ephemeral pub/sub) ────────────────────────────────
+    const topicPeers = new Map<string, Map<string, Record<string, unknown>>>();
+    const topicSubscribers = new Map<string, Set<() => void>>();
+    const topicRefCounts = new Map<string, number>();
+    const topicTimers = new Map<string, ReturnType<typeof setInterval>>();
+    const TOPIC_DEFAULT_TTL = 5000;
+    const TOPIC_THROTTLE_MS = 50;
 
     // ── Seed lifecycle (Phase 2.5 item 6) ──────────────────────────────
     //
@@ -566,6 +601,21 @@ export function store<
                     conflictSubscribers.forEach((fn) => fn());
                     break;
                 }
+
+                case 'TOPIC_UPDATE': {
+                    const subKey = `${msg.name}/${msg.key}`;
+                    let peers = topicPeers.get(subKey);
+                    if (!peers) { peers = new Map(); }
+                    if (msg.leave) {
+                        peers.delete(msg.peerId);
+                    } else {
+                        peers.set(msg.peerId, { ...msg.data, $ts: msg.ts });
+                    }
+                    // New Map reference for useSyncExternalStore identity check
+                    topicPeers.set(subKey, new Map(peers));
+                    topicSubscribers.get(subKey)?.forEach((fn) => fn());
+                    break;
+                }
             }
         };
 
@@ -728,11 +778,105 @@ export function store<
         };
     }
 
+    // ── db.useTopic(topicDef, key) — ephemeral pub/sub hook ───────────
+    function useTopicHook<TName extends string, TShape extends EntityStateShape>(
+        topicDef: TopicDef<TName, TShape>,
+        key: string,
+        opts?: { ttl?: number },
+    ): UseTopicResult<EntityState<TShape>> {
+        const subKey = `${topicDef.$name}/${key}`;
+        const ttl = opts?.ttl ?? TOPIC_DEFAULT_TTL;
+
+        // Boot the worker on first use (same as useHook).
+        useEffect(() => { getWorker(); }, []);
+
+        // Manage subscription lifecycle with refcounting.
+        useEffect(() => {
+            const prev = topicRefCounts.get(subKey) ?? 0;
+            topicRefCounts.set(subKey, prev + 1);
+
+            if (prev === 0) {
+                // First subscriber: subscribe and start stale cleanup.
+                send({ type: 'TOPIC_SUBSCRIBE', name: topicDef.$name, key } as WorkerInMessage);
+                const timer = setInterval(() => {
+                    const peers = topicPeers.get(subKey);
+                    if (!peers || peers.size === 0) return;
+                    const now = Date.now();
+                    const next = new Map(
+                        [...peers].filter(([, entry]) => now - (entry.$ts as number) <= ttl),
+                    );
+                    if (next.size !== peers.size) {
+                        topicPeers.set(subKey, next);
+                        topicSubscribers.get(subKey)?.forEach((fn) => fn());
+                    }
+                }, 1000);
+                topicTimers.set(subKey, timer);
+            }
+
+            return () => {
+                const count = (topicRefCounts.get(subKey) ?? 1) - 1;
+                topicRefCounts.set(subKey, count);
+
+                if (count <= 0) {
+                    // Last subscriber: unsubscribe and clean up.
+                    topicRefCounts.delete(subKey);
+                    send({ type: 'TOPIC_UNSUBSCRIBE', name: topicDef.$name, key } as WorkerInMessage);
+                    const timer = topicTimers.get(subKey);
+                    if (timer) { clearInterval(timer); topicTimers.delete(subKey); }
+                    topicPeers.delete(subKey);
+                    topicSubscribers.delete(subKey);
+                }
+            };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [subKey]);
+
+        // Subscribe to peer map changes via useSyncExternalStore.
+        const subscribe = useMemo(
+            () => (onChange: () => void) => {
+                if (!topicSubscribers.has(subKey)) topicSubscribers.set(subKey, new Set());
+                topicSubscribers.get(subKey)!.add(onChange);
+                return () => { topicSubscribers.get(subKey)?.delete(onChange); };
+            },
+            [subKey],
+        );
+
+        const EMPTY_MAP = useMemo(() => new Map<string, Record<string, unknown>>(), []);
+        const peers = useSyncExternalStore(
+            subscribe,
+            () => topicPeers.get(subKey) ?? EMPTY_MAP,
+        );
+
+        // Throttled publish.
+        const lastPublishRef = useRef(0);
+        const publish = useCallback(
+            (data: EntityState<TShape>) => {
+                const now = Date.now();
+                if (now - lastPublishRef.current < TOPIC_THROTTLE_MS) return;
+                lastPublishRef.current = now;
+                send({ type: 'TOPIC_PUBLISH', name: topicDef.$name, key, data } as WorkerInMessage);
+            },
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+            [subKey],
+        );
+
+        const leave = useCallback(() => {
+            send({ type: 'TOPIC_LEAVE', name: topicDef.$name, key } as WorkerInMessage);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, [subKey]);
+
+        return {
+            peers: peers as unknown as ReadonlyMap<string, EntityState<TShape> & { readonly $ts: number }>,
+            publish,
+            leave,
+        };
+    }
+
     // ── Bootstrap + return ─────────────────────────────────────────────
     getWorker();
 
     return {
         use: useHook,
+        useTopic: useTopicHook,
         tables: tableNs as TableNamespace<TTables>,
         channels: channelNs as ChannelNamespace<TChannels>,
         destroy(): void {
@@ -751,6 +895,12 @@ export function store<
             syncStatusSubscribers.clear();
             conflictSubscribers.clear();
             undoSubscribers.clear();
+            // Topic cleanup
+            for (const timer of topicTimers.values()) clearInterval(timer);
+            topicTimers.clear();
+            topicPeers.clear();
+            topicSubscribers.clear();
+            topicRefCounts.clear();
         },
     };
 }

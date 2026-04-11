@@ -171,6 +171,14 @@ const nats = {
     peerAckTimer: null,
 };
 
+// ── Topic state (ephemeral NATS core pub/sub) ──────────────────────────────
+
+const topicState = {
+    subs: new Map(),       // subjectKey → { natsSub }
+    desired: new Set(),    // subjectKey set — survives reconnect for re-subscribe
+    codec: null,           // JSONCodec, set during first topic operation
+};
+
 // ── Initial sync state machine ──────────────────────────────────────────────
 
 const sync = {
@@ -528,6 +536,7 @@ async function connectNats() {
         await subscribeAuthority(codec);
         subscribeGC(codec);
         startPeerAckTimer();
+        await resubscribeTopics();
         watchDisconnect();
 
     } catch (e) {
@@ -610,6 +619,8 @@ async function watchDisconnect() {
 
     nats.conn = null;
     authority.sub = null;
+    // Clear live topic subs (desired set preserved for reconnect)
+    topicState.subs.clear();
     if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
     setTimeout(() => connectNats(), NATS_RECONNECT_DELAY_MS);
 }
@@ -1163,6 +1174,110 @@ function handleReset() {
 }
 
 
+// ── Topic handlers (ephemeral NATS core pub/sub) ────────────────────────────
+
+async function ensureTopicCodec() {
+    if (topicState.codec) return topicState.codec;
+    const { JSONCodec } = await import('nats.ws');
+    topicState.codec = JSONCodec();
+    return topicState.codec;
+}
+
+function topicSubject(name, key) {
+    return `ws.${nats.config.workspaceId}.topic.${name}.${key}`;
+}
+
+async function handleTopicSubscribe({ name, key }) {
+    const subKey = `${name}/${key}`;
+    topicState.desired.add(subKey);
+
+    if (!nats.conn || nats.conn.isClosed()) return; // will re-subscribe on reconnect
+    if (topicState.subs.has(subKey)) return; // already subscribed
+
+    const codec = await ensureTopicCodec();
+    const subject = topicSubject(name, key);
+    const natsSub = nats.conn.subscribe(subject);
+    topicState.subs.set(subKey, { natsSub });
+
+    (async () => {
+        try {
+            for await (const raw of natsSub) {
+                let msg;
+                try { msg = codec.decode(raw.data); } catch { continue; }
+                if (msg._clientId === CLIENT_ID) continue; // self-filter
+                self.postMessage({
+                    type: 'TOPIC_UPDATE',
+                    name,
+                    key,
+                    peerId: msg.peerId,
+                    data: msg.data,
+                    ts: msg.ts,
+                    leave: !!msg.$leave,
+                });
+            }
+        } catch (err) {
+            console.warn(`[topic] subscription loop error for ${subKey}:`, err);
+        }
+    })();
+}
+
+async function handleTopicPublish({ name, key, data }) {
+    if (!nats.conn || nats.conn.isClosed()) return; // drop silently when offline
+    const codec = await ensureTopicCodec();
+
+    const subject = topicSubject(name, key);
+    nats.conn.publish(subject, codec.encode({
+        _clientId: CLIENT_ID,
+        peerId: CLIENT_ID,
+        data,
+        ts: Date.now(),
+    }));
+}
+
+/** Publish a leave signal without tearing down the subscription. */
+async function handleTopicLeave({ name, key }) {
+    if (!nats.conn || nats.conn.isClosed()) return;
+    const codec = await ensureTopicCodec();
+    const subject = topicSubject(name, key);
+    nats.conn.publish(subject, codec.encode({
+        _clientId: CLIENT_ID,
+        peerId: CLIENT_ID,
+        $leave: true,
+        ts: Date.now(),
+    }));
+}
+
+async function handleTopicUnsubscribe({ name, key }) {
+    const subKey = `${name}/${key}`;
+
+    // Publish leave signal before unsubscribing
+    await handleTopicLeave({ name, key });
+
+    // Tear down the NATS subscription
+    const entry = topicState.subs.get(subKey);
+    if (entry) {
+        entry.natsSub.unsubscribe();
+        topicState.subs.delete(subKey);
+    }
+
+    // Remove from desired AFTER cleanup so a reconnect during
+    // this window doesn't lose the subscription prematurely.
+    topicState.desired.delete(subKey);
+}
+
+/** Re-subscribe all desired topics after a reconnect. */
+async function resubscribeTopics() {
+    // Clear stale NATS sub objects from previous connection
+    topicState.subs.clear();
+
+    for (const subKey of topicState.desired) {
+        const sep = subKey.indexOf('/');
+        const name = subKey.slice(0, sep);
+        const key = subKey.slice(sep + 1);
+        await handleTopicSubscribe({ name, key });
+    }
+}
+
 // ── Message router ──────────────────────────────────────────────────────────
 
 self.onmessage = async (event) => {
@@ -1181,9 +1296,9 @@ self.onmessage = async (event) => {
 self.postMessage({ type: 'WORKER_LOADED' });
 
 async function handleMessage(data) {
-    // Queue local mutations during replay — but always allow RESET through
-    // so the user can break out of a stuck or long replay.
-    if (sync.isReplaying && data.type !== 'INIT' && data.type !== 'RESET' && !data._fromNats && !data._isReplay) {
+    // Queue local mutations during replay — but always allow RESET and
+    // TOPIC_* messages through (topics are ephemeral, not replay-gated).
+    if (sync.isReplaying && data.type !== 'INIT' && data.type !== 'RESET' && !data.type.startsWith('TOPIC_') && !data._fromNats && !data._isReplay) {
         sync.localMutationQueue.push(data);
         return;
     }
@@ -1194,6 +1309,11 @@ async function handleMessage(data) {
         case 'DELETE': return handleDelete(data);
         case 'UNDO':   return handleUndo();
         case 'RESET':  return handleReset();
+        // Topic (ephemeral pub/sub) — not gated by replay
+        case 'TOPIC_SUBSCRIBE':   return handleTopicSubscribe(data);
+        case 'TOPIC_PUBLISH':     return handleTopicPublish(data);
+        case 'TOPIC_LEAVE':       return handleTopicLeave(data);
+        case 'TOPIC_UNSUBSCRIBE': return handleTopicUnsubscribe(data);
     }
 }
 

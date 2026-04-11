@@ -156,7 +156,7 @@ export function validateEntityState<TShape extends EntityStateShape>(
   return out as EntityState<TShape>;
 }
 
-function jsTypeForKind(
+export function jsTypeForKind(
   kind: import("./schema").ColumnKind,
 ): "string" | "number" | "boolean" | null {
   switch (kind) {
@@ -181,7 +181,7 @@ function jsTypeForKind(
  * default to null. The first read of any entity instance returns this
  * record, before any handler has run.
  */
-function buildInitialState<TShape extends EntityStateShape>(
+export function buildInitialState<TShape extends EntityStateShape>(
   shape: TShape,
 ): EntityState<TShape> {
   const out: Record<string, unknown> = {};
