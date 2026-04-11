@@ -231,8 +231,10 @@ impl PartialOrd for SortedEntry {
 
 impl Ord for SortedEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.sort_val
-            .partial_cmp(&other.sort_val)
+        // Map NaN to NEG_INFINITY for total ordering (NaN sorts lowest)
+        let a = if self.sort_val.is_nan() { f64::NEG_INFINITY } else { self.sort_val };
+        let b = if other.sort_val.is_nan() { f64::NEG_INFINITY } else { other.sort_val };
+        a.partial_cmp(&b)
             .unwrap_or(Ordering::Equal)
             .then_with(|| self.id.cmp(&other.id))
     }
@@ -529,9 +531,8 @@ impl DbspEngine {
                         }
                     }
                 } else {
-                    // Skip this delta entirely
-                    deltas.remove(i);
-                    continue;
+                    // Mark for removal (actual removal in a single pass below)
+                    delta.weight = 0;
                 }
             } else {
                 // Retraction (weight < 0) — clean up merge state and record tombstone
@@ -552,12 +553,15 @@ impl DbspEngine {
                 let packed_hlc = delta.hlc.as_ref().map(|h| h.pack()).unwrap_or(0);
                 self.tombstones
                     .entry(delta.source.clone())
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .insert(id, packed_hlc);
             }
 
             i += 1;
         }
+
+        // Remove marked-for-skip deltas in a single O(n) pass
+        deltas.retain(|d| d.weight != 0);
 
         let mut results: HashMap<String, Vec<Delta>> = HashMap::new();
 
@@ -708,7 +712,10 @@ fn process_view(view: &mut ViewState, all_deltas: &[Delta]) -> Vec<Delta> {
         return Vec::new();
     }
 
-    for op in &view.def.pipeline.clone() {
+    // Clone pipeline once per process_view (not per step) — avoids the borrow
+    // checker conflict between &view.def.pipeline and &mut view in operator calls.
+    let pipeline = view.def.pipeline.clone();
+    for op in &pipeline {
         current = match op {
             Operator::Filter { field, eq } => apply_filter(&current, field, eq),
             Operator::Project { fields } => apply_project(&current, fields),
@@ -841,11 +848,11 @@ fn apply_aggregate(
             .iter()
             .map(|k| d.record.get(k).map_or("null".to_string(), |v| v.to_string()))
             .collect::<Vec<_>>()
-            .join(&KEY_SEP.to_string());
+            .join(KEY_SEP_STR);
 
         let sign = if d.weight > 0 { 1.0 } else { -1.0 };
 
-        if let Some(old_aggs) = view.agg_state.get(&group_key) {
+        let old_record_opt = if let Some(old_aggs) = view.agg_state.get(&group_key) {
             let old_counts = view.agg_counts.get(&group_key);
             let mut old_record = serde_json::Map::new();
             for k in group_by {
@@ -859,8 +866,10 @@ fn apply_aggregate(
                 let emit_val = if def.func == "avg" && count > 0.0 { val / count } else { val };
                 old_record.insert(name.clone(), serde_json::json!(emit_val));
             }
-            output.push(Delta { source: String::new(), record: Value::Object(old_record), weight: -1, hlc: None });
-        }
+            Some(old_record)
+        } else {
+            None
+        };
 
         let aggs = view.agg_state.entry(group_key.clone()).or_default();
         let counts = view.agg_counts.entry(group_key.clone()).or_default();
@@ -918,6 +927,14 @@ fn apply_aggregate(
             let emit_val = if def.func == "avg" && count > 0.0 { val / count } else { val };
             new_record.insert(name.clone(), serde_json::json!(emit_val));
         }
+
+        // Skip emission if the aggregate value didn't change (avoids redundant downstream deltas)
+        if let Some(ref old) = old_record_opt {
+            if *old == new_record {
+                continue;
+            }
+            output.push(Delta { source: String::new(), record: Value::Object(old.clone()), weight: -1, hlc: None });
+        }
         output.push(Delta { source: String::new(), record: Value::Object(new_record), weight: 1, hlc: None });
     }
 
@@ -946,7 +963,7 @@ fn apply_join(
 
     // Step 1: ∆L ⋈ R_old
     for ld in left_deltas {
-        let key_val = record_key_str(&ld.record, left_key);
+        let key_val = record_key(&ld.record, left_key);
         if let Some(right_records) = view.right_index.get(&key_val) {
             for rr in right_records {
                 let merged = merge_records(&ld.record, rr);
@@ -957,7 +974,7 @@ fn apply_join(
 
     // Step 2: Apply ∆L to left index
     for ld in left_deltas {
-        let key_val = record_key_str(&ld.record, left_key);
+        let key_val = record_key(&ld.record, left_key);
         if ld.weight > 0 {
             let records = view.left_index.entry(key_val.clone()).or_default();
             let id = record_id(&ld.record, &id_key);
@@ -976,7 +993,7 @@ fn apply_join(
 
     // Step 3: L_new ⋈ ∆R
     for rd in right_deltas {
-        let key_val = record_key_str(&rd.record, right_key);
+        let key_val = record_key(&rd.record, right_key);
         if let Some(left_records) = view.left_index.get(&key_val) {
             for lr in left_records {
                 let merged = merge_records(lr, &rd.record);
@@ -992,17 +1009,15 @@ fn apply_join(
     // same +1 delta more than once. Without this, every duplicate +1 inflates
     // the join output by adding a redundant right-side match.
     for rd in right_deltas {
-        let key_val = record_key_str(&rd.record, right_key);
+        let key_val = record_key(&rd.record, right_key);
         if rd.weight > 0 {
             let entry = view.right_index.entry(key_val).or_default();
-            let rd_str = rd.record.to_string();
-            if !entry.iter().any(|r| r.to_string() == rd_str) {
+            if !entry.iter().any(|r| *r == rd.record) {
                 entry.push(rd.record.clone());
             }
         } else {
             if let Some(records) = view.right_index.get_mut(&key_val) {
-                let rd_str = rd.record.to_string();
-                records.retain(|r| r.to_string() != rd_str);
+                records.retain(|r| *r != rd.record);
                 if records.is_empty() {
                     view.right_index.remove(&key_val);
                 }
@@ -1030,11 +1045,9 @@ fn merge_records(left: &Value, right: &Value) -> Value {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Extract a string key from a JSON record. Used for both primary key lookup
-/// and sort-key extraction. Handles String/Number/other uniformly.
-/// ASCII Unit Separator — used as the join character for composite keys.
-/// Cannot appear in normal string values, unlike '|' which is ambiguous.
+/// ASCII Unit Separator — unambiguous composite key delimiter.
 const KEY_SEP: char = '\x1F';
+const KEY_SEP_STR: &str = "\x1F";
 
 fn record_key(record: &Value, key: &str) -> String {
     // Composite key: "col1\x1Fcol2\x1Fcol3" → join values with \x1F
@@ -1046,7 +1059,7 @@ fn record_key(record: &Value, key: &str) -> String {
                 other => other.to_string(),
             }).unwrap_or_default())
             .collect::<Vec<_>>()
-            .join(&KEY_SEP.to_string());
+            .join(KEY_SEP_STR);
     }
     record.get(key).map(|v| match v {
         Value::String(s) => s.clone(),
@@ -1055,9 +1068,6 @@ fn record_key(record: &Value, key: &str) -> String {
     }).unwrap_or_default()
 }
 
-// Backwards-compatible aliases (kept for minimal diff in operator code)
-#[inline(always)]
-fn record_key_str(record: &Value, key: &str) -> String { record_key(record, key) }
 #[inline(always)]
 fn record_id(record: &Value, key: &str) -> String { record_key(record, key) }
 
