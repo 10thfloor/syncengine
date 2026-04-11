@@ -669,19 +669,6 @@ export function store<
                     break;
                 }
 
-                case 'DEVTOOLS_CLEAR_DB': {
-                    // Wipe OPFS database — the page reload (triggered by devtools client)
-                    // will re-init the worker with a fresh database.
-                    if (typeof navigator !== 'undefined' && 'storage' in navigator) {
-                        void navigator.storage.getDirectory().then(async (root) => {
-                            // @ts-expect-error -- OPFS values() is not in all TS libs yet
-                            for await (const [name] of root.entries()) {
-                                await root.removeEntry(name, { recursive: true }).catch(() => {});
-                            }
-                        }).catch(() => {});
-                    }
-                    break;
-                }
             }
         };
 

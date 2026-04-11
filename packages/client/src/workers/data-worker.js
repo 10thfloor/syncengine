@@ -245,7 +245,20 @@ function handleDevtoolsAction(action) {
                 nats.conn.close().catch(() => { /* ignore */ });
             }
         } else if (action === 'clear-client-db') {
-            self.postMessage({ type: 'DEVTOOLS_CLEAR_DB' });
+            // Close the SQLite DB so the OPFS file lock is released,
+            // then delete the OPFS file. The page reload (triggered by
+            // the devtools client 1s later) creates a fresh worker + DB.
+            try {
+                if (db) { db.close(); db = null; }
+            } catch { /* already closed */ }
+            if (typeof navigator !== 'undefined' && navigator.storage) {
+                navigator.storage.getDirectory().then(async (root) => {
+                    for await (const [name] of root.entries()) {
+                        await root.removeEntry(name, { recursive: true }).catch(() => {});
+                    }
+                    console.log('[devtools] OPFS cleared');
+                }).catch(() => {});
+            }
         }
     } catch (e) {
         console.warn('[devtools] action error:', e);

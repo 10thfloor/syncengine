@@ -779,7 +779,9 @@
                 if (data.ok) {
                     showToast(data.message || (a.label + ': OK'), true);
                     if (a.action === 'reset' || a.action === 'teardown') {
-                        setTimeout(function () { location.reload(); }, 1000);
+                        // Also clear client OPFS before reload
+                        try { bc.postMessage({ type: 'devtools-action', action: 'clear-client-db' }); } catch (e) { /* */ }
+                        setTimeout(function () { location.reload(); }, 1500);
                     }
                 } else {
                     showToast(data.message || data.error || (a.label + ': failed'), false);
