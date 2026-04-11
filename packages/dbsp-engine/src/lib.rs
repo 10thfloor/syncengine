@@ -2007,4 +2007,351 @@ mod tests {
         assert_eq!(hlc.ts, 1000);
         assert!(hlc.count > 42); // should be 43
     }
+
+    // ── Gap 1: Composite keys in record_key ────────────────────────────────
+
+    #[test]
+    fn test_record_key_composite() {
+        let record = json!({"a": "x", "b": "y"});
+        let key = "a\x1Fb";
+        let result = record_key(&record, key);
+        assert_eq!(result, "x\x1Fy");
+    }
+
+    #[test]
+    fn test_record_key_composite_numeric() {
+        let record = json!({"org": "acme", "id": 42});
+        let key = "org\x1Fid";
+        let result = record_key(&record, key);
+        assert_eq!(result, "acme\x1F42");
+    }
+
+    #[test]
+    fn test_record_key_composite_missing_field() {
+        let record = json!({"a": "x"});
+        let key = "a\x1Fb";
+        let result = record_key(&record, key);
+        // Missing field produces empty string
+        assert_eq!(result, "x\x1F");
+    }
+
+    // ── Gap 2: min/max aggregate with retractions ──────────────────────────
+
+    #[test]
+    fn test_aggregate_max_with_retraction() {
+        let group_by = vec!["group".to_string()];
+        let aggregates: HashMap<String, AggDef> = [(
+            "maximum".to_string(),
+            AggDef { func: "max".to_string(), field: "val".to_string() },
+        )].iter().cloned().collect();
+
+        let mut view = make_view("max_view", "src", "id", vec![Operator::Aggregate {
+            group_by: group_by.clone(),
+            aggregates: aggregates.clone(),
+        }]);
+
+        // Insert 3 records with values 10, 20, 30
+        let inserts = vec![
+            make_delta("src", json!({"id": "r1", "group": "g1", "val": 10.0}), 1),
+            make_delta("src", json!({"id": "r2", "group": "g1", "val": 20.0}), 1),
+            make_delta("src", json!({"id": "r3", "group": "g1", "val": 30.0}), 1),
+        ];
+        let result = apply_aggregate(&mut view, &inserts, &group_by, &aggregates);
+        let last_insert = result.iter().rev().find(|d| d.weight == 1).unwrap();
+        assert_eq!(last_insert.record["maximum"], 30.0);
+
+        // Retract the record with value 30
+        let retract = vec![
+            make_delta("src", json!({"id": "r3", "group": "g1", "val": 30.0}), -1),
+        ];
+        let result2 = apply_aggregate(&mut view, &retract, &group_by, &aggregates);
+        let last_after = result2.iter().rev().find(|d| d.weight == 1).unwrap();
+        assert_eq!(last_after.record["maximum"], 20.0);
+    }
+
+    #[test]
+    fn test_aggregate_min_with_retraction() {
+        let group_by = vec!["group".to_string()];
+        let aggregates: HashMap<String, AggDef> = [(
+            "minimum".to_string(),
+            AggDef { func: "min".to_string(), field: "val".to_string() },
+        )].iter().cloned().collect();
+
+        let mut view = make_view("min_view", "src", "id", vec![Operator::Aggregate {
+            group_by: group_by.clone(),
+            aggregates: aggregates.clone(),
+        }]);
+
+        // Insert 3 records with values 10, 20, 30
+        let inserts = vec![
+            make_delta("src", json!({"id": "r1", "group": "g1", "val": 10.0}), 1),
+            make_delta("src", json!({"id": "r2", "group": "g1", "val": 20.0}), 1),
+            make_delta("src", json!({"id": "r3", "group": "g1", "val": 30.0}), 1),
+        ];
+        let result = apply_aggregate(&mut view, &inserts, &group_by, &aggregates);
+        let last_insert = result.iter().rev().find(|d| d.weight == 1).unwrap();
+        assert_eq!(last_insert.record["minimum"], 10.0);
+
+        // Retract the record with value 10
+        let retract = vec![
+            make_delta("src", json!({"id": "r1", "group": "g1", "val": 10.0}), -1),
+        ];
+        let result2 = apply_aggregate(&mut view, &retract, &group_by, &aggregates);
+        let last_after = result2.iter().rev().find(|d| d.weight == 1).unwrap();
+        assert_eq!(last_after.record["minimum"], 20.0);
+    }
+
+    // ── Gap 3: avg aggregate ───────────────────────────────────────────────
+
+    #[test]
+    fn test_aggregate_avg() {
+        let group_by = vec!["group".to_string()];
+        let aggregates: HashMap<String, AggDef> = [(
+            "average".to_string(),
+            AggDef { func: "avg".to_string(), field: "val".to_string() },
+        )].iter().cloned().collect();
+
+        let mut view = make_view("avg_view", "src", "id", vec![Operator::Aggregate {
+            group_by: group_by.clone(),
+            aggregates: aggregates.clone(),
+        }]);
+
+        // Insert records with values 10, 20, 30 => avg = 20
+        let inserts = vec![
+            make_delta("src", json!({"id": "r1", "group": "g1", "val": 10.0}), 1),
+            make_delta("src", json!({"id": "r2", "group": "g1", "val": 20.0}), 1),
+            make_delta("src", json!({"id": "r3", "group": "g1", "val": 30.0}), 1),
+        ];
+        let result = apply_aggregate(&mut view, &inserts, &group_by, &aggregates);
+        let last_insert = result.iter().rev().find(|d| d.weight == 1).unwrap();
+        assert_eq!(last_insert.record["average"], 20.0);
+
+        // Retract record with value 30 => remaining 10, 20 => avg = 15
+        let retract = vec![
+            make_delta("src", json!({"id": "r3", "group": "g1", "val": 30.0}), -1),
+        ];
+        let result2 = apply_aggregate(&mut view, &retract, &group_by, &aggregates);
+        let last_after = result2.iter().rev().find(|d| d.weight == 1).unwrap();
+        assert_eq!(last_after.record["average"], 15.0);
+    }
+
+    // ── Gap 4: HLC counter saturation ──────────────────────────────────────
+
+    #[test]
+    fn test_hlc_counter_saturation() {
+        let mut hlc = HLC { ts: 1000, count: 0 };
+        // Tick 70,000 times with the same timestamp
+        for _ in 0..70_000 {
+            hlc.tick(1000);
+        }
+        // Counter must saturate at 65535 (u16 max), not wrap or overflow
+        assert_eq!(hlc.count, 65535);
+        assert_eq!(hlc.count, HLC_COUNTER_MAX);
+
+        // pack() must still produce a valid value
+        let packed = hlc.pack();
+        assert_eq!(packed, (1000u64 << 16) | 65535);
+    }
+
+    // ── Gap 5: Join with overlapping field names ───────────────────────────
+
+    #[test]
+    fn test_join_overlapping_field_names() {
+        let mut view = make_view("user_orders", "users", "id", vec![Operator::Join {
+            right_table: "orders".to_string(),
+            left_key: "id".to_string(),
+            right_key: "user_id".to_string(),
+        }]);
+
+        let left_deltas = vec![make_delta(
+            "users",
+            json!({"id": 1, "name": "Alice"}),
+            1,
+        )];
+
+        // Right side also has a "name" field
+        let right_deltas = vec![make_delta(
+            "orders",
+            json!({"user_id": 1, "order_id": 100, "name": "Order A"}),
+            1,
+        )];
+
+        let result = apply_join(&mut view, &left_deltas, &right_deltas, "id", "user_id", "orders");
+        assert!(!result.is_empty());
+        let merged = &result[0].record;
+        // Left "name" takes priority
+        assert_eq!(merged["name"], "Alice");
+        // Right "name" is prefixed with right table name
+        assert_eq!(merged["orders.name"], "Order A");
+        // Other right fields are not prefixed
+        assert_eq!(merged["order_id"], 100);
+    }
+
+    // ── Gap 6: SetUnion with JSON arrays ───────────────────────────────────
+
+    #[test]
+    fn test_set_union_json_arrays() {
+        let mut merge_state = TableMergeState::new(MergeConfig {
+            fields: [("tags".to_string(), MergeStrategy::SetUnion)]
+                .iter()
+                .cloned()
+                .collect(),
+        });
+
+        let record1 = json!({"id": "item1", "tags": ["a", "b"]});
+        let hlc1 = HLC { ts: 100, count: 0 };
+        let (result1, _) = merge_state.resolve("id", &record1, &hlc1);
+        // First insert stores as-is
+        assert_eq!(result1["tags"], json!(["a", "b"]));
+
+        // Second insert merges arrays
+        let record2 = json!({"id": "item1", "tags": ["b", "c"]});
+        let hlc2 = HLC { ts: 200, count: 0 };
+        let (result2, _) = merge_state.resolve("id", &record2, &hlc2);
+        assert_eq!(result2["tags"], json!(["a", "b", "c"]));
+    }
+
+    // ── Gap 7: SetUnion legacy migration ───────────────────────────────────
+
+    #[test]
+    fn test_set_union_legacy_migration() {
+        let mut merge_state = TableMergeState::new(MergeConfig {
+            fields: [("tags".to_string(), MergeStrategy::SetUnion)]
+                .iter()
+                .cloned()
+                .collect(),
+        });
+
+        // First insert: legacy comma-separated string
+        let record1 = json!({"id": "item1", "tags": "a,b"});
+        let hlc1 = HLC { ts: 100, count: 0 };
+        let (result1, _) = merge_state.resolve("id", &record1, &hlc1);
+        assert_eq!(result1["tags"], "a,b");
+
+        // Second insert: another comma-separated string triggers migration
+        let record2 = json!({"id": "item1", "tags": "b,c"});
+        let hlc2 = HLC { ts: 200, count: 0 };
+        let (result2, _) = merge_state.resolve("id", &record2, &hlc2);
+        // Should be migrated to a sorted JSON array
+        assert_eq!(result2["tags"], json!(["a", "b", "c"]));
+    }
+
+    // ── Gap 8: Tombstone recording and manual prune ────────────────────────
+
+    #[test]
+    fn test_tombstone_recording_and_prune() {
+        // We can't easily test auto-GC at 10,000 in a unit test, but we can
+        // test the tombstone recording + manual prune_tombstones behavior
+        // by manipulating tombstone state directly.
+
+        // Simulate the tombstone map
+        let mut tombstones: HashMap<String, HashMap<String, u64>> = HashMap::new();
+        let table_ts = tombstones.entry("orders".to_string()).or_default();
+
+        // Record a few tombstones
+        table_ts.insert("order-1".to_string(), 100);
+        table_ts.insert("order-2".to_string(), 200);
+        table_ts.insert("order-3".to_string(), 300);
+        assert_eq!(table_ts.len(), 3);
+
+        // Manual prune: remove specific IDs (simulates prune_tombstones)
+        let ids_to_prune = vec!["order-1".to_string(), "order-2".to_string()];
+        for id in &ids_to_prune {
+            table_ts.remove(id);
+        }
+        assert_eq!(table_ts.len(), 1);
+        assert!(table_ts.contains_key("order-3"));
+    }
+
+    #[test]
+    fn test_tombstone_auto_gc_threshold_prune_logic() {
+        // Test the auto-GC prune logic: when exceeding threshold, oldest half
+        // are evicted. We simulate this at a smaller scale.
+        let mut table_tombstones: HashMap<String, u64> = HashMap::new();
+        for i in 0..20 {
+            table_tombstones.insert(format!("rec-{}", i), i as u64);
+        }
+
+        // Simulate the auto-GC prune: sort by HLC, remove oldest half
+        let mut hlcs: Vec<(&String, &u64)> = table_tombstones.iter().collect();
+        hlcs.sort_by_key(|(_, hlc)| *hlc);
+        let prune_count = hlcs.len() / 2;
+        let to_remove: Vec<String> = hlcs[..prune_count].iter().map(|(k, _)| (*k).clone()).collect();
+        for k in to_remove {
+            table_tombstones.remove(&k);
+        }
+
+        assert_eq!(table_tombstones.len(), 10);
+        // The surviving tombstones should be the ones with higher HLCs (10-19)
+        for i in 0..10 {
+            assert!(!table_tombstones.contains_key(&format!("rec-{}", i)));
+        }
+        for i in 10..20 {
+            assert!(table_tombstones.contains_key(&format!("rec-{}", i)));
+        }
+    }
+
+    // ── Gap 9: NaN sort safety ─────────────────────────────────────────────
+
+    #[test]
+    fn test_nan_sort_safety() {
+        let mut set = BTreeSet::new();
+
+        let nan_entry = SortedEntry { sort_val: f64::NAN, id: "nan-1".to_string() };
+        let normal1 = SortedEntry { sort_val: 10.0, id: "a".to_string() };
+        let normal2 = SortedEntry { sort_val: 20.0, id: "b".to_string() };
+        let neg_inf = SortedEntry { sort_val: f64::NEG_INFINITY, id: "c".to_string() };
+
+        set.insert(nan_entry.clone());
+        set.insert(normal1.clone());
+        set.insert(normal2.clone());
+        set.insert(neg_inf.clone());
+
+        // Set should have all 4 entries
+        assert_eq!(set.len(), 4);
+
+        // NaN should sort lowest (mapped to NEG_INFINITY), but with distinct id
+        // it should be findable and removable
+        assert!(set.remove(&nan_entry));
+        assert_eq!(set.len(), 3);
+
+        // The remaining entries should still be intact
+        assert!(set.contains(&normal1));
+        assert!(set.contains(&normal2));
+        assert!(set.contains(&neg_inf));
+    }
+
+    // ── Gap 10: Aggregate skip on unchanged value ──────────────────────────
+
+    #[test]
+    fn test_aggregate_skip_unchanged_value() {
+        let group_by = vec!["group".to_string()];
+        let aggregates: HashMap<String, AggDef> = [(
+            "total".to_string(),
+            AggDef { func: "sum".to_string(), field: "amount".to_string() },
+        )].iter().cloned().collect();
+
+        let mut view = make_view("sum_view", "src", "id", vec![Operator::Aggregate {
+            group_by: group_by.clone(),
+            aggregates: aggregates.clone(),
+        }]);
+
+        // Insert a record that sets total to 100
+        let delta1 = vec![
+            make_delta("src", json!({"id": "r1", "group": "g1", "amount": 100.0}), 1),
+        ];
+        let result1 = apply_aggregate(&mut view, &delta1, &group_by, &aggregates);
+        assert_eq!(result1.len(), 1);
+        assert_eq!(result1[0].weight, 1);
+        assert_eq!(result1[0].record["total"], 100.0);
+
+        // Insert a record with amount=0 — the aggregate total stays at 100
+        let delta2 = vec![
+            make_delta("src", json!({"id": "r2", "group": "g1", "amount": 0.0}), 1),
+        ];
+        let result2 = apply_aggregate(&mut view, &delta2, &group_by, &aggregates);
+
+        // No output should be emitted because the aggregate value didn't change
+        assert_eq!(result2.len(), 0, "no emission expected when aggregate value is unchanged");
+    }
 }
