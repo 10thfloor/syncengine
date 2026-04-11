@@ -6,11 +6,14 @@
   "scripts": {
     "dev": "syncengine dev",
     "build": "syncengine build",
-    "start": "syncengine start"
+    "start": "syncengine start",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@syncengine/client": "workspace:*",
     "@syncengine/core": "workspace:*",
+    "@syncengine/test-utils": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -24,6 +27,7 @@
     "typescript": "~5.9.0",
     "vite": "^6.0.0",
     "vite-plugin-wasm": "^3.0.0",
-    "vite-plugin-top-level-await": "^1.0.0"
+    "vite-plugin-top-level-await": "^1.0.0",
+    "vitest": "^1.0.4"
   }
 }
