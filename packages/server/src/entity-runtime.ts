@@ -34,6 +34,7 @@ import {
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
+    EntityError,
     type AnyEntity,
     type EmitInsert,
 } from "@syncengine/core";
@@ -83,8 +84,9 @@ async function runHandler(
         validated = applyHandler(entity, handlerName, merged, args);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const code = (err as any)?.code;
-        // Include code in the error message as a prefix so the client can parse it
+        // EntityError now propagates directly from applyHandler with its
+        // typed `code` field — no more `(err as any).code` cast.
+        const code = err instanceof EntityError ? err.code : undefined;
         const fullMessage = code ? `[${code}] ${message}` : message;
         throw new restate.TerminalError(fullMessage);
     }

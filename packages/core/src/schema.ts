@@ -396,8 +396,8 @@ function createViewBuilder<TRecord>(
 ): ViewBuilder<TRecord> {
     const tables = sourceTables ?? [tableName];
 
-    const builder: ViewBuilder<TRecord> = {
-        $tag: 'view',
+    const builder = {
+        $tag: 'view' as const,
         $id,
         $tableName: tableName,
         $idKey: idKey,
@@ -405,61 +405,67 @@ function createViewBuilder<TRecord>(
         $pipeline: pipeline,
         $sourceTables: tables,
         $monotonicity: classifyPipeline(pipeline),
-        $record: undefined as never,
+        $record: undefined as unknown as TRecord,
 
-        filter(field, _op, value) {
+        filter<K extends string & keyof TRecord>(
+            field: K | ColumnRef<string, K, TRecord[K]>,
+            _op: 'eq',
+            value: TRecord[K],
+        ): ViewBuilder<TRecord> {
             return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'filter', field: refOrString(field), eq: value },
             ], tables);
         },
 
-        project(...fields) {
-            return createViewBuilder($id, tableName, sourceIdKey, idKey, [
+        project<K extends string & keyof TRecord>(
+            ...fields: (K | ColumnRef<string, K, TRecord[K]>)[]
+        ): ViewBuilder<Pick<TRecord, K>> {
+            return createViewBuilder<Pick<TRecord, K>>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'project', fields: fields.map(refOrString) },
-            ], tables) as never;
+            ], tables);
         },
 
-        topN(sortBy, limit, order = 'desc') {
+        topN<K extends string & NumericKeys<TRecord>>(
+            sortBy: K | ColumnRef<string, K, number>,
+            limit: number,
+            order: 'asc' | 'desc' = 'desc',
+        ): ViewBuilder<TRecord> {
             return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
                 { op: 'topN', sort_by: refOrString(sortBy), limit, order },
             ], tables);
         },
 
-        aggregate(groupBy, aggregates) {
+        aggregate<
+            GK extends string & keyof TRecord,
+            Aggs extends Record<string, AggDef>,
+        >(
+            groupBy: (GK | ColumnRef<string, GK, TRecord[GK]>)[],
+            aggregates: Aggs,
+        ): ViewBuilder<Pick<TRecord, GK> & { [K in keyof Aggs]: number }> {
             const groupByNames = groupBy.map(refOrString);
-            // Aggregates rewrite $idKey for downstream delta application:
-            //   - single group-by → the group-by column is the natural PK
-            //   - multi group-by  → fall back to the source table's PK name
-            //     (composite keys are handled by the worker via tuple hashing)
-            //   - zero  group-by  → a single-row global aggregate; we emit a
-            //     sentinel '$agg' so applyDeltas doesn't latch onto a column
-            //     that does not exist in the output record. All deltas for a
-            //     global aggregate share the same synthetic id, which is
-            //     exactly the semantics we want (one row replaces the other).
-            //
-            // Note: $sourceIdKey is left untouched — the join's left_index
-            // dedup downstream of an aggregate needs the source PK, not the
-            // group-by column.
-            // Aggregate output only contains group-by + aggregated columns
-            // (no source PK). The id_key must match what's in the output:
+            // Aggregate rewrites $idKey based on the group-by columns:
             //   - single column  → that column name (string)
-            //   - multiple columns → the column names (string[])
-            //   - zero columns   → GLOBAL_AGG_KEY sentinel (global single-row aggregate)
+            //   - multiple cols  → the column names (string[])
+            //   - zero columns   → GLOBAL_AGG_KEY sentinel (single-row global aggregate)
+            // $sourceIdKey is left untouched — join's left_index dedup needs
+            // the source PK, not the post-aggregate group key.
             const aggIdKey: string | string[] = groupByNames.length === 1
                 ? groupByNames[0]
                 : groupByNames.length === 0
                     ? GLOBAL_AGG_KEY
                     : groupByNames;
-            return createViewBuilder($id, tableName, sourceIdKey, aggIdKey, [
-                ...pipeline,
-                { op: 'aggregate', group_by: groupByNames, aggregates },
-            ], tables) as never;
+            return createViewBuilder<Pick<TRecord, GK> & { [K in keyof Aggs]: number }>(
+                $id, tableName, sourceIdKey, aggIdKey, [
+                    ...pipeline,
+                    { op: 'aggregate', group_by: groupByNames, aggregates },
+                ], tables,
+            );
         },
 
-        distinct() {
+        distinct(): ViewBuilder<TRecord> {
             const distinctKey = Array.isArray(idKey) ? sourceIdKey : idKey;
             return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
@@ -467,20 +473,30 @@ function createViewBuilder<TRecord>(
             ], tables);
         },
 
-        join(rightTable, leftKey, rightKey) {
-            return createViewBuilder($id, tableName, sourceIdKey, idKey, [
-                ...pipeline,
-                {
-                    op: 'join',
-                    right_table: rightTable.$name,
-                    left_key: refOrString(leftKey),
-                    right_key: refOrString(rightKey),
-                },
-            ], [...tables, rightTable.$name]) as never;
+        join<
+            RTable extends AnyTable,
+            LK extends string & keyof TRecord,
+            RK extends string & keyof RTable['$record'],
+        >(
+            rightTable: RTable,
+            leftKey: LK | ColumnRef<string, LK, TRecord[LK]>,
+            rightKey: RK | ColumnRef<string, RK, RTable['$record'][RK]>,
+        ): ViewBuilder<TRecord & RTable['$record']> {
+            return createViewBuilder<TRecord & RTable['$record']>(
+                $id, tableName, sourceIdKey, idKey, [
+                    ...pipeline,
+                    {
+                        op: 'join',
+                        right_table: rightTable.$name,
+                        left_key: refOrString(leftKey),
+                        right_key: refOrString(rightKey),
+                    },
+                ], [...tables, rightTable.$name],
+            );
         },
     };
 
-    return builder;
+    return builder as ViewBuilder<TRecord>;
 }
 
 export function view<TTable extends AnyTable>(

@@ -125,7 +125,7 @@ export const inventory = entity('inventory', {
           totalSold: (state.totalSold ?? 0) + 1,
         },
         {
-          table: 'transactions',
+          table: transactions,
           record: {
             productSlug: '$key',
             userId,
@@ -147,7 +147,7 @@ export const inventory = entity('inventory', {
           stock: state.stock + 1,
         },
         {
-          table: 'transactions',
+          table: transactions,
           record: {
             productSlug: '$key',
             userId,

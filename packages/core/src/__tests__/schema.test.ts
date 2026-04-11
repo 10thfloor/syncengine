@@ -197,6 +197,88 @@ describe('Schema DSL (Phase 2.5)', () => {
         });
     });
 
+    // ── View builder type narrowing (compile-time assertions) ──────
+    describe('view builder type narrowing', () => {
+        const events = table('events', {
+            id: id(),
+            region: text(),
+            category: text(),
+            value: integer(),
+            ts: integer(),
+        });
+
+        it('aggregate narrows to group-by + aggregated columns', () => {
+            const v = view(events).aggregate([events.region], {
+                total: sum(events.value),
+                count: count(),
+            });
+            const row: typeof v.$record = { region: '', total: 0, count: 0 };
+            expect(row).toBeDefined();
+
+            // @ts-expect-error — 'category' is not in aggregate output
+            const _bad: typeof v.$record = { region: '', total: 0, count: 0, category: '' };
+        });
+
+        it('project narrows to selected fields', () => {
+            const v = view(events).project(events.region, events.value);
+            const row: typeof v.$record = { region: '', value: 0 };
+            expect(row).toBeDefined();
+
+            // @ts-expect-error — 'category' is not projected
+            const _bad: typeof v.$record = { region: '', value: 0, category: '' };
+        });
+
+        it('join produces intersection of both record types', () => {
+            const other = table('other', {
+                id: id(),
+                region: text(),
+                label: text(),
+            });
+            const v = view(events).join(other, events.region, other.region);
+            const row: typeof v.$record = {
+                id: 0, region: '', category: '', value: 0, ts: 0, label: '',
+            };
+            expect(row).toBeDefined();
+        });
+
+        it('chained filter → aggregate narrows through each step', () => {
+            const v = view(events)
+                .filter(events.region, 'eq', 'us-west')
+                .aggregate([events.region], {
+                    total: sum(events.value),
+                    count: count(),
+                });
+            const row: typeof v.$record = { region: '', total: 0, count: 0 };
+            expect(row).toBeDefined();
+
+            // @ts-expect-error — 'value' not in aggregate output
+            const _bad: typeof v.$record = { region: '', total: 0, count: 0, value: 0 };
+        });
+
+        it('multi-column aggregate narrows correctly', () => {
+            const v = view(events).aggregate([events.region, events.category], {
+                total: sum(events.value),
+            });
+            const row: typeof v.$record = { region: '', category: '', total: 0 };
+            expect(row).toBeDefined();
+
+            // @ts-expect-error — 'value' not in aggregate output
+            const _bad: typeof v.$record = { region: '', category: '', total: 0, value: 0 };
+        });
+
+        it('global aggregate (zero group-by) has only aggregated columns', () => {
+            const v = view(events).aggregate([], {
+                revenue: sum(events.value),
+                count: count(),
+            });
+            const row: typeof v.$record = { revenue: 0, count: 0 };
+            expect(row).toBeDefined();
+
+            // @ts-expect-error — 'region' not in global aggregate output
+            const _bad: typeof v.$record = { revenue: 0, count: 0, region: '' };
+        });
+    });
+
     // ── Aggregate helpers ───────────────────────────────────────────
     describe('sum/avg/min/max/count', () => {
         const events = table('events', {
