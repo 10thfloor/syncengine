@@ -290,9 +290,18 @@ async function boot(
     );
 
     // 6. Vite
+    //
+    // `--configLoader runner` is required for workspace setups that import
+    // TypeScript source directly (packages/*/src/*.ts). The default
+    // `bundle` loader calls esbuild with `packages: 'external'`, so it
+    // externalizes every workspace dep. Those then hit Node's native ESM
+    // resolver at runtime, which cannot follow extensionless or `.js →
+    // .ts` imports under `--experimental-strip-types`. The `runner`
+    // loader uses vite's on-the-fly module runner, which resolves TS
+    // properly without externalization.
     banner('starting vite dev server');
     const viteBin = join(appDir, 'node_modules', '.bin', 'vite');
-    const vite = spawnManaged(viteBin, [], {
+    const vite = spawnManaged(viteBin, ['--configLoader', 'runner'], {
         name: 'vite',
         cwd: appDir,
         env: { ...process.env, FORCE_COLOR: '1' },
