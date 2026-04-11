@@ -8,7 +8,7 @@
 
 import { canConnect } from './runner';
 import {
-    findRepoRoot,
+    findAppRoot,
     stateDirFor,
     readPorts,
     readPids,
@@ -29,7 +29,7 @@ interface ServiceReport {
 }
 
 export async function statusCommand(_args: string[]): Promise<void> {
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
     const stateDir = stateDirFor(repoRoot);
 
     const recordedPorts = readPorts(stateDir);

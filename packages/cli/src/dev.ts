@@ -40,7 +40,7 @@ import {
 } from './runner';
 import {
     DEFAULT_PORTS,
-    findRepoRoot,
+    findAppRoot,
     stateDirFor,
     writePorts,
     writePids,
@@ -62,7 +62,7 @@ import { hashWorkspaceId } from '@syncengine/core/http';
 export async function devCommand(args: string[]): Promise<void> {
     const fresh = args.includes('--fresh');
     const rawNats = args.includes('--raw-nats');
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
     const stateDir = stateDirFor(repoRoot);
 
     // --fresh: wipe the state dir, but refuse to nuke state that belongs
@@ -212,8 +212,8 @@ async function boot(
     // 4. Workspace service (tsx directly — going through pnpm breaks the
     //    process-group kill cascade on shutdown)
     banner('starting workspace service');
-    const serverDir = join(repoRoot, 'packages', 'server');
-    const tsxBin = join(serverDir, 'node_modules', '.bin', 'tsx');
+    const serverDir = resolveServerDir(appDir);
+    const tsxBin = resolveLocalBin('tsx', appDir);
     const workspace = spawnManaged(tsxBin, ['watch', 'src/index.ts'], {
         name: 'workspace',
         cwd: serverDir,
@@ -522,6 +522,40 @@ logtime: true
 }
 
 // ── Ready banner ──────────────────────────────────────────────────────────
+
+// ── Package resolution ────────────────────────────────────────────────────
+
+/**
+ * Find `@syncengine/server`'s source directory. In a monorepo with
+ * `workspace:*` links this resolves through the symlink in node_modules;
+ * for an external user it resolves into their real node_modules copy.
+ */
+function resolveServerDir(appDir: string): string {
+    const candidate = join(appDir, 'node_modules', '@syncengine', 'server');
+    if (existsSync(candidate)) return resolve(candidate);
+    throw new Error(
+        `Cannot find @syncengine/server from ${appDir}.\n` +
+        `Make sure it's installed (npm install @syncengine/server).`,
+    );
+}
+
+/**
+ * Resolve a local bin (e.g. `tsx`) from the app's node_modules/.bin or
+ * the server package's node_modules/.bin.
+ */
+function resolveLocalBin(name: string, appDir: string): string {
+    // Try app-level first, then server package level
+    const candidates = [
+        join(appDir, 'node_modules', '.bin', name),
+        join(resolveServerDir(appDir), 'node_modules', '.bin', name),
+    ];
+    for (const bin of candidates) {
+        if (existsSync(bin)) return bin;
+    }
+    throw new Error(
+        `Cannot find ${name} binary. Install tsx as a devDependency.`,
+    );
+}
 
 function printReadyBanner(ports: Ports, rawNats: boolean): void {
     const bar = '━'.repeat(52);

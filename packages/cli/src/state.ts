@@ -15,8 +15,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 
 // ── Ports ─────────────────────────────────────────────────────────────────
 
@@ -86,17 +85,15 @@ export interface RuntimeConfig {
 
 // ── Paths ─────────────────────────────────────────────────────────────────
 
-export async function findRepoRoot(): Promise<string> {
-    let dir = process.cwd();
-    while (true) {
-        if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return dir;
-        const parent = dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-    }
-    // Fallback: walk up from this source file to the repo root
-    const here = dirname(fileURLToPath(import.meta.url));
-    return resolve(here, '..', '..', '..');
+/**
+ * Resolve the app root — the directory where `.syncengine/dev/` lives.
+ *
+ * This is simply CWD: the user runs `syncengine dev` from their app
+ * directory, and the state dir is created there. No monorepo walk —
+ * external users won't have a `pnpm-workspace.yaml`.
+ */
+export async function findAppRoot(): Promise<string> {
+    return process.cwd();
 }
 
 export function stateDirFor(repoRoot: string): string {

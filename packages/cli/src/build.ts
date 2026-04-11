@@ -15,7 +15,7 @@ import { join, relative, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { banner, note } from './runner';
-import { findRepoRoot } from './state';
+import { findAppRoot } from './state';
 
 interface Manifest {
     actors: string[];
@@ -23,7 +23,7 @@ interface Manifest {
 }
 
 export async function buildCommand(_args: string[]): Promise<void> {
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
 
     // 1. Find the app directory
     const appDir = findAppDir(repoRoot);

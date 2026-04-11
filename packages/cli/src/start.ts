@@ -11,10 +11,10 @@ import { join, relative } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { banner, note } from './runner';
-import { findRepoRoot } from './state';
+import { findAppRoot } from './state';
 
 export async function startCommand(_args: string[]): Promise<void> {
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
 
     // Find the built server entry
     const appDir = findBuiltApp(repoRoot);

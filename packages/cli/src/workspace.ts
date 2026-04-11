@@ -18,7 +18,7 @@
  */
 
 import { banner } from './runner';
-import { findRepoRoot, stateDirFor, readPortsOrDefaults, type Ports } from './state';
+import { findAppRoot, stateDirFor, readPortsOrDefaults, type Ports } from './state';
 import {
     provisionWorkspace,
     teardownWorkspace,
@@ -214,7 +214,7 @@ async function workspaceInfo(args: string[]): Promise<void> {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 async function resolvePorts(): Promise<Ports> {
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
     const stateDir = stateDirFor(repoRoot);
     return readPortsOrDefaults(stateDir);
 }

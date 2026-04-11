@@ -11,7 +11,7 @@
 
 import { banner, note } from './runner';
 import {
-    findRepoRoot,
+    findAppRoot,
     stateDirFor,
     readPids,
     isAlive,
@@ -23,7 +23,7 @@ const SHUTDOWN_TIMEOUT_MS = 4000;
 const CHILD_ORDER: Array<keyof NonNullable<Pids['children']>> = ['vite', 'workspace', 'restate', 'nats'];
 
 export async function downCommand(_args: string[]): Promise<void> {
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
     const stateDir = stateDirFor(repoRoot);
     const pids = readPids(stateDir);
 

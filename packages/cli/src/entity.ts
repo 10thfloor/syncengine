@@ -5,7 +5,7 @@
  * `<restateUrl>/entity_<name>/<workspaceId>/<key>/_read`
  */
 
-import { findRepoRoot, stateDirFor, readPortsOrDefaults } from './state';
+import { findAppRoot, stateDirFor, readPortsOrDefaults } from './state';
 import { hashWorkspaceId } from '@syncengine/core/http';
 
 export async function entityCommand(args: string[]): Promise<void> {
@@ -32,7 +32,7 @@ export async function entityCommand(args: string[]): Promise<void> {
         workspaceId = hashWorkspaceId('default');
     }
 
-    const repoRoot = await findRepoRoot();
+    const repoRoot = await findAppRoot();
     const stateDir = stateDirFor(repoRoot);
     const ports = readPortsOrDefaults(stateDir);
     const restateUrl = `http://127.0.0.1:${ports.restateIngress}`;
