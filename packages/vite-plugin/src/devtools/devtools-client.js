@@ -96,6 +96,10 @@
     var syncPhase = 'idle';
     var hlc = { ts: 0, counter: 0 };
 
+    // Conflicts
+    var conflicts = [];
+    var conflictsEl = null;
+
     // Selected table in Data tab
     var selectedTable = null;
     var tableRows = {};       // { [tableName]: { columns: [], rows: [], localIds: [] } }
@@ -136,6 +140,10 @@
         return str.length > max ? str.slice(0, max) + '\u2026' : str;
     }
 
+    function copyToClipboard(text) {
+        try { navigator.clipboard.writeText(text); showToast('Copied', true); }
+        catch (_) { showToast('Copy failed', false); }
+    }
 
     function statusColor() {
         if (connStatus === 'disconnected' || connStatus === 'error' || connStatus === 'auth_failed') return 'red';
@@ -175,6 +183,10 @@
         pillEl.appendChild(dot);
         var lbl = el('span', CLS.pillLabel, 'syncengine');
         pillEl.appendChild(lbl);
+        if (conflicts.length > 0) {
+            var badge = el('span', 'se-pill-conflicts', conflicts.length);
+            pillEl.appendChild(badge);
+        }
     }
 
     // ── Drawer shell ──────────────────────────────────────────────────────
@@ -194,7 +206,7 @@
         var tabBar = el('div', CLS.tabBar);
         drawerEl.appendChild(tabBar);
 
-        var TABS = ['Data', 'Timeline', 'State', 'Actions'];
+        var TABS = ['Data', 'Timeline', 'State', 'Conflicts', 'Actions'];
         TABS.forEach(function (name) {
             var key = name.toLowerCase();
             var tabBtn = el('button', CLS.tab, name);
@@ -224,6 +236,7 @@
         tabPanels['data'] = buildDataPanel();
         tabPanels['timeline'] = buildTimelinePanel();
         tabPanels['state'] = buildStatePanel();
+        tabPanels['conflicts'] = buildConflictsPanel();
         tabPanels['actions'] = buildActionsPanel();
 
         Object.keys(tabPanels).forEach(function (k) {
@@ -242,6 +255,19 @@
             var key = t._tabKey;
             if (key) {
                 t.classList.toggle(CLS.tabActive, key === activeTab);
+                // Show conflict count on the Conflicts tab
+                if (key === 'conflicts') {
+                    var existing = t.querySelector('.se-tab-count');
+                    if (conflicts.length > 0) {
+                        if (!existing) {
+                            existing = el('span', 'se-tab-count');
+                            t.appendChild(existing);
+                        }
+                        existing.textContent = conflicts.length;
+                    } else if (existing) {
+                        existing.remove();
+                    }
+                }
             }
         });
     }
@@ -253,6 +279,7 @@
         if (key === 'data') renderDataSidebar();
         if (key === 'state') renderState();
         if (key === 'timeline') renderTimeline();
+        if (key === 'conflicts') renderConflicts();
         if (key === 'actions') renderActions();
     }
 
@@ -602,21 +629,27 @@
         clearChildren(stateEl);
 
         // Connection group
-        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Connection'));
-        addStateRow(stateEl, 'Status', connStatus);
-        if (peerId) addStateRow(stateEl, 'Peer ID', truncate(peerId, 32));
-        if (serverUrl) addStateRow(stateEl, 'Server', truncate(serverUrl, 40));
-        addStateRow(stateEl, 'Sync phase', syncPhase);
-        if (hlc.ts) addStateRow(stateEl, 'HLC', hlc.ts + '.' + hlc.counter);
+        var connGroup = el('div', 'se-state-group');
+        connGroup.appendChild(el('div', CLS.stateGroupLabel, 'Connection'));
+        addStateRow(connGroup, 'Status', connStatus);
+        if (peerId) addStateRow(connGroup, 'Peer ID', truncate(peerId, 32));
+        if (serverUrl) addStateRow(connGroup, 'Server', truncate(serverUrl, 40));
+        addStateRow(connGroup, 'Sync phase', syncPhase);
+        if (hlc.ts) addStateRow(connGroup, 'HLC', hlc.ts + '.' + hlc.counter);
+        stateEl.appendChild(connGroup);
 
         // Schema
-        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Schema'));
-        if (schemaInfo.version) addStateRow(stateEl, 'Version', 'v' + schemaInfo.version);
-        if (schemaInfo.fingerprint) addStateRow(stateEl, 'Fingerprint', truncate(schemaInfo.fingerprint, 16));
+        var schemaGroup = el('div', 'se-state-group');
+        schemaGroup.appendChild(el('div', CLS.stateGroupLabel, 'Schema'));
+        if (schemaInfo.version) addStateRow(schemaGroup, 'Version', 'v' + schemaInfo.version);
+        if (schemaInfo.fingerprint) addStateRow(schemaGroup, 'Fingerprint', truncate(schemaInfo.fingerprint, 16));
+        stateEl.appendChild(schemaGroup);
 
         // Sync
-        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Sync'));
-        addStateRow(stateEl, 'Offline queue', offlineQueue > 0 ? offlineQueue + ' pending' : '0');
+        var syncGroup = el('div', 'se-state-group');
+        syncGroup.appendChild(el('div', CLS.stateGroupLabel, 'Sync'));
+        addStateRow(syncGroup, 'Offline queue', offlineQueue > 0 ? offlineQueue + ' pending' : '0');
+        stateEl.appendChild(syncGroup);
     }
 
     function addStateRow(parent, label, value) {
@@ -624,6 +657,107 @@
         row.appendChild(el('span', CLS.stateLabel, label));
         row.appendChild(el('span', CLS.stateValue, value));
         parent.appendChild(row);
+    }
+
+    // ── Conflicts panel ───────────────────────────────────────────────────
+
+    function buildConflictsPanel() {
+        conflictsEl = el('div', 'se-conflicts');
+        return conflictsEl;
+    }
+
+    function strategyLabel(s) {
+        if (s === 'lww') return 'Last-Write-Wins';
+        if (s === 'max') return 'Max value';
+        return s || 'unknown';
+    }
+
+    function renderConflicts() {
+        if (!conflictsEl) return;
+        clearChildren(conflictsEl);
+
+        if (conflicts.length === 0) {
+            conflictsEl.appendChild(el('div', CLS.empty, 'No conflicts detected'));
+            return;
+        }
+
+        // Header
+        var header = el('div', 'se-conflicts-header');
+        var title = el('span', 'se-conflicts-title',
+            conflicts.length + ' conflict' + (conflicts.length === 1 ? '' : 's') + ' auto-resolved');
+        header.appendChild(title);
+
+        var dismissAllBtn = el('button', 'se-conflicts-dismiss-all', 'Dismiss all');
+        dismissAllBtn.addEventListener('click', function () {
+            try { bc.postMessage({ type: 'devtools-action', action: 'dismiss-all-conflicts' }); } catch (_) {}
+            conflicts = [];
+            renderConflicts();
+        });
+        header.appendChild(dismissAllBtn);
+        conflictsEl.appendChild(header);
+
+        // Explainer
+        var explainer = el('div', 'se-conflicts-explainer',
+            'Two clients wrote to the same field concurrently. ' +
+            'syncengine resolved each conflict using its merge strategy \u2014 no data was lost.');
+        conflictsEl.appendChild(explainer);
+
+        // Conflict cards
+        for (var i = 0; i < conflicts.length; i++) {
+            conflictsEl.appendChild(buildConflictCard(conflicts[i], i));
+        }
+    }
+
+    function buildConflictCard(c, idx) {
+        var card = el('div', 'se-conflict-card');
+
+        // Top row: table.field + strategy badge
+        var topRow = el('div', 'se-conflict-top');
+        topRow.appendChild(el('span', 'se-conflict-field', c.table + '.' + c.field));
+        var stratBadge = el('span', 'se-conflict-strategy', strategyLabel(c.strategy));
+        topRow.appendChild(stratBadge);
+        card.appendChild(topRow);
+
+        // Record ID
+        if (c.recordId) {
+            var recRow = el('div', 'se-conflict-record');
+            recRow.appendChild(el('span', 'se-conflict-record-label', 'record'));
+            var idStr = String(c.recordId);
+            recRow.appendChild(el('span', 'se-conflict-record-id', truncate(idStr, 24)));
+            if (idStr.length > 24) recRow.title = idStr;
+            card.appendChild(recRow);
+        }
+
+        // Values: winner vs loser
+        var valRow = el('div', 'se-conflict-values');
+
+        var winnerBox = el('div', 'se-conflict-val se-conflict-winner');
+        winnerBox.appendChild(el('span', 'se-conflict-val-label', 'kept'));
+        winnerBox.appendChild(el('span', 'se-conflict-val-data', String(c.winner != null ? (c.winner.value != null ? c.winner.value : c.winner) : '?')));
+        valRow.appendChild(winnerBox);
+
+        var arrowEl = el('span', 'se-conflict-arrow', '\u2190');
+        valRow.appendChild(arrowEl);
+
+        var loserBox = el('div', 'se-conflict-val se-conflict-loser');
+        loserBox.appendChild(el('span', 'se-conflict-val-label', 'discarded'));
+        loserBox.appendChild(el('span', 'se-conflict-val-data', String(c.loser != null ? (c.loser.value != null ? c.loser.value : c.loser) : '?')));
+        valRow.appendChild(loserBox);
+
+        card.appendChild(valRow);
+
+        // Dismiss button
+        var dismissBtn = el('button', 'se-conflict-dismiss', '\u00D7');
+        dismissBtn.title = 'Dismiss';
+        dismissBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            try { bc.postMessage({ type: 'devtools-action', action: 'dismiss-conflict', index: idx }); } catch (_) {}
+            conflicts.splice(idx, 1);
+            renderConflicts();
+        });
+        card.appendChild(dismissBtn);
+
+        return card;
     }
 
     // ── Actions panel ─────────────────────────────────────────────────────
@@ -639,12 +773,9 @@
         clearChildren(actionsEl);
 
         var ACTION_DEFS = [
-            { label: 'Force Reconnect', desc: 'Drop and re-establish the NATS connection', action: 'force-reconnect', clientSide: true },
-            { label: 'Trigger GC', desc: 'Run garbage collection on the workspace stream', action: 'trigger-gc' },
-            { label: 'Clear Client DB', desc: 'Wipe local SQLite/OPFS and reload', variant: 'yellow', action: 'clear-client-db', clientSide: true },
-            { label: 'Purge Stream', desc: 'Delete all messages from the NATS stream', variant: 'yellow', action: 'purge-stream' },
-            { label: 'Teardown Workspace', desc: 'Delete workspace and its stream', variant: 'red', action: 'teardown', confirm: true },
-            { label: 'Reset Everything', desc: 'Teardown + clear entity state + re-provision + clear client DB', variant: 'red', action: 'reset', confirm: true },
+            { label: 'Force Reconnect', desc: 'When your connection is stuck or messages aren\'t flowing \u2014 drops and re-establishes the NATS connection', action: 'force-reconnect', clientSide: true },
+            { label: 'Clear Local Data', desc: 'When this browser has stale or corrupted data \u2014 wipes local SQLite/OPFS and reloads (other clients unaffected)', variant: 'yellow', action: 'clear-client-db', clientSide: true },
+            { label: 'Reset Workspace', desc: 'When you want a clean slate \u2014 clears all server state, streams, and entity data; every connected client reloads', variant: 'red', action: 'reset', confirm: true },
         ];
 
         ACTION_DEFS.forEach(function (def) {
@@ -663,20 +794,22 @@
             if (!confirm('Are you sure? ' + def.label + ' cannot be undone.')) return;
         }
 
+        // Client-side actions: dispatch via BroadcastChannel to the data worker
         if (def.clientSide) {
             try {
                 bc.postMessage({ type: 'devtools-action', action: def.action });
                 showToast(def.label + ': sent', true);
                 if (def.action === 'clear-client-db') {
-                    var dbCleared = false;
+                    // Wait for the worker to confirm OPFS wipe, then reload
+                    var done = false;
                     var onCleared = function (e) {
                         if (e.data && e.data.type === 'devtools-db-cleared') {
-                            dbCleared = true;
+                            done = true;
                             location.reload();
                         }
                     };
                     bc.addEventListener('message', onCleared);
-                    setTimeout(function () { if (!dbCleared) location.reload(); }, 1000);
+                    setTimeout(function () { if (!done) location.reload(); }, 1000);
                 }
             } catch (err) {
                 showToast(def.label + ': ' + err.message, false);
@@ -684,47 +817,14 @@
             return;
         }
 
+        // Server-side actions: POST to devtools endpoint.
+        // For reset, the server publishes sys.reset via NATS after
+        // completing — every connected client (including this tab)
+        // will clear OPFS and reload automatically.
         var wsParam = getWorkspaceId();
         var payload = { action: def.action, workspaceId: wsParam };
 
-        // Reset/teardown: fire OPFS clear in parallel with server call
-        if (def.action === 'reset' || def.action === 'teardown') {
-            var dbCleared = false;
-            var serverDone = false;
-            var reloadOnce = function () { if (dbCleared && serverDone) location.reload(); };
-            var onDbCleared = function (e) {
-                if (e.data && e.data.type === 'devtools-db-cleared') {
-                    dbCleared = true;
-                    reloadOnce();
-                }
-            };
-            try {
-                bc.addEventListener('message', onDbCleared);
-                bc.postMessage({ type: 'devtools-action', action: 'clear-client-db' });
-            } catch (_) { /* */ }
-            setTimeout(function () { if (!dbCleared) { dbCleared = true; reloadOnce(); } }, 1000);
-
-            fetch('/__syncengine/devtools/action', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify(payload),
-            })
-                .then(function (res) { return res.json(); })
-                .then(function (data) {
-                    serverDone = true;
-                    if (data.ok) showToast(data.message || (def.label + ': OK'), true);
-                    else showToast(data.message || (def.label + ': failed'), false);
-                    reloadOnce();
-                })
-                .catch(function (err) {
-                    serverDone = true;
-                    showToast(def.label + ': ' + err.message, false);
-                    reloadOnce();
-                });
-            return;
-        }
-
-        // Other server-side actions
+        showToast(def.label + '...', true);
         fetch('/__syncengine/devtools/action', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -752,9 +852,11 @@
         if (drawerOpen) {
             if (!drawerEl) buildDrawer();
             drawerEl.classList.remove(CLS.hidden);
+            updateTabActive();
             if (activeTab === 'data') renderDataSidebar();
             if (activeTab === 'state') renderState();
             if (activeTab === 'timeline') renderTimeline();
+            if (activeTab === 'conflicts') renderConflicts();
         }
     }
 
@@ -787,6 +889,11 @@
             if (data.schema) schemaInfo = data.schema;
             if (Array.isArray(data.tables)) tables = data.tables;
             if (Array.isArray(data.viewDefs)) viewDefs = data.viewDefs;
+            // Conflicts
+            if (Array.isArray(data.conflicts)) {
+                conflicts = data.conflicts;
+                if (drawerOpen && activeTab === 'conflicts') renderConflicts();
+            }
             // View row counts
             if (data.views) {
                 var newCounts = JSON.stringify(data.views);

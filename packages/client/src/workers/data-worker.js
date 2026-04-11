@@ -365,7 +365,7 @@ function initDevtoolsChannel() {
                         }, 2000);
                     }
                 } else if (msg.type === 'devtools-action') {
-                    handleDevtoolsAction(msg.action);
+                    handleDevtoolsAction(msg.action, msg);
                 } else if (msg.type === 'devtools-query') {
                     handleDevtoolsQuery(msg);
                 }
@@ -378,7 +378,7 @@ function initDevtoolsChannel() {
     }
 }
 
-function handleDevtoolsAction(action) {
+function handleDevtoolsAction(action, msg) {
     if (!action) return;
     try {
         if (action === 'force-reconnect') {
@@ -388,6 +388,14 @@ function handleDevtoolsAction(action) {
             if (nats.conn && !nats.conn.isClosed()) {
                 nats.conn.close().catch(() => { /* ignore */ });
             }
+        } else if (action === 'dismiss-conflict') {
+            if (typeof msg.index === 'number' && msg.index >= 0 && msg.index < conflictLog.length) {
+                conflictLog.splice(msg.index, 1);
+            }
+            broadcastDevtoolsStatus();
+        } else if (action === 'dismiss-all-conflicts') {
+            conflictLog.length = 0;
+            broadcastDevtoolsStatus();
         } else if (action === 'clear-client-db') {
             // Close DB to release OPFS lock, delete OPFS files, then
             // signal completion so the devtools client can safely reload.
@@ -935,6 +943,7 @@ async function connectNats() {
         // Other per-connection subscriptions (not the replay path).
         await subscribeAuthority(codec);
         subscribeGC(codec);
+        subscribeSysReset();
         startPeerAckTimer();
         await resubscribeTopics();
         watchDisconnect();
@@ -1165,6 +1174,35 @@ function subscribeGC(codec) {
                     }
                 }
             }
+        }
+    })();
+}
+
+// ── System reset subscription ────────────────────────────────────────────────
+
+/**
+ * Subscribe to ws.<wsKey>.sys.reset. When the server resets the workspace
+ * it publishes this message so every connected client — any tab, any
+ * device — clears its local SQLite/OPFS and reloads.
+ */
+function subscribeSysReset() {
+    const subject = `ws.${nats.config.workspaceId}.sys.reset`;
+    const sub = nats.conn.subscribe(subject);
+    (async () => {
+        for await (const raw of sub) {
+            console.log('[sys] received workspace reset — clearing local data');
+            // Close DB, wipe OPFS, then tell the main thread to reload.
+            try { if (db) { db.close(); db = null; } } catch { /* */ }
+            try {
+                if (typeof navigator !== 'undefined' && navigator.storage) {
+                    const root = await navigator.storage.getDirectory();
+                    for await (const [name] of root.entries()) {
+                        await root.removeEntry(name, { recursive: true }).catch(() => {});
+                    }
+                }
+            } catch { /* */ }
+            console.log('[sys] OPFS cleared, requesting reload');
+            self.postMessage({ type: 'RESET_RELOAD' });
         }
     })();
 }

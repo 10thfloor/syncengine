@@ -4,7 +4,10 @@
 // data-worker.js (worker thread). Handles the open → init → ready lifecycle,
 // then hands off to the caller's onMessage callback.
 
-/** Known server message types. Validated at the JSON.parse boundary. */
+/**
+ * Known server message types. Validated at the JSON.parse boundary.
+ * Keep in sync with ServerMsg union in packages/server/src/gateway/protocol.ts.
+ */
 const SERVER_MSG_TYPES = new Set([
     'ready', 'error', 'delta', 'entity-write', 'entity-state',
     'authority', 'topic', 'gc', 'replay-end', 'workspace-registry',

@@ -215,6 +215,45 @@ body {
 .conflict-winner { color: var(--green); }
 .conflict-loser { color: var(--red); text-decoration: line-through; }
 
+.conflict-explainer {
+  padding: 0.5rem; margin-bottom: 0.25rem;
+  font-size: 0.75rem; color: var(--muted); line-height: 1.5;
+}
+.conflict-explainer strong { color: var(--fg); display: block; margin-bottom: 0.25rem; }
+.conflict-explainer p { margin: 0; }
+
+/* ── Entity sync state (OrdersTab) ─────────────────────────── */
+
+.order-row-syncing { opacity: 0.75; }
+
+.status-syncing {
+  background: rgba(113, 113, 122, 0.15) !important;
+  color: var(--muted) !important;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 0.35rem;
+}
+
+.sync-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted);
+  animation: ws-pulse 1.2s ease-in-out infinite;
+}
+
+.sync-explainer {
+  margin-top: 0.5rem; padding: 0.6rem 0.75rem;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: var(--radius);
+  font-size: 0.75rem; line-height: 1.6; color: var(--muted);
+}
+.sync-explainer strong { color: var(--fg); }
+.sync-explainer p { margin: 0.4rem 0 0; }
+.sync-explainer code {
+  font-family: var(--mono); font-size: 0.7rem;
+  background: rgba(99, 102, 241, 0.1); padding: 1px 4px; border-radius: 3px;
+}
+.sync-explainer em { color: var(--accent); font-style: normal; }
+
 /* ── Staleness Badge ────────────────────────────────────────── */
 
 .stale-badge {

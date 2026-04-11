@@ -56,11 +56,18 @@ const OrderRow = memo(function OrderRow({
   const s = useStore<DB>();
   const { state, actions, ready } = s.useEntity(order, orderId);
   const [error, setError] = useState<string | null>(null);
+  const [showSyncInfo, setShowSyncInfo] = useState(false);
 
-  const status = state?.status ?? 'draft';
-  const nextAction = NEXT_ACTION[status];
+  // The order appears in allOrders because place() called emit(). If the
+  // entity status is still 'draft' (the initial state), it means this
+  // client's entity subscription hasn't received the server state yet.
+  // This is the view/entity duality — the CRDT view is ahead of the
+  // durable entity on this client.
+  const status = state?.status || null;
+  const awaitingSync = !ready || state == null || !status || status === 'draft';
+  const nextAction = status && !awaitingSync ? NEXT_ACTION[status] : null;
   const isOwner = orderUserId === currentUserId;
-  const canCancel = status === 'draft' || status === 'placed';
+  const canCancel = status === 'placed';
 
   async function handleAdvance() {
     if (!nextAction) return;
@@ -88,12 +95,52 @@ const OrderRow = memo(function OrderRow({
     }
   }
 
+  // ── Awaiting entity sync ──────────────────────────────────────
+  if (awaitingSync) {
+    return (
+      <div className="order-row order-row-syncing">
+        <div className="order-info">
+          <span
+            className="status-badge status-syncing"
+            onClick={() => setShowSyncInfo((v) => !v)}
+            title="Click to learn more"
+          >
+            <span className="sync-dot" />
+            syncing
+          </span>
+          <span className="order-product">{productSlug}</span>
+          <span className="order-price">${orderPrice}</span>
+          <span className="order-user">{orderUserId}</span>
+        </div>
+        {showSyncInfo && (
+          <div className="sync-explainer">
+            <strong>View vs. Entity — two layers of state</strong>
+            <p>
+              This row appeared via a <em>CRDT view</em> — the order exists in the
+              replicated <code>orderIndex</code> table. But the actor&rsquo;s
+              authoritative state (status, transitions) comes from <em>Restate</em>,
+              which hasn&rsquo;t delivered it to this client yet.
+            </p>
+            <p>
+              The other browser tab may already show &ldquo;placed&rdquo; because
+              its entity subscription connected first. This is the
+              <strong> eventual consistency</strong> gap between CRDT views and
+              durable entities — the framework resolves it automatically once the
+              entity state arrives.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Normal order row ──────────────────────────────────────────
   return (
     <div className="order-row">
       <div className="order-info">
         <span
           className="status-badge"
-          style={{ background: `${STATUS_COLORS[status]}22`, color: STATUS_COLORS[status] }}
+          style={{ background: `${STATUS_COLORS[status ?? 'draft']}22`, color: STATUS_COLORS[status ?? 'draft'] }}
         >
           {status}
         </span>
@@ -104,12 +151,12 @@ const OrderRow = memo(function OrderRow({
         <span className="order-price">${orderPrice}</span>
         <span className="order-user">{orderUserId}</span>
       </div>
-      {ready && isOwner && nextAction && (
+      {isOwner && nextAction && (
         <button type="button" className="btn btn-sm" onClick={handleAdvance}>
           {nextAction}
         </button>
       )}
-      {ready && isOwner && canCancel && (
+      {isOwner && canCancel && (
         <button type="button" className="btn btn-sm" onClick={handleCancel} style={{ color: '#ef4444' }}>
           cancel
         </button>
