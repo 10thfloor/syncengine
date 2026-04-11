@@ -3,6 +3,7 @@ import { getJetStream, getJetStreamManager } from "./nats-client.js";
 import { RetentionPolicy, StorageType } from "@nats-io/jetstream";
 import { ENTITY_OBJECT_PREFIX } from "../entity-keys.js";
 import { WORKFLOW_OBJECT_PREFIX } from "../workflow.js";
+import { errors, StoreCode, ConnectionCode } from "@syncengine/core";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -88,7 +89,9 @@ async function deleteStreamIfExists(name: string): Promise<void> {
 async function requireActive(ctx: restate.ObjectContext): Promise<WorkspaceState> {
   const state = await ctx.get<WorkspaceState>(Keys.STATE);
   if (!state || state.status !== "active") {
-    throw new restate.TerminalError("Workspace not active");
+    // Wrap in TerminalError (Restate retries non-terminal errors) but carry
+    // the structured category::code into the message so clients can parse it.
+    throw new restate.TerminalError(`[store::${StoreCode.WORKSPACE_NOT_ACTIVE}] Workspace not active`);
   }
   return state;
 }
@@ -423,7 +426,10 @@ export const workspace = restate.object({
       req: { tenantId?: string },
     ): Promise<{ ok: boolean; message: string }> {
       if (process.env.NODE_ENV === "production") {
-        throw new restate.TerminalError("reset is disabled in production");
+        throw new restate.TerminalError(
+          `[store::${StoreCode.RESET_DISABLED}] reset is disabled in production. ` +
+          `Set SYNCENGINE_ALLOW_RESET=1 to enable reset in production.`,
+        );
       }
 
       const workspaceId = ctx.key;
@@ -442,7 +448,10 @@ export const workspace = restate.object({
           }),
         });
         if (!qRes.ok) {
-          throw new Error(`Restate admin query failed: HTTP ${qRes.status}`);
+          throw errors.connection(ConnectionCode.HTTP_ERROR, {
+            message: `Restate admin query failed: HTTP ${qRes.status}`,
+            context: { status: qRes.status },
+          });
         }
 
         const qData = (await qRes.json()) as {

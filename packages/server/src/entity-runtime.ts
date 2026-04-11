@@ -35,6 +35,9 @@ import {
     pickUserState,
     applySourceDeltas,
     EntityError,
+    SyncEngineError,
+    errors,
+    SchemaCode,
     type AnyEntity,
     type EmitInsert,
 } from "@syncengine/core";
@@ -83,12 +86,20 @@ async function runHandler(
     try {
         validated = applyHandler(entity, handlerName, merged, args);
     } catch (err) {
+        // Typed errors carry structured fields; encode them into the
+        // TerminalError message so they survive the Restate wire boundary.
+        // hint/context drop here — clients that need structure must parse
+        // the message format. See docs/.../error-system.md.
+        if (err instanceof SyncEngineError) {
+            throw new restate.TerminalError(`[${err.category}::${err.code}] ${err.message}`);
+        }
+        if (err instanceof EntityError) {
+            throw new restate.TerminalError(`[${err.code}] ${err.message}`);
+        }
+        // applyHandler wraps everything else as UserHandlerError (a
+        // SyncEngineError), so this fallback is defensive only.
         const message = err instanceof Error ? err.message : String(err);
-        // EntityError now propagates directly from applyHandler with its
-        // typed `code` field — no more `(err as any).code` cast.
-        const code = err instanceof EntityError ? err.code : undefined;
-        const fullMessage = code ? `[${code}] ${message}` : message;
-        throw new restate.TerminalError(fullMessage);
+        throw new restate.TerminalError(message);
     }
 
     // Extract emitted table inserts (Symbol key, invisible to JSON)
@@ -256,7 +267,10 @@ function buildHandlerBag(entity: AnyEntity): Record<
  *  and tests that want to inspect the wrapped object directly. */
 export function buildEntityObject(entity: AnyEntity): ReturnType<typeof restate.object> {
     if (!isEntity(entity)) {
-        throw new Error(`buildEntityObject: not an entity definition`);
+        throw errors.schema(SchemaCode.NOT_ENTITY_DEFINITION, {
+            message: `buildEntityObject: not an entity definition`,
+            hint: `Pass a value created by defineEntity().`,
+        });
     }
     return restate.object({
         name: `${ENTITY_OBJECT_PREFIX}${entity.$name}`,
