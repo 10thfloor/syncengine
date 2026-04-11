@@ -206,7 +206,7 @@
         var tabBar = el('div', CLS.tabBar);
         drawerEl.appendChild(tabBar);
 
-        var TABS = ['Data', 'Timeline', 'State', 'Conflicts', 'Actions'];
+        var TABS = ['Data', 'Timeline', 'Conflicts', 'Actions', 'State'];
         TABS.forEach(function (name) {
             var key = name.toLowerCase();
             var tabBtn = el('button', CLS.tab, name);
@@ -628,34 +628,54 @@
         if (!stateEl) return;
         clearChildren(stateEl);
 
+        var wsId = getWorkspaceId();
+
+        // Workspace
+        var wsGroup = el('div', 'se-state-group');
+        wsGroup.appendChild(el('div', CLS.stateGroupLabel, 'Workspace'));
+        addStateRow(wsGroup, 'ID', wsId ? truncate(wsId, 20) : '\u2014', 'The hashed workspace key. Each workspace has its own NATS stream and entity state.');
+        stateEl.appendChild(wsGroup);
+
         // Connection group
         var connGroup = el('div', 'se-state-group');
         connGroup.appendChild(el('div', CLS.stateGroupLabel, 'Connection'));
-        addStateRow(connGroup, 'Status', connStatus);
-        if (peerId) addStateRow(connGroup, 'Peer ID', truncate(peerId, 32));
-        if (serverUrl) addStateRow(connGroup, 'Server', truncate(serverUrl, 40));
-        addStateRow(connGroup, 'Sync phase', syncPhase);
-        if (hlc.ts) addStateRow(connGroup, 'HLC', hlc.ts + '.' + hlc.counter);
+        addStateRow(connGroup, 'Status', connStatus, 'Current NATS connection state. "connected" means live bidirectional sync is active.');
+        if (peerId) addStateRow(connGroup, 'Client ID', truncate(peerId, 32), 'Unique identifier for this browser tab. Used to filter out self-echoed messages.');
+        if (serverUrl) addStateRow(connGroup, 'Gateway', truncate(serverUrl, 40), 'WebSocket gateway URL that bridges this client to the NATS server.');
+        addStateRow(connGroup, 'Sync phase', syncPhase, syncPhase === 'idle' ? 'Waiting for initial data.' : syncPhase === 'replaying' ? 'Catching up on missed messages from the JetStream.' : 'Live \u2014 receiving real-time deltas from all connected clients.');
         stateEl.appendChild(connGroup);
+
+        // Clock
+        if (hlc.ts) {
+            var clockGroup = el('div', 'se-state-group');
+            clockGroup.appendChild(el('div', CLS.stateGroupLabel, 'Hybrid Logical Clock'));
+            addStateRow(clockGroup, 'Timestamp', new Date(hlc.ts).toLocaleTimeString(), 'Wall-clock component. Combined with the counter, this determines write ordering for LWW conflict resolution.');
+            addStateRow(clockGroup, 'Counter', String(hlc.counter), 'Monotonic counter for writes within the same millisecond. Ensures total ordering even under concurrent writes.');
+            stateEl.appendChild(clockGroup);
+        }
 
         // Schema
         var schemaGroup = el('div', 'se-state-group');
         schemaGroup.appendChild(el('div', CLS.stateGroupLabel, 'Schema'));
-        if (schemaInfo.version) addStateRow(schemaGroup, 'Version', 'v' + schemaInfo.version);
-        if (schemaInfo.fingerprint) addStateRow(schemaGroup, 'Fingerprint', truncate(schemaInfo.fingerprint, 16));
+        if (schemaInfo.version) addStateRow(schemaGroup, 'Version', 'v' + schemaInfo.version, 'Schema version number. Incremented when migrations are added. The worker auto-migrates on version mismatch.');
+        if (schemaInfo.fingerprint) addStateRow(schemaGroup, 'Fingerprint', truncate(schemaInfo.fingerprint, 16), 'Hash of table definitions. If this changes (e.g., column added), the local SQLite database is wiped and rebuilt from the server stream.');
         stateEl.appendChild(schemaGroup);
 
-        // Sync
+        // Sync queue
         var syncGroup = el('div', 'se-state-group');
-        syncGroup.appendChild(el('div', CLS.stateGroupLabel, 'Sync'));
-        addStateRow(syncGroup, 'Offline queue', offlineQueue > 0 ? offlineQueue + ' pending' : '0');
+        syncGroup.appendChild(el('div', CLS.stateGroupLabel, 'Outbound Queue'));
+        addStateRow(syncGroup, 'Pending writes', offlineQueue > 0 ? offlineQueue + ' pending' : '0', 'Local mutations waiting to be published to NATS. Non-zero means writes are buffered (e.g., during reconnection).');
         stateEl.appendChild(syncGroup);
     }
 
-    function addStateRow(parent, label, value) {
+    function addStateRow(parent, label, value, hint) {
         var row = el('div', CLS.stateRow);
-        row.appendChild(el('span', CLS.stateLabel, label));
-        row.appendChild(el('span', CLS.stateValue, value));
+        var labelEl = el('span', CLS.stateLabel, label);
+        if (hint) labelEl.title = hint;
+        row.appendChild(labelEl);
+        var valueEl = el('span', CLS.stateValue, value);
+        if (hint) valueEl.title = hint;
+        row.appendChild(valueEl);
         parent.appendChild(row);
     }
 
@@ -708,45 +728,35 @@
         }
     }
 
+    function conflictValue(v) {
+        if (v == null) return '?';
+        var raw = v.value != null ? v.value : v;
+        // Format timestamps
+        if (typeof raw === 'number' && raw > 946684800000) {
+            return new Date(raw).toLocaleTimeString();
+        }
+        return String(raw);
+    }
+
     function buildConflictCard(c, idx) {
         var card = el('div', 'se-conflict-card');
 
-        // Top row: table.field + strategy badge
-        var topRow = el('div', 'se-conflict-top');
-        topRow.appendChild(el('span', 'se-conflict-field', c.table + '.' + c.field));
-        var stratBadge = el('span', 'se-conflict-strategy', strategyLabel(c.strategy));
-        topRow.appendChild(stratBadge);
-        card.appendChild(topRow);
+        // Header line: field path + record + strategy
+        var header = el('div', 'se-conflict-header-row');
 
-        // Record ID
+        var fieldWrap = el('div', 'se-conflict-field-wrap');
+        fieldWrap.appendChild(el('span', 'se-conflict-field', c.table + '.' + c.field));
         if (c.recordId) {
-            var recRow = el('div', 'se-conflict-record');
-            recRow.appendChild(el('span', 'se-conflict-record-label', 'record'));
             var idStr = String(c.recordId);
-            recRow.appendChild(el('span', 'se-conflict-record-id', truncate(idStr, 24)));
-            if (idStr.length > 24) recRow.title = idStr;
-            card.appendChild(recRow);
+            var recEl = el('span', 'se-conflict-record-id', truncate(idStr, 12));
+            if (idStr.length > 12) recEl.title = idStr;
+            fieldWrap.appendChild(recEl);
         }
+        header.appendChild(fieldWrap);
 
-        // Values: winner vs loser
-        var valRow = el('div', 'se-conflict-values');
+        header.appendChild(el('span', 'se-conflict-strategy', strategyLabel(c.strategy)));
 
-        var winnerBox = el('div', 'se-conflict-val se-conflict-winner');
-        winnerBox.appendChild(el('span', 'se-conflict-val-label', 'kept'));
-        winnerBox.appendChild(el('span', 'se-conflict-val-data', String(c.winner != null ? (c.winner.value != null ? c.winner.value : c.winner) : '?')));
-        valRow.appendChild(winnerBox);
-
-        var arrowEl = el('span', 'se-conflict-arrow', '\u2190');
-        valRow.appendChild(arrowEl);
-
-        var loserBox = el('div', 'se-conflict-val se-conflict-loser');
-        loserBox.appendChild(el('span', 'se-conflict-val-label', 'discarded'));
-        loserBox.appendChild(el('span', 'se-conflict-val-data', String(c.loser != null ? (c.loser.value != null ? c.loser.value : c.loser) : '?')));
-        valRow.appendChild(loserBox);
-
-        card.appendChild(valRow);
-
-        // Dismiss button
+        // Dismiss
         var dismissBtn = el('button', 'se-conflict-dismiss', '\u00D7');
         dismissBtn.title = 'Dismiss';
         dismissBtn.addEventListener('click', function (e) {
@@ -755,7 +765,21 @@
             conflicts.splice(idx, 1);
             renderConflicts();
         });
-        card.appendChild(dismissBtn);
+        header.appendChild(dismissBtn);
+        card.appendChild(header);
+
+        // Inline values: kept → discarded
+        var valRow = el('div', 'se-conflict-values');
+
+        var keptVal = el('span', 'se-conflict-kept', conflictValue(c.winner));
+        valRow.appendChild(keptVal);
+
+        valRow.appendChild(el('span', 'se-conflict-arrow', '\u2192'));
+
+        var discVal = el('span', 'se-conflict-discarded', conflictValue(c.loser));
+        valRow.appendChild(discVal);
+
+        card.appendChild(valRow);
 
         return card;
     }

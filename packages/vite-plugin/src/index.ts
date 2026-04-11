@@ -23,10 +23,11 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
 
 import type { Plugin, ViteDevServer } from 'vite';
+import wasm from 'vite-plugin-wasm';
+import topLevelAwait from 'vite-plugin-top-level-await';
 
 import { actorsPlugin, type ActorsPluginOptions } from './actors.ts';
 import { devtoolsPlugin } from './devtools/devtools-plugin.ts';
@@ -82,8 +83,11 @@ export interface SyncenginePluginOptions {
  * concern independently. This stays a single user-facing import:
  * `syncengine()` in vite.config.ts.
  */
-export default function syncengine(opts: SyncenginePluginOptions = {}): Plugin[] {
+export default function syncengine(opts: SyncenginePluginOptions = {}) {
     return [
+        wasmPlugin(),
+        wasm(),
+        topLevelAwait(),
         runtimeConfigPlugin(opts),
         actorsPlugin(opts.actors ?? {}),
         workspacesPlugin(opts.workspaces ?? {}),
@@ -91,12 +95,35 @@ export default function syncengine(opts: SyncenginePluginOptions = {}): Plugin[]
     ];
 }
 
+/**
+ * Injects worker config so WASM + top-level-await work in Web Workers
+ * without the consumer having to configure `worker.plugins` manually.
+ */
+function wasmPlugin(): Plugin {
+    return {
+        name: 'syncengine:wasm',
+        config() {
+            return {
+                worker: {
+                    format: 'es' as const,
+                    plugins: () => [wasm(), topLevelAwait()],
+                },
+            };
+        },
+    };
+}
+
 function runtimeConfigPlugin(opts: SyncenginePluginOptions): Plugin {
     let server: ViteDevServer | null = null;
     let runtimeConfigPath: string | null = null;
+    let viteRoot: string | null = null;
 
     return {
         name: 'syncengine',
+
+        configResolved(config) {
+            viteRoot = config.root;
+        },
 
         // Record the dev server reference so runtime.json changes can
         // invalidate the virtual module.
@@ -104,7 +131,7 @@ function runtimeConfigPlugin(opts: SyncenginePluginOptions): Plugin {
             server = s;
 
             // Resolve and watch the runtime config file.
-            runtimeConfigPath = resolveRuntimeConfigPath(opts.runtimeConfigPath);
+            runtimeConfigPath = resolveRuntimeConfigPath(opts.runtimeConfigPath, viteRoot ?? s.config.root);
             s.watcher.add(runtimeConfigPath);
             s.watcher.on('change', (file) => {
                 if (file !== runtimeConfigPath) return;
@@ -135,7 +162,7 @@ function runtimeConfigPlugin(opts: SyncenginePluginOptions): Plugin {
         // `configureServer` invalidates the module.
         load(id) {
             if (id !== RESOLVED_ID) return null;
-            const configPath = runtimeConfigPath ?? resolveRuntimeConfigPath(opts.runtimeConfigPath);
+            const configPath = runtimeConfigPath ?? resolveRuntimeConfigPath(opts.runtimeConfigPath, viteRoot ?? undefined);
             const config = loadRuntimeConfig(configPath, server !== null);
             return renderRuntimeConfigModule(config);
         },
@@ -145,32 +172,22 @@ function runtimeConfigPlugin(opts: SyncenginePluginOptions): Plugin {
 // ── Path resolution ───────────────────────────────────────────────────────
 
 /**
- * Walk up from the current working directory looking for the repo root
- * marker (`pnpm-workspace.yaml`). Fallback: compute relative to this
- * source file if the walk doesn't find anything (e.g. when the plugin
- * is called from a standalone Vite project without a workspace).
+ * Resolve the path to `.syncengine/dev/runtime.json`.
+ *
+ * Priority:
+ *   1. Explicit override from plugin options
+ *   2. SYNCENGINE_STATE_DIR env var
+ *   3. `<appRoot>/.syncengine/dev/runtime.json` — appRoot is either the
+ *      Vite root (when available) or CWD. This keeps state per-app so
+ *      monorepo users and standalone users both get the right behaviour.
  */
-function resolveRuntimeConfigPath(override: string | undefined): string {
+function resolveRuntimeConfigPath(override: string | undefined, appRoot?: string): string {
     if (override) return resolve(override);
 
     const envOverride = process.env.SYNCENGINE_STATE_DIR;
     if (envOverride) return join(resolve(envOverride), 'runtime.json');
 
-    // Walk up from CWD.
-    let dir = process.cwd();
-    while (true) {
-        if (existsSync(join(dir, 'pnpm-workspace.yaml'))) {
-            return join(dir, '.syncengine', 'dev', 'runtime.json');
-        }
-        const parent = dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-    }
-
-    // Fallback: next to this file (useful if the plugin is installed as a
-    // dep in a repo without the workspace marker).
-    const here = dirname(fileURLToPath(import.meta.url));
-    return resolve(here, '..', '..', '..', '..', '.syncengine', 'dev', 'runtime.json');
+    return join(appRoot ?? process.cwd(), '.syncengine', 'dev', 'runtime.json');
 }
 
 // ── Config loading ────────────────────────────────────────────────────────

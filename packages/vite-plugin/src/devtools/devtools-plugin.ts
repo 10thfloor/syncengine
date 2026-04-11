@@ -215,9 +215,9 @@ export function devtoolsMiddleware(
             for await (const chunk of req) chunks.push(chunk as Buffer);
             const raw = Buffer.concat(chunks).toString('utf8') || '{}';
 
-            let body: { action?: string; streamName?: string; workspaceId?: string };
+            let body: { action?: string; workspaceId?: string };
             try {
-                body = JSON.parse(raw) as { action?: string; streamName?: string };
+                body = JSON.parse(raw) as { action?: string; workspaceId?: string };
             } catch {
                 res.statusCode = 400;
                 res.setHeader('content-type', 'application/json');
@@ -225,13 +225,9 @@ export function devtoolsMiddleware(
                 return;
             }
 
-            const { action, streamName, workspaceId: clientWsId } = body;
+            const { action, workspaceId: clientWsId } = body;
             const runtime = getRuntimeFn();
             const restateUrl = runtime.restateUrl ?? 'http://localhost:8080';
-            const natsUrl = runtime.natsUrl ?? 'ws://localhost:9222';
-
-            // Convert ws:// → nats:// for the node transport
-            const natsServerUrl = natsUrl.replace(/^ws:\/\//, 'nats://').replace(/^wss:\/\//, 'nats://');
 
             // Prefer workspace ID from client (read from <meta> tag), fall back to NATS heuristic
             const resolvedWsId = clientWsId || await resolveWorkspaceIdFromNats() || 'default';
@@ -242,63 +238,21 @@ export function devtoolsMiddleware(
                 switch (action) {
                     case 'force-reconnect':
                     case 'clear-client-db':
+                        // These are client-side only — handled by the
+                        // devtools BroadcastChannel, never reach here.
                         result = { ok: true, message: 'client-only' };
                         break;
 
-                    case 'purge-stream': {
-                        const targetStream = streamName ?? await (async () => {
-                            const streams = await fetchNatsStreams();
-                            return streams[0]?.name ?? null;
-                        })();
-
-                        if (!targetStream) {
-                            result = { ok: false, message: 'no stream found to purge' };
-                            break;
-                        }
-
-                        const { connect } = await import('@nats-io/transport-node');
-                        const { jetstreamManager } = await import('@nats-io/jetstream');
-                        const nc = await connect({ servers: natsServerUrl });
-                        try {
-                            const jsm = await jetstreamManager(nc);
-                            await jsm.streams.purge(targetStream);
-                            result = { ok: true, message: `purged stream ${targetStream}` };
-                        } finally {
-                            await nc.close();
-                        }
-                        break;
-                    }
-
-                    case 'trigger-gc': {
-                        const wsId = resolvedWsId;
-                        await restatePost(
-                            restateUrl,
-                            `workspace/${encodeURIComponent(wsId)}/triggerGC`,
-                            null,
-                        );
-                        result = { ok: true, message: `triggered GC for workspace ${wsId}` };
-                        break;
-                    }
-
-                    case 'teardown': {
-                        const wsId = resolvedWsId;
-                        await restatePost(
-                            restateUrl,
-                            `workspace/${encodeURIComponent(wsId)}/teardown`,
-                            null,
-                        );
-                        result = { ok: true, message: `teardown workspace ${wsId}` };
-                        break;
-                    }
-
                     case 'reset': {
+                        // Single Restate call: workspace/reset handles
+                        // stream deletion, entity state clearing,
+                        // re-provisioning, and publishing sys.reset
+                        // via NATS so all connected clients clear
+                        // their local data and reload.
                         const wsId = resolvedWsId;
                         const base = restateUrl.replace(/\/+$/, '');
                         const wsEnc = encodeURIComponent(wsId);
 
-                        // Single Restate call: workspace/reset handles stream
-                        // deletion, entity state clearing, and re-provisioning
-                        // server-side — no N+1 HTTP round trips from here.
                         const resetResult = await restatePost(
                             base,
                             `workspace/${wsEnc}/reset`,
