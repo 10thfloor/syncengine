@@ -33,8 +33,22 @@ import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './
 // ── EntityError ──────────────────────────────────────────────────────────────
 
 /**
- * Typed error for entity handler failures. The `code` field lets UI
- * distinguish recoverable errors (validation, guard) from fatal ones.
+ * Public user-facing error class for DOMAIN errors thrown from entity
+ * handlers. Modeled on Meteor.Error:
+ *
+ *     if (state.stock <= 0) {
+ *         throw new EntityError('OUT_OF_STOCK', 'No stock available');
+ *     }
+ *
+ * `applyHandler` propagates EntityError unchanged so callers can
+ * pattern-match on `.code` to distinguish domain failures from framework
+ * failures.
+ *
+ * ⚠️  ORTHOGONAL to the platform error system (`SyncEngineError`,
+ * `errors.*`, code registries). The platform system is a framework →
+ * developer diagnostic — "this is what syncengine broke". EntityError is
+ * a user → user contract — "this is what my app's domain rejected". Keep
+ * them separate.
  */
 export class EntityError extends Error {
     readonly code: string;

@@ -33,17 +33,6 @@ async function softFetch(url: string, init?: RequestInit): Promise<Response | nu
 
 // ── Stack reachability ────────────────────────────────────────────────────
 
-export class StackNotRunningError extends Error {
-    constructor(detail: string) {
-        super(
-            `No syncengine dev stack is running.\n` +
-            `  ${detail}\n\n` +
-            `Start one with: \x1b[1mpnpm dev\x1b[0m`,
-        );
-        this.name = 'StackNotRunningError';
-    }
-}
-
 export async function requireStackRunning(ports: Ports): Promise<void> {
     if (await restateHealth(ports)) return;
     throw errors.cli(CliCode.STACK_NOT_RUNNING, {
