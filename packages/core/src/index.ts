@@ -15,6 +15,7 @@ export {
     extractMergeConfig,
     isTable,
     isView,
+    GLOBAL_AGG_KEY,
 } from './schema';
 export type {
     Table,
@@ -77,6 +78,8 @@ export {
     pickUserState,
     applySourceDeltas,
     EntityError,
+    getTerminalStates,
+    getTransitionGraph,
 } from './entity';
 
 // ── Project config (PLAN Phase 8 — workspace resolution) ─────────────────
@@ -89,9 +92,12 @@ export type {
 } from './config';
 export type {
     EmitInsert,
+    TypedEmitInsert,
+    LegacyEmitInsert,
     SourceProjectionDef,
     SourceProjections,
     SourceState,
+    TransitionMap,
     EntityDef,
     AnyEntity,
     EntityState,

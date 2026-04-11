@@ -44,6 +44,13 @@ export class EntityError extends Error {
     }
 }
 
+// ── Transition map ──────────────────────────────────────────────────────────
+
+/** Transition adjacency map: from-state → allowed to-states.
+ *  Terminal states have empty arrays. Used by the framework to
+ *  auto-guard handler results — no manual guardTransition() needed. */
+export type TransitionMap = Record<string, readonly string[]>;
+
 // ── State shape ─────────────────────────────────────────────────────────────
 
 /** Map from state field name to its `ColumnDef`. Reuses the schema DSL so
@@ -112,6 +119,11 @@ export interface EntityDef<
   readonly $source: SourceProjections;
   /** Initial projection values (sum/count → 0, min → Infinity, etc.) */
   readonly $sourceInitial: Record<string, number>;
+  /** Transition adjacency map: from-state → allowed to-states.
+   *  null if no transitions declared on this entity. */
+  readonly $transitions: TransitionMap | null;
+  /** The state field governed by `$transitions`. null if no transitions. */
+  readonly $statusField: string | null;
   /** Phantom field carrying the inferred state record type for callers
    *  that want `EntityRecord<typeof cart>` without re-deriving it. */
   readonly $record: EntityState<TShape>;
@@ -266,6 +278,7 @@ export function entity<
   config: {
     readonly state: TShape;
     readonly source?: TSourceDef;
+    readonly transitions?: Record<string, readonly string[]>;
     readonly handlers: THandlers;
   },
 ): EntityDef<TName, TShape, THandlers, Extract<keyof TSourceDef, string>> {
@@ -331,6 +344,60 @@ export function entity<
     }
   }
 
+  // ── Transition map validation ────────────────────────────────────────────
+  const transitions: TransitionMap | null = config.transitions ?? null;
+  let statusField: string | null = null;
+
+  if (transitions) {
+    // Collect every value mentioned in the map (keys + targets).
+    const allValues = new Set(Object.keys(transitions));
+    for (const targets of Object.values(transitions)) {
+      for (const t of targets) allValues.add(t);
+    }
+
+    // Find the state field whose enum is a superset of allValues.
+    const candidates: string[] = [];
+    for (const [fieldName, col] of Object.entries(config.state)) {
+      if (!col.enum) continue;
+      const enumSet = new Set(col.enum as string[]);
+      if ([...allValues].every((v) => enumSet.has(v))) {
+        candidates.push(fieldName);
+      }
+    }
+
+    if (candidates.length === 0) {
+      throw new Error(
+        `defineEntity('${name}'): transitions values don't match any state ` +
+          `field's enum. Ensure a state field has an enum containing all ` +
+          `transition states.`,
+      );
+    }
+    if (candidates.length > 1) {
+      throw new Error(
+        `defineEntity('${name}'): transitions map is ambiguous — matches ` +
+          `state fields: ${candidates.join(", ")}. Use distinct enums.`,
+      );
+    }
+    statusField = candidates[0]!;
+
+    // Every enum value must appear as a key (exhaustive).
+    const col = config.state[statusField]!;
+    const enumValues = col.enum as readonly string[];
+    for (const ev of enumValues) {
+      if (!(ev in transitions)) {
+        throw new Error(
+          `defineEntity('${name}'): transitions map is missing state ` +
+            `'${ev}'. All enum values of '${statusField}' must be listed ` +
+            `(use an empty array for terminal states).`,
+        );
+      }
+    }
+
+    // Target validation is not needed here — the detection step already
+    // ensures every value in the transitions map (keys + targets) is in
+    // the enum, since we only match fields whose enum ⊇ allValues.
+  }
+
   return {
     $tag: "entity",
     $name: name,
@@ -339,6 +406,8 @@ export function entity<
     $initialState: buildInitialState(config.state),
     $source: source,
     $sourceInitial: buildSourceInitial(source),
+    $transitions: transitions,
+    $statusField: statusField,
     $record: undefined as never,
     $sourceKeys: undefined as never,
   };
@@ -379,10 +448,49 @@ export function isEntity(x: unknown): x is AnyEntity {
  *  handler's return value. Non-enumerable, invisible to JSON.stringify. */
 export const EMIT_KEY: unique symbol = Symbol.for("syncengine.emit");
 
-/** A table row to publish as an INSERT delta. */
+/** A table row to publish as an INSERT delta (runtime representation —
+ *  always carries the table name as a string). */
 export interface EmitInsert {
   readonly table: string;
   readonly record: Record<string, unknown>;
+}
+
+/** Helper: for each field in a table's record, make it optional and
+ *  widen string columns to accept any `string` (including the `'$key'`
+ *  placeholder the entity runtime resolves at publish time). Enum
+ *  strictness is intentionally relaxed — handler params are typically
+ *  plain `string`, and the real value of this type is catching wrong
+ *  field names and kind mismatches (string vs number). */
+type EmitRecord<TCols extends Record<string, ColumnDef<unknown>>> = {
+  [K in keyof InferRecord<TCols>]?:
+    InferRecord<TCols>[K] extends string
+      ? string
+      : InferRecord<TCols>[K];
+};
+
+/** A typed emit insert — validates the record shape against the target
+ *  table's columns at compile time. */
+export interface TypedEmitInsert<T extends AnyTable> {
+  readonly table: T;
+  readonly record: EmitRecord<T['$columns']>;
+}
+
+/** @deprecated Use table references instead of string table names.
+ *  Will be removed in a future major version. */
+export interface LegacyEmitInsert {
+  readonly table: string;
+  readonly record: Record<string, unknown>;
+}
+
+/** Normalize a typed or legacy emit insert to the runtime form. */
+function normalizeInsert(insert: TypedEmitInsert<AnyTable> | LegacyEmitInsert): EmitInsert {
+  if (typeof insert.table === 'string') {
+    return insert as EmitInsert;
+  }
+  return {
+    table: (insert.table as AnyTable).$name,
+    record: insert.record as Record<string, unknown>,
+  };
 }
 
 /**
@@ -391,27 +499,42 @@ export interface EmitInsert {
  * the new state — it just has a hidden Symbol property the framework
  * reads.
  *
+ * All inserts in a single `emit()` call must target the same table
+ * (the `T` generic is shared across the rest parameter). For
+ * multi-table emits, use separate `emit()` calls or the legacy
+ * string-based form.
+ *
  * ```ts
  * handlers: {
  *   transfer: (state, toId, amount) => emit(
  *     { ...state, balance: state.balance - amount },
- *     { table: 'transactions', record: { to: toId, amount } },
+ *     { table: transactions, record: { to: toId, amount } },
  *   ),
  * }
  * ```
  */
+export function emit<S extends Record<string, unknown>, T extends AnyTable>(
+  state: S,
+  ...inserts: TypedEmitInsert<T>[]
+): S;
+/** @deprecated Use table references instead of string table names. */
 export function emit<S extends Record<string, unknown>>(
   state: S,
-  ...inserts: EmitInsert[]
+  ...inserts: LegacyEmitInsert[]
+): S;
+export function emit<S extends Record<string, unknown>>(
+  state: S,
+  ...inserts: (TypedEmitInsert<AnyTable> | LegacyEmitInsert)[]
 ): S {
   const wrapped = { ...state };
+  const normalized = inserts.map(normalizeInsert);
   // Non-enumerable: the symbol must NOT survive `{ ...base, ...result }`
   // spreading in `applyHandler`, otherwise stale emits bleed through to
   // the next action during client-side `rebase`. `applyHandler` extracts
   // emits from the raw handler result BEFORE the spread and re-attaches
   // them to the validated output. JSON.stringify ignores all Symbols.
   Object.defineProperty(wrapped, EMIT_KEY, {
-    value: inserts,
+    value: normalized,
     enumerable: false,
     configurable: true,
   });
@@ -651,27 +774,25 @@ export function applyHandler(
 
   let next: Record<string, unknown>;
   let emits: EmitInsert[] | undefined;
+  let rawResult: Record<string, unknown> | undefined;
   try {
     const result = handlerFn(base, ...args);
+    rawResult = result as Record<string, unknown>;
     // Capture emit()ed inserts before the spread (they survive the
     // spread since EMIT_KEY is enumerable, but validateEntityState
     // builds a fresh object that drops them).
-    emits = extractEmits(result as Record<string, unknown>);
+    emits = extractEmits(rawResult);
     // Allow handlers to return a partial state — merge into the current
     // record. Returning the full state also works (the spread is a no-op).
     next = { ...base, ...result };
   } catch (err) {
+    // EntityErrors propagate directly — the typed `code` field is
+    // accessible via `instanceof EntityError` without casts.
+    if (err instanceof EntityError) throw err;
     const message = err instanceof Error ? err.message : String(err);
-    // Preserve EntityError code through the re-wrap so the server can
-    // include it in the TerminalError and the client can distinguish
-    // error categories.
-    const wrapped = new Error(
+    throw new Error(
       `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
     );
-    if (err instanceof EntityError) {
-      (wrapped as any).code = err.code;
-    }
-    throw wrapped;
   }
 
   // Validate declared state fields but preserve extra fields (e.g.,
@@ -689,6 +810,28 @@ export function applyHandler(
   for (const k of Object.keys(next)) {
     if (!(k in entity.$state) && !(k in validated)) {
       validated[k] = next[k];
+    }
+  }
+
+  // ── Transition guard ─────────────────────────────────────────────────
+  // If the entity declares transitions and the handler's return value
+  // includes the status field, verify the transition is allowed. Partial
+  // returns that omit the status field skip the guard, so handlers that
+  // mutate only non-status fields are unconstrained by the transition map.
+  // Self-transitions (same value) are also checked — terminal states
+  // reject all handler calls that touch the status field.
+  if (entity.$transitions && entity.$statusField && rawResult) {
+    const field = entity.$statusField;
+    if (field in rawResult) {
+      const oldStatus = base[field] as string;
+      const newStatus = validated[field] as string;
+      const allowed = entity.$transitions[oldStatus];
+      if (!allowed || !(allowed as readonly string[]).includes(newStatus)) {
+        throw new EntityError(
+          "INVALID_TRANSITION",
+          `Cannot transition '${field}' from '${oldStatus}' to '${newStatus}'`,
+        );
+      }
     }
   }
 
@@ -777,3 +920,36 @@ export function rebase(
  *  argument types — those are erased at this layer. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyEntity = EntityDef<string, EntityStateShape, any, any>;
+
+// ── Transition introspection ──────────────────────────────────────────────
+
+/** Return the terminal states (states with no outgoing transitions).
+ *  Returns an empty array if the entity has no transitions declared. */
+export function getTerminalStates(entity: AnyEntity): readonly string[] {
+  if (!entity.$transitions) return [];
+  return Object.entries(entity.$transitions)
+    .filter(([, targets]) => targets.length === 0)
+    .map(([state]) => state);
+}
+
+/** Return the full transition graph for devtools / visualization.
+ *  Returns null if the entity has no transitions declared. */
+export function getTransitionGraph(entity: AnyEntity): {
+  readonly field: string;
+  readonly states: readonly string[];
+  readonly transitions: TransitionMap;
+  readonly terminal: readonly string[];
+  readonly initial: string;
+} | null {
+  if (!entity.$transitions || !entity.$statusField) return null;
+  const terminal = Object.entries(entity.$transitions)
+    .filter(([, targets]) => targets.length === 0)
+    .map(([state]) => state);
+  return {
+    field: entity.$statusField,
+    states: Object.keys(entity.$transitions),
+    transitions: entity.$transitions,
+    terminal,
+    initial: entity.$initialState[entity.$statusField] as string,
+  };
+}

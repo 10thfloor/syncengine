@@ -36,30 +36,10 @@
 //     OrdersTab uses `useView({ allOrders })` to list orders, then each
 //     row opens its own `useEntity` subscription for live status updates.
 
-import { entity, integer, real, text, emit, EntityError } from '@syncengine/core';
+import { entity, integer, real, text, emit } from '@syncengine/core';
+import { orderIndex } from '../schema';
 
 const STATUSES = ['draft', 'placed', 'packed', 'shipped', 'delivered', 'cancelled'] as const;
-
-// Allowed transitions — the adjacency list for the state machine.
-// Terminal states (delivered, cancelled) have empty arrays.
-const TRANSITIONS: Record<string, string[]> = {
-  draft:     ['placed', 'cancelled'],
-  placed:    ['packed', 'cancelled'],
-  packed:    ['shipped'],
-  shipped:   ['delivered'],
-  delivered: [],
-  cancelled: [],
-};
-
-// Guard function shared by every handler. Throws on illegal transitions,
-// which surfaces as an error both locally (optimistic throw) and on the
-// server (Restate handler rejection).
-function guardTransition(current: string, next: string): void {
-  const allowed = TRANSITIONS[current];
-  if (!allowed || !allowed.includes(next)) {
-    throw new EntityError('INVALID_TRANSITION', `Cannot transition from '${current}' to '${next}'`);
-  }
-}
 
 export const order = entity('order', {
   state: {
@@ -69,12 +49,19 @@ export const order = entity('order', {
     price: real(),
     createdAt: integer(),
   },
+  transitions: {
+    draft:     ['placed', 'cancelled'],
+    placed:    ['packed', 'cancelled'],
+    packed:    ['shipped'],
+    shipped:   ['delivered'],
+    delivered: [],
+    cancelled: [],
+  },
   handlers: {
     // ── place: called via RPC from CheckoutTab (saga step 2) ────────
     // Emits a row into `orderIndex` so the order appears in the
     // allOrders view. '$key' resolves to the entity key (order UUID).
     place(state, userId: string, productSlug: string, price: number, now: number) {
-      guardTransition(state.status, 'placed');
       return emit(
         {
           ...state,
@@ -85,7 +72,7 @@ export const order = entity('order', {
           createdAt: now,
         },
         {
-          table: 'orderIndex',
+          table: orderIndex,
           record: {
             orderId: '$key',
             productSlug,
@@ -103,22 +90,18 @@ export const order = entity('order', {
     // to the next available action via NEXT_ACTION below.
 
     pack(state) {
-      guardTransition(state.status, 'packed');
       return { ...state, status: 'packed' as const };
     },
 
     ship(state) {
-      guardTransition(state.status, 'shipped');
       return { ...state, status: 'shipped' as const };
     },
 
     deliver(state) {
-      guardTransition(state.status, 'delivered');
       return { ...state, status: 'delivered' as const };
     },
 
     cancel(state) {
-      guardTransition(state.status, 'cancelled');
       return { ...state, status: 'cancelled' as const };
     },
   },

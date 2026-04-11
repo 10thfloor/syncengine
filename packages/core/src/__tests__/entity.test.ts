@@ -5,6 +5,9 @@ import {
     validateEntityState,
     applyHandler,
     rebase,
+    EntityError,
+    getTerminalStates,
+    getTransitionGraph,
     type EntityRecord,
     type EntityHandlers,
 } from '../entity';
@@ -300,6 +303,28 @@ describe('defineEntity (Phase 4)', () => {
             );
         });
 
+        it('propagates EntityError directly with typed code', () => {
+            const guard = defineEntity('guard', {
+                state: { status: text() },
+                handlers: {
+                    advance(state) {
+                        if (state.status === 'done') {
+                            throw new EntityError('INVALID_TRANSITION', 'already done');
+                        }
+                        return { status: 'done' };
+                    },
+                },
+            });
+            try {
+                applyHandler(guard, 'advance', { status: 'done' }, []);
+                expect.unreachable('should have thrown');
+            } catch (e) {
+                expect(e).toBeInstanceOf(EntityError);
+                // .code is accessible without any cast — that's the point
+                expect((e as EntityError).code).toBe('INVALID_TRANSITION');
+            }
+        });
+
         it('rejects handler outputs that fail state validation', () => {
             expect(() => applyHandler(counter, 'bad', { value: 0 }, [])).toThrow(
                 /column 'value' expects number/,
@@ -407,6 +432,175 @@ describe('defineEntity (Phase 4)', () => {
                 { id: 1, handlerName: 'addItem', args: [3] },
             ]);
             expect(result.state).toEqual({ items: 3, total: 100 });
+        });
+    });
+
+    // ── Transitions (first-class state machine) ────────────────────────────
+    describe('transitions', () => {
+        const PHASES = ['idle', 'running', 'done', 'failed'] as const;
+        const machine = defineEntity('machine', {
+            state: {
+                phase: text({ enum: PHASES }),
+                count: integer(),
+            },
+            transitions: {
+                idle:    ['running'],
+                running: ['done', 'failed'],
+                done:    [],
+                failed:  ['idle'],
+            },
+            handlers: {
+                start(state)  { return { ...state, phase: 'running' as const }; },
+                finish(state) { return { ...state, phase: 'done' as const }; },
+                fail(state)   { return { ...state, phase: 'failed' as const }; },
+                retry(state)  { return { ...state, phase: 'idle' as const, count: state.count + 1 }; },
+                bumpCount(state) { return { count: state.count + 1 }; },
+            },
+        });
+
+        it('stores $transitions and $statusField on the def', () => {
+            expect(machine.$transitions).toEqual({
+                idle:    ['running'],
+                running: ['done', 'failed'],
+                done:    [],
+                failed:  ['idle'],
+            });
+            expect(machine.$statusField).toBe('phase');
+        });
+
+        it('allows valid transitions via applyHandler', () => {
+            const r1 = applyHandler(machine, 'start', null, []);
+            expect(r1.phase).toBe('running');
+
+            const r2 = applyHandler(machine, 'finish', r1, []);
+            expect(r2.phase).toBe('done');
+        });
+
+        it('allows partial-return handlers that omit the status field', () => {
+            const r = applyHandler(machine, 'bumpCount', { phase: 'idle', count: 0 }, []);
+            expect(r.phase).toBe('idle');
+            expect(r.count).toBe(1);
+        });
+
+        it('allows partial-return handlers on terminal states', () => {
+            // done is terminal, but bumpCount doesn't touch 'phase'
+            const r = applyHandler(machine, 'bumpCount', { phase: 'done', count: 5 }, []);
+            expect(r.phase).toBe('done');
+            expect(r.count).toBe(6);
+        });
+
+        it('rejects invalid transitions with EntityError INVALID_TRANSITION', () => {
+            // idle -> done is not allowed (must go through running)
+            try {
+                applyHandler(machine, 'finish', { phase: 'idle', count: 0 }, []);
+                expect.unreachable('should have thrown');
+            } catch (e) {
+                expect(e).toBeInstanceOf(EntityError);
+                expect((e as EntityError).code).toBe('INVALID_TRANSITION');
+                expect((e as EntityError).message).toContain("'idle'");
+                expect((e as EntityError).message).toContain("'done'");
+            }
+        });
+
+        it('rejects transitions from terminal states', () => {
+            expect(() =>
+                applyHandler(machine, 'start', { phase: 'done', count: 0 }, []),
+            ).toThrow(EntityError);
+        });
+
+        it('allows retry from failed (non-terminal) back to idle', () => {
+            const r = applyHandler(machine, 'retry', { phase: 'failed', count: 2 }, []);
+            expect(r.phase).toBe('idle');
+            expect(r.count).toBe(3);
+        });
+
+        it('entities without transitions still work unchanged', () => {
+            const simple = defineEntity('simple', {
+                state: { value: integer() },
+                handlers: {
+                    bump(state) { return { value: state.value + 1 }; },
+                },
+            });
+            expect(simple.$transitions).toBeNull();
+            expect(simple.$statusField).toBeNull();
+            expect(applyHandler(simple, 'bump', null, [])).toEqual({ value: 1 });
+        });
+
+        it('getTerminalStates returns states with empty target arrays', () => {
+            expect(getTerminalStates(machine)).toEqual(['done']);
+        });
+
+        it('getTerminalStates returns [] for entities without transitions', () => {
+            const simple = defineEntity('simple2', {
+                state: { v: integer() },
+                handlers: {},
+            });
+            expect(getTerminalStates(simple)).toEqual([]);
+        });
+
+        it('getTransitionGraph returns full graph for devtools', () => {
+            const graph = getTransitionGraph(machine);
+            expect(graph).not.toBeNull();
+            expect(graph!.field).toBe('phase');
+            expect(graph!.states).toEqual(['idle', 'running', 'done', 'failed']);
+            expect(graph!.terminal).toEqual(['done']);
+            expect(graph!.initial).toBe('idle');
+            expect(graph!.transitions).toBe(machine.$transitions);
+        });
+
+        it('getTransitionGraph returns null for entities without transitions', () => {
+            const simple = defineEntity('simple3', {
+                state: { v: integer() },
+                handlers: {},
+            });
+            expect(getTransitionGraph(simple)).toBeNull();
+        });
+    });
+
+    describe('transitions construction guards', () => {
+        it('rejects transitions that don\'t match any enum field', () => {
+            expect(() =>
+                defineEntity('bad', {
+                    state: { name: text() },
+                    transitions: { a: ['b'], b: [] },
+                    handlers: {},
+                }),
+            ).toThrow(/don't match any state field's enum/);
+        });
+
+        it('rejects non-exhaustive transitions (missing enum value)', () => {
+            const S = ['a', 'b', 'c'] as const;
+            expect(() =>
+                defineEntity('bad2', {
+                    state: { s: text({ enum: S }) },
+                    transitions: { a: ['b'], b: [] },  // missing 'c'
+                    handlers: {},
+                }),
+            ).toThrow(/missing state 'c'/);
+        });
+
+        it('rejects target values not in the enum', () => {
+            const S = ['a', 'b'] as const;
+            expect(() =>
+                defineEntity('bad3', {
+                    state: { s: text({ enum: S }) },
+                    transitions: { a: ['b', 'x'], b: [] },
+                    handlers: {},
+                }),
+            ).toThrow(/don't match any state field's enum/);
+        });
+
+        it('auto-detects the status field from enum match', () => {
+            const MODES = ['on', 'off'] as const;
+            const toggle = defineEntity('toggle', {
+                state: {
+                    label: text(),           // no enum
+                    mode: text({ enum: MODES }),
+                },
+                transitions: { on: ['off'], off: ['on'] },
+                handlers: {},
+            });
+            expect(toggle.$statusField).toBe('mode');
         });
     });
 });
