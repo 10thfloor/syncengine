@@ -797,6 +797,12 @@
                     if (typeof ch === 'string' && !channelSeqs[ch]) channelSeqs[ch] = 0;
                 });
             }
+            // Auto-refresh selected table/view data while drawer is open
+            if (drawerOpen && activeTab === 'data' && selectedTable) {
+                var isView = selectedTable.indexOf('view:') === 0;
+                var key = isView ? selectedTable.replace(/^view:/, '') : selectedTable;
+                requestRows(key, isView);
+            }
             render();
         }
 

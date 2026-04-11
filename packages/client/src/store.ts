@@ -139,7 +139,7 @@ export interface StoreConfig<
     TChannels extends readonly ChannelConfig[] = readonly ChannelConfig[],
 > {
     readonly tables: TTables;
-    readonly views: readonly ViewBuilder<unknown>[];
+    readonly views: readonly ViewBuilder<unknown>[] | Record<string, ViewBuilder<unknown>>;
     readonly channels?: TChannels;
     readonly seed?: SeedMap<TTables>;
     readonly schemaVersion?: number;
@@ -282,8 +282,11 @@ export function validateStoreConfig(config: StoreConfig): void {
 
     // 3. No duplicate view ids (internal catch; view ids are auto-generated
     //    so this should only fire on programmer error).
+    const viewsForValidation: readonly ViewBuilder<unknown>[] = Array.isArray(config.views)
+        ? config.views
+        : Object.values(config.views);
     const viewIds = new Set<string>();
-    for (const v of config.views) {
+    for (const v of viewsForValidation) {
         if (viewIds.has(v.$id)) {
             throw new Error(`Duplicate view id: '${v.$id}' (internal bug, please report).`);
         }
@@ -292,7 +295,7 @@ export function validateStoreConfig(config: StoreConfig): void {
 
     // 4. Every view must reference a known table (via its primary table and
     //    any tables joined in the pipeline).
-    for (const v of config.views) {
+    for (const v of viewsForValidation) {
         for (const tableName of v.$sourceTables) {
             if (!tableNames.has(tableName)) {
                 throw new Error(
@@ -379,11 +382,19 @@ export function store<
         channels: allChannels,
     };
 
-    // Map each config view's $id → a stable display name the worker uses
-    // for VIEW_UPDATE messages. We pre-assign them from $id directly since
-    // those are already unique per view() call.
+    // Normalize views: accept object (named) or array (auto-named).
+    // Named views use the object key as the display name sent to the worker;
+    // array views fall back to the opaque $id.
+    const viewNameMap = new Map<string, string>(); // $id → display name
+    const viewsArray: readonly ViewBuilder<unknown>[] = Array.isArray(config.views)
+        ? config.views
+        : Object.entries(config.views).map(([name, v]) => {
+            viewNameMap.set(v.$id, name);
+            return v;
+        });
+
     const viewsById = new Map<string, ViewBuilder<unknown>>();
-    for (const v of config.views) viewsById.set(v.$id, v);
+    for (const v of viewsArray) viewsById.set(v.$id, v);
 
     const schemaPayload: InitMessage['schema'] = {
         tables: config.tables.map((t) => ({
@@ -392,8 +403,8 @@ export function store<
             insertSql: tableToInsertSQL(t),
             columns: Object.keys(t.$columns),
         })),
-        views: config.views.map((v) => ({
-            name: v.$id,
+        views: viewsArray.map((v) => ({
+            name: viewNameMap.get(v.$id) ?? v.$id,
             tableName: v.$tableName,
             source_table: v.$tableName,
             id_key: v.$idKey,
