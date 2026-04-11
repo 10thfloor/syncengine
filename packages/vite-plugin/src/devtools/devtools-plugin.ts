@@ -62,19 +62,24 @@ async function fetchNatsStreams(): Promise<NatsStreamInfo[]> {
         const res = await fetch('http://127.0.0.1:8222/jsz?streams=true');
         if (!res.ok) return [];
         const data = (await res.json()) as {
-            streams?: Array<{
-                name: string;
-                state?: {
-                    messages?: number;
-                    bytes?: number;
-                    first_seq?: number;
-                    last_seq?: number;
-                    consumer_count?: number;
-                };
+            account_details?: Array<{
+                stream_detail?: Array<{
+                    name: string;
+                    state?: {
+                        messages?: number;
+                        bytes?: number;
+                        first_seq?: number;
+                        last_seq?: number;
+                        consumer_count?: number;
+                    };
+                }>;
             }>;
         };
-        const streams = data.streams ?? [];
-        return streams
+        // Stream data lives in account_details[].stream_detail[], not at top level
+        const allStreams = (data.account_details ?? []).flatMap(
+            (a) => a.stream_detail ?? [],
+        );
+        return allStreams
             .filter((s) => s.name.startsWith('WS_'))
             .map((s) => ({
                 name: s.name,
@@ -93,7 +98,10 @@ async function fetchNatsStreams(): Promise<NatsStreamInfo[]> {
 async function resolveWorkspaceIdFromNats(): Promise<string | null> {
     const streams = await fetchNatsStreams();
     if (streams.length === 0) return null;
-    return streams[0]!.name.replace(/^WS_/, '');
+    // Pick the stream with the most messages (the active workspace),
+    // not just the first one — there may be stale empty streams.
+    const sorted = [...streams].sort((a, b) => b.messages - a.messages);
+    return sorted[0]!.name.replace(/^WS_/, '');
 }
 
 // ── Restate helpers ───────────────────────────────────────────────────────────
