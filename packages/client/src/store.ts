@@ -402,6 +402,10 @@ export function store<
             return v;
         });
 
+    // Reverse map: display name → $id (used to translate VIEW_UPDATE names back to $id keys)
+    const viewDisplayToId = new Map<string, string>();
+    for (const [id, name] of viewNameMap) viewDisplayToId.set(name, id);
+
     const viewsById = new Map<string, ViewBuilder<unknown>>();
     for (const v of viewsArray) viewsById.set(v.$id, v);
 
@@ -579,7 +583,7 @@ export function store<
                         }
                         pendingViewClear = false;
                     }
-                    applyDeltas(msg.viewName, msg.deltas);
+                    applyDeltas(viewDisplayToId.get(msg.viewName) ?? msg.viewName, msg.deltas);
                     break;
 
                 case 'UNDO_SIZE':
@@ -627,12 +631,16 @@ export function store<
                     } else {
                         // Non-empty FULL_SYNC (e.g., user RESET with snapshot):
                         // apply immediately.
-                        for (const [viewId, records] of Object.entries(msg.snapshots)) {
-                            viewSnapshots.set(viewId, records);
-                            notifyView(viewId);
+                        for (const [name, records] of Object.entries(msg.snapshots)) {
+                            const vid = viewDisplayToId.get(name) ?? name;
+                            viewSnapshots.set(vid, records);
+                            notifyView(vid);
                         }
+                        const snapshotIds = new Set(
+                            Object.keys(msg.snapshots).map((n) => viewDisplayToId.get(n) ?? n),
+                        );
                         for (const viewId of viewSnapshots.keys()) {
-                            if (!(viewId in msg.snapshots)) {
+                            if (!snapshotIds.has(viewId)) {
                                 viewSnapshots.set(viewId, []);
                                 notifyView(viewId);
                             }
