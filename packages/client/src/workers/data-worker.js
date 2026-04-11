@@ -245,17 +245,24 @@ function handleDevtoolsAction(action) {
                 nats.conn.close().catch(() => { /* ignore */ });
             }
         } else if (action === 'clear-client-db') {
-            // Close DB to release OPFS lock, then delete the file.
-            // The page reload (1.5s later) creates a fresh worker + DB.
+            // Close DB to release OPFS lock, delete OPFS files, then
+            // signal completion so the devtools client can safely reload.
             try { if (db) { db.close(); db = null; } } catch { /* */ }
-            if (typeof navigator !== 'undefined' && navigator.storage) {
-                navigator.storage.getDirectory().then(async (root) => {
-                    for await (const [name] of root.entries()) {
-                        await root.removeEntry(name, { recursive: true }).catch(() => {});
+            (async () => {
+                try {
+                    if (typeof navigator !== 'undefined' && navigator.storage) {
+                        const root = await navigator.storage.getDirectory();
+                        for await (const [name] of root.entries()) {
+                            await root.removeEntry(name, { recursive: true }).catch(() => {});
+                        }
                     }
-                    console.log('[devtools] OPFS cleared');
-                }).catch(() => {});
-            }
+                } catch { /* */ }
+                console.log('[devtools] OPFS cleared');
+                // Signal completion back via BroadcastChannel
+                if (devtoolsChannel) {
+                    try { devtoolsChannel.postMessage({ type: 'devtools-db-cleared' }); } catch { /* */ }
+                }
+            })();
         }
     } catch (e) {
         console.warn('[devtools] action error:', e);

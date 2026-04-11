@@ -779,9 +779,20 @@
                 if (data.ok) {
                     showToast(data.message || (a.label + ': OK'), true);
                     if (a.action === 'reset' || a.action === 'teardown') {
-                        // Also clear client OPFS before reload
-                        try { bc.postMessage({ type: 'devtools-action', action: 'clear-client-db' }); } catch (e) { /* */ }
-                        setTimeout(function () { location.reload(); }, 1500);
+                        // Clear client OPFS, wait for worker confirmation, then reload
+                        var dbCleared = false;
+                        var onDbCleared = function (e) {
+                            if (e.data && e.data.type === 'devtools-db-cleared') {
+                                dbCleared = true;
+                                location.reload();
+                            }
+                        };
+                        try {
+                            bc.addEventListener('message', onDbCleared);
+                            bc.postMessage({ type: 'devtools-action', action: 'clear-client-db' });
+                        } catch (e) { /* */ }
+                        // Fallback: reload after 3s even if worker doesn't respond
+                        setTimeout(function () { if (!dbCleared) location.reload(); }, 3000);
                     }
                 } else {
                     showToast(data.message || data.error || (a.label + ': failed'), false);
