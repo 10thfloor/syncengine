@@ -19,6 +19,7 @@ import type { Connect, Plugin } from 'vite';
 
 const METRICS_PATH = '/__syncengine/devtools/metrics';
 const ACTION_PATH = '/__syncengine/devtools/action';
+const STREAM_PATH = '/__syncengine/devtools/stream';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,85 +119,47 @@ async function restatePost(
     return res.json();
 }
 
-/**
- * Clear all Restate virtual object state for entity_ and workflow_ services.
- * Uses the admin API: POST /services/{service}/state with { object_key, new_state: {} }.
- * First queries all deployments to find entity/workflow services, then uses
- * the SQL query endpoint to find all keys, then clears each.
- */
-async function clearAllEntityState(restateUrl: string): Promise<number> {
-    const adminUrl = restateAdminUrl(restateUrl);
-    let cleared = 0;
-
-    // 1. Get all registered services
-    let services: Array<{ name: string; ty: string }> = [];
-    try {
-        const res = await fetch(`${adminUrl}/services`);
-        if (res.ok) {
-            const data = (await res.json()) as { services: Array<{ name: string; ty: string }> };
-            services = (data.services ?? []).filter(
-                (s) => s.name.startsWith('entity_') || s.name.startsWith('workflow_') || s.name === 'workspace',
-            );
-        }
-    } catch { /* admin unreachable */ }
-
-    // 2. For each service, query keys and clear state (parallel)
-    const clearPromises: Promise<void>[] = [];
-    for (const svc of services) {
-        try {
-            const qRes = await fetch(`${adminUrl}/query`, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json', 'accept': 'application/json' },
-                body: JSON.stringify({ query: `SELECT DISTINCT service_key FROM state WHERE service_name = '${svc.name.replace(/'/g, "''")}'` }),
-            });
-            if (!qRes.ok) continue;
-
-            const qData = await qRes.json() as { rows?: Array<Record<string, string>> };
-            const keys = (qData.rows ?? []).map((r) => r.service_key ?? Object.values(r)[0]).filter(Boolean);
-
-            for (const key of keys) {
-                clearPromises.push(
-                    fetch(`${adminUrl}/services/${svc.name}/state`, {
-                        method: 'POST',
-                        headers: { 'content-type': 'application/json' },
-                        body: JSON.stringify({ object_key: key, new_state: {} }),
-                    }).then(() => { cleared++; }).catch(() => {}),
-                );
-            }
-        } catch { /* query failure */ }
-    }
-    await Promise.all(clearPromises);
-
-    return cleared;
-}
-
 // ── Workspace info ────────────────────────────────────────────────────────────
 
+/**
+ * Read workspace state directly from the Restate admin SQL query API
+ * instead of invoking getState/listMembers through the ingress. This
+ * avoids serializing metrics polling with real workspace handlers (e.g.
+ * reset) and eliminates the noisy invocation logs.
+ */
 async function fetchWorkspaceInfo(
     restateUrl: string,
     wsId: string,
 ): Promise<{ id: string; active: boolean; members: unknown[]; schemaVersion: unknown }> {
-    const base = restateUrl.replace(/\/+$/, '');
+    const adminUrl = restateAdminUrl(restateUrl);
     let active = false;
     let members: unknown[] = [];
     let schemaVersion: unknown = null;
 
     try {
-        const stateResult = (await restatePost(base, `workspace/${encodeURIComponent(wsId)}/getState`, null)) as {
-            active?: boolean;
-            schemaVersion?: unknown;
-        };
-        active = stateResult?.active ?? false;
-        schemaVersion = stateResult?.schemaVersion ?? null;
+        const res = await fetch(`${adminUrl}/query`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({
+                query: `SELECT key, value_utf8 FROM state WHERE service_name = 'workspace' AND service_key = '${wsId.replace(/'/g, "''")}'`,
+            }),
+        });
+        if (res.ok) {
+            const data = (await res.json()) as { rows?: Array<{ key: string; value_utf8: string }> };
+            for (const row of data.rows ?? []) {
+                try {
+                    const val = JSON.parse(row.value_utf8);
+                    if (row.key === 'state') {
+                        active = val?.status === 'active';
+                        schemaVersion = val?.schemaVersion ?? null;
+                    } else if (row.key === 'members') {
+                        members = Array.isArray(val) ? val : [];
+                    }
+                } catch { /* skip unparseable */ }
+            }
+        }
     } catch {
-        // leave defaults
-    }
-
-    try {
-        const membersResult = (await restatePost(base, `workspace/${encodeURIComponent(wsId)}/listMembers`, null)) as unknown[];
-        members = Array.isArray(membersResult) ? membersResult : [];
-    } catch {
-        // leave defaults
+        // admin unreachable — leave defaults
     }
 
     return { id: wsId, active, members, schemaVersion };
@@ -332,51 +295,17 @@ export function devtoolsMiddleware(
                         const wsId = resolvedWsId;
                         const base = restateUrl.replace(/\/+$/, '');
                         const wsEnc = encodeURIComponent(wsId);
-                        const _t = (l: string) => { const s = Date.now(); return () => console.log(`[devtools:reset] ${l}: ${Date.now() - s}ms`); };
 
-                        // 1. Purge the WS_ stream
-                        let _d = _t('purge stream');
-                        const streamToPurge = `WS_${wsId.replace(/-/g, '_')}`;
-                        try {
-                            const { connect } = await import('@nats-io/transport-node');
-                            const { jetstreamManager } = await import('@nats-io/jetstream');
-                            const nc = await connect({ servers: natsServerUrl });
-                            try {
-                                const jsm = await jetstreamManager(nc);
-                                await jsm.streams.purge(streamToPurge);
-                            } finally {
-                                await nc.close();
-                            }
-                        } catch (err) {
-                            const msg = err instanceof Error ? err.message : String(err);
-                            // Non-fatal: stream may not exist yet
-                            console.warn(`[syncengine:devtools] purge stream ${streamToPurge} failed: ${msg}`);
-                        }
-
-                        _d();
-                        // 2. Clear all entity/workflow state in Restate
-                        _d = _t('clear entity state');
-                        const cleared = await clearAllEntityState(restateUrl);
-                        if (cleared > 0) {
-                            console.log(`[syncengine:devtools] cleared ${cleared} entity state entries`);
-                        }
-
-                        _d();
-                        // 3. Teardown workspace
-                        _d = _t('teardown');
-                        await restatePost(base, `workspace/${wsEnc}/teardown`, null);
-
-                        _d();
-                        // 4. Re-provision
-                        _d = _t('provision');
-                        await restatePost(
+                        // Single Restate call: workspace/reset handles stream
+                        // deletion, entity state clearing, and re-provisioning
+                        // server-side — no N+1 HTTP round trips from here.
+                        const resetResult = await restatePost(
                             base,
-                            `workspace/${wsEnc}/provision`,
+                            `workspace/${wsEnc}/reset`,
                             { tenantId: 'default' },
-                        );
+                        ) as { ok: boolean; message: string };
 
-                        _d();
-                        result = { ok: true, message: `reset workspace ${wsId}` };
+                        result = resetResult;
                         break;
                     }
 
@@ -391,6 +320,66 @@ export function devtoolsMiddleware(
             res.statusCode = result.ok ? 200 : 400;
             res.setHeader('content-type', 'application/json');
             res.end(JSON.stringify(result));
+            return;
+        }
+
+        // ── GET /__syncengine/devtools/stream ────────────────────────────
+        if (url === STREAM_PATH && req.method === 'GET') {
+            const qs = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+            const limit = Math.min(parseInt(qs.get('limit') ?? '100', 10), 500);
+            const runtime = getRuntimeFn();
+            const natsUrl = (runtime.natsUrl ?? 'ws://localhost:9222')
+                .replace(/^ws:\/\//, 'nats://').replace(/^wss:\/\//, 'nats://');
+
+            try {
+                const streams = await fetchNatsStreams();
+                if (streams.length === 0) {
+                    res.statusCode = 200;
+                    res.setHeader('content-type', 'application/json');
+                    res.end(JSON.stringify({ messages: [], stream: null }));
+                    return;
+                }
+                const stream = [...streams].sort((a, b) => b.messages - a.messages)[0]!;
+
+                const { connect } = await import('@nats-io/transport-node');
+                const { jetstream, DeliverPolicy } = await import('@nats-io/jetstream');
+                const nc = await connect({ servers: natsUrl });
+                const messages: Array<{ seq: number; subject: string; ts: string; data: unknown }> = [];
+
+                try {
+                    const js = jetstream(nc);
+                    const startSeq = Math.max(1, stream.lastSeq - limit + 1);
+                    const consumer = await js.consumers.get(stream.name, {
+                        deliver_policy: DeliverPolicy.StartSequence,
+                        opt_start_seq: startSeq,
+                        inactive_threshold: 5_000_000_000, // 5s nanos
+                    });
+                    const iter = await consumer.fetch({ max_messages: limit, expires: 3000 });
+                    for await (const msg of iter) {
+                        let data: unknown;
+                        try { data = msg.json(); } catch { data = msg.string(); }
+                        messages.push({
+                            seq: msg.seq,
+                            subject: msg.subject,
+                            ts: new Date(msg.info.timestampNanos / 1_000_000).toISOString(),
+                            data,
+                        });
+                    }
+                } finally {
+                    await nc.close();
+                }
+
+                res.statusCode = 200;
+                res.setHeader('content-type', 'application/json');
+                res.end(JSON.stringify({
+                    messages,
+                    stream: { name: stream.name, messages: stream.messages, firstSeq: stream.firstSeq, lastSeq: stream.lastSeq },
+                }));
+            } catch (err) {
+                res.statusCode = 500;
+                res.setHeader('content-type', 'application/json');
+                res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+            }
             return;
         }
 

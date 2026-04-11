@@ -89,10 +89,8 @@
     var viewDefs = [];        // Array<{ name, sourceTable }>
     var schemaInfo = { version: 0, fingerprint: '' };
     var viewRowCounts = {};   // { [viewName]: number }
-    var channelSeqs = {};     // { [channelId]: number }
-    var entityCounts = {};    // { [table]: { rowCount, localCount } }
-    var lastGcCollected = null;
     var offlineQueue = 0;
+    var offlineEntries = [];  // [{ table, id }]
     var syncPhase = 'idle';
     var hlc = { ts: 0, counter: 0 };
 
@@ -101,20 +99,11 @@
     var tableRows = {};       // { [tableName]: { columns: [], rows: [], localIds: [] } }
     var pendingQueryIds = {}; // { [queryId]: tableName }
 
-    // Timeline
-    var TIMELINE_MAX = 200;
-    var timeline = [];
-    var expandedTimelineIdx = -1;
-    var timelineFilters = { delta: true, 'entity-write': true, 'entity-state': true, authority: true, gc: true, topic: true };
-    var TIMELINE_KINDS = ['delta', 'entity-write', 'entity-state', 'authority', 'gc', 'topic'];
-    var FILTER_TOOLTIPS = {
-        'delta': 'Row inserts, updates, and deletes synced via NATS',
-        'entity-write': 'Writes to Restate entity actors (server-side state)',
-        'entity-state': 'Entity state snapshots from Restate',
-        'authority': 'Authoritative ordering for non-monotonic views (CALM)',
-        'gc': 'Garbage collection \u2014 old stream messages purged',
-        'topic': 'Pub/sub topic messages (cursors, presence, etc.)',
-    };
+    // Timeline — fetched from NATS JetStream (persistent, survives reload)
+    var streamMessages = []; // from server endpoint
+    var streamInfo = null;   // { name, messages, firstSeq, lastSeq }
+    var expandedStreamIdx = -1;
+    var streamLoading = false;
 
     // ── DOM references ───────────────────────────────────────────────────
     var pillEl = null;
@@ -145,13 +134,6 @@
         return str.length > max ? str.slice(0, max) + '\u2026' : str;
     }
 
-    function relativeTime(tsMs) {
-        var diff = Date.now() - tsMs;
-        if (diff < 1000) return 'now';
-        if (diff < 60000) return Math.floor(diff / 1000) + 's';
-        if (diff < 3600000) return Math.floor(diff / 60000) + 'm';
-        return Math.floor(diff / 3600000) + 'h';
-    }
 
     function statusColor() {
         if (connStatus === 'disconnected' || connStatus === 'error' || connStatus === 'auth_failed') return 'red';
@@ -357,9 +339,10 @@
                 var dot = el('span', CLS.syncDot + ' green');
                 item.appendChild(dot);
                 item.appendChild(el('span', null, t.name));
-                var cnt = entityCounts[t.name];
-                if (cnt && cnt.localCount > 0) {
-                    var lbl = el('span', CLS.syncLabel, cnt.localCount + 'L');
+                // Show pending offline count from devtools-status offlineEntries
+                var pendingForTable = offlineEntries.filter(function (e) { return e.table === t.name; }).length;
+                if (pendingForTable > 0) {
+                    var lbl = el('span', CLS.syncLabel, pendingForTable + ' pending');
                     lbl.style.color = 'var(--dt-yellow)';
                     item.appendChild(lbl);
                 }
@@ -430,9 +413,9 @@
 
         if (data) {
             toolbar.appendChild(el('span', CLS.dataToolbarCount, data.rows.length + ' rows'));
-            var cnt = entityCounts[key];
-            if (cnt && cnt.localCount > 0) {
-                toolbar.appendChild(el('span', CLS.dataToolbarCount, cnt.localCount + ' local'));
+            var pendingCount = offlineEntries.filter(function (e) { return e.table === key; }).length;
+            if (pendingCount > 0) {
+                toolbar.appendChild(el('span', CLS.dataToolbarCount, pendingCount + ' pending'));
             }
         } else {
             toolbar.appendChild(el('span', CLS.dataToolbarCount, 'loading\u2026'));
@@ -480,107 +463,121 @@
         dataGridEl.appendChild(tbl);
     }
 
-    // ── Timeline panel ────────────────────────────────────────────────────
+    // ── Timeline panel (reads from NATS JetStream via server) ──────────
+
+    function fetchStreamMessages() {
+        if (streamLoading) return;
+        streamLoading = true;
+        var wsParam = getWorkspaceId();
+        fetch('/__syncengine/devtools/stream?limit=100' + (wsParam ? '&wsId=' + encodeURIComponent(wsParam) : ''))
+            .then(function (res) { return res.ok ? res.json() : null; })
+            .then(function (data) {
+                streamLoading = false;
+                if (!data) return;
+                streamMessages = data.messages || [];
+                streamInfo = data.stream || null;
+                if (drawerOpen && activeTab === 'timeline') renderTimeline();
+            })
+            .catch(function () { streamLoading = false; });
+    }
 
     function buildTimelinePanel() {
         var panel = el('div', CLS.timeline);
 
-        // Filters
-        var filtersEl = el('div', CLS.timelineFilters);
-        TIMELINE_KINDS.forEach(function (kind) {
-            var btn = el('button', CLS.timelineFilter + (timelineFilters[kind] ? ' active' : ''), kind);
-            btn.title = FILTER_TOOLTIPS[kind] || kind;
-            btn.addEventListener('click', function () {
-                timelineFilters[kind] = !timelineFilters[kind];
-                btn.classList.toggle('active', !!timelineFilters[kind]);
-                renderTimelineList();
-            });
-            filtersEl.appendChild(btn);
-        });
-        panel.appendChild(filtersEl);
+        // Header with stream info
+        var header = el('div', CLS.timelineFilters);
+        if (streamInfo) {
+            header.appendChild(el('span', null, streamInfo.name + ' \u2014 ' + streamInfo.messages + ' messages (seq ' + streamInfo.firstSeq + '\u2013' + streamInfo.lastSeq + ')'));
+        }
+        var refreshBtn = el('button', CLS.timelineFilter + ' active', '\u21BB Refresh');
+        refreshBtn.addEventListener('click', function () { fetchStreamMessages(); });
+        header.appendChild(refreshBtn);
+        panel.appendChild(header);
 
         timelineListEl = el('div', CLS.timelineList);
         panel.appendChild(timelineListEl);
+
+        // Fetch on first build
+        if (streamMessages.length === 0) fetchStreamMessages();
 
         return panel;
     }
 
     function renderTimeline() {
-        renderTimelineList();
-    }
-
-    function renderTimelineList() {
         if (!timelineListEl) return;
         clearChildren(timelineListEl);
 
-        var filtered = timeline.filter(function (e) { return timelineFilters[e.kind] !== false; });
-
-        if (filtered.length === 0) {
-            timelineListEl.appendChild(el('div', CLS.empty, timeline.length === 0 ? 'No events yet' : 'All filtered out'));
+        if (streamMessages.length === 0) {
+            timelineListEl.appendChild(el('div', CLS.empty, streamLoading ? 'Loading stream\u2026' : 'No messages in stream'));
             return;
         }
 
         // Newest first
-        for (var i = filtered.length - 1; i >= 0; i--) {
-            timelineListEl.appendChild(buildTimelineEntry(filtered[i], i));
+        for (var i = streamMessages.length - 1; i >= 0; i--) {
+            timelineListEl.appendChild(buildStreamEntry(streamMessages[i], i));
         }
     }
 
-    function buildTimelineEntry(entry) {
+    function buildStreamEntry(msg, idx) {
         var wrap = el('div');
-
         var row = el('div', CLS.timelineEntry);
-        row.appendChild(el('span', CLS.timelineTs, relativeTime(entry.ts)));
 
-        var badge = el('span', CLS.timelineBadge + ' ' + (entry.kind || '').replace(/\s+/g, '-'), entry.kind || '?');
-        badge.title = FILTER_TOOLTIPS[entry.kind] || entry.kind || '';
-        row.appendChild(badge);
+        // Seq number
+        row.appendChild(el('span', CLS.timelineTs, '#' + msg.seq));
 
-        row.appendChild(el('span', CLS.timelineSummary, buildTimelineSummary(entry)));
+        // Timestamp
+        var ts = msg.ts ? new Date(msg.ts) : null;
+        var tsStr = ts ? ts.toLocaleTimeString() : '';
+        row.appendChild(el('span', CLS.timelineTs, tsStr));
+
+        // Message type badge
+        var data = msg.data || {};
+        var msgType = data.type || '?';
+        var badgeClass = CLS.timelineBadge;
+        if (msgType === 'INSERT' || msgType === 'DELETE') badgeClass += ' delta';
+        else if (msgType === 'RESET') badgeClass += ' gc';
+        else badgeClass += ' topic';
+        row.appendChild(el('span', badgeClass, msgType));
+
+        // Summary from actual message content
+        var summary = buildStreamSummary(msg);
+        row.appendChild(el('span', CLS.timelineSummary, summary));
 
         wrap.appendChild(row);
 
-        // Expanded detail
-        var origIdx = timeline.indexOf(entry);
-        if (expandedTimelineIdx === origIdx) {
+        if (expandedStreamIdx === idx) {
             var detail = el('div', CLS.timelineDetail);
-            try { detail.textContent = JSON.stringify(entry, null, 2); } catch (_) { detail.textContent = String(entry); }
+            try { detail.textContent = JSON.stringify(msg.data, null, 2); } catch (_) { detail.textContent = String(msg.data); }
             wrap.appendChild(detail);
         }
 
         row.addEventListener('click', function () {
-            var oi = timeline.indexOf(entry);
-            expandedTimelineIdx = (expandedTimelineIdx === oi) ? -1 : oi;
-            renderTimelineList();
+            expandedStreamIdx = (expandedStreamIdx === idx) ? -1 : idx;
+            renderTimeline();
         });
 
         return wrap;
     }
 
-    function buildTimelineSummary(entry) {
-        var p = entry.payload || {};
-        switch (entry.kind) {
-            case 'delta': {
-                var ch = entry.channel || '';
-                var op = p.type || '?';
-                var tbl = p.table || ch;
-                var preview = '';
-                if (p.record) {
-                    var keys = Object.keys(p.record).slice(0, 3);
-                    preview = ' {' + keys.map(function(k) { return k + ': ' + truncate(String(p.record[k]), 12); }).join(', ') + '}';
-                }
-                return op + ' \u2192 ' + tbl + preview + (entry.seq ? ' (seq ' + entry.seq + ')' : '');
-            }
-            case 'entity-write': {
-                var tbl2 = p.table || entry.entity || '?';
-                return 'write \u2192 ' + tbl2 + (p.id != null ? '#' + p.id : '');
-            }
-            case 'entity-state': return 'state \u2192 ' + (p.table || entry.entity || '?');
-            case 'authority': return 'authority \u2192 ' + (entry.channel || '?') + (entry.seq ? ' seq ' + entry.seq : '');
-            case 'gc': return 'garbage collection' + (p.collected ? ' (' + p.collected + ' removed)' : '');
-            case 'topic': return 'topic \u2192 ' + (entry.channel || '?');
-            default: return JSON.stringify(entry).slice(0, 60);
+    function buildStreamSummary(msg) {
+        var d = msg.data || {};
+        var subject = msg.subject || '';
+        // Extract channel from subject: ws.<wsId>.<channel>.delta → <channel>
+        var subjectParts = subject.split('.');
+        var channel = subjectParts.length >= 3 ? subjectParts[2] : subject;
+
+        if (d.type === 'INSERT' && d.table && d.record) {
+            var keys = Object.keys(d.record).slice(0, 3);
+            var preview = keys.map(function (k) { return k + ': ' + truncate(String(d.record[k]), 12); }).join(', ');
+            return d.table + ' {' + preview + '}';
         }
+        if (d.type === 'DELETE' && d.table) {
+            return d.table + ' id=' + (d.id != null ? d.id : '?');
+        }
+        if (d.type === 'RESET') {
+            return channel + ' (full reset)';
+        }
+        return channel + ' ' + truncate(JSON.stringify(d), 40);
     }
 
     // ── State panel ───────────────────────────────────────────────────────
@@ -602,31 +599,14 @@
         addStateRow(stateEl, 'Sync phase', syncPhase);
         if (hlc.ts) addStateRow(stateEl, 'HLC', hlc.ts + '.' + hlc.counter);
 
-        // Channels group
-        var channelIds = Object.keys(channelSeqs);
-        if (channelIds.length > 0) {
-            stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Channels'));
-            channelIds.forEach(function (cid) {
-                addStateRow(stateEl, truncate(cid, 24), 'seq=' + channelSeqs[cid]);
-            });
-        }
-
-        // Entity counts group
-        var entityKeys = Object.keys(entityCounts);
-        if (entityKeys.length > 0) {
-            stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Entities'));
-            entityKeys.forEach(function (t) {
-                var c = entityCounts[t];
-                addStateRow(stateEl, t, c.rowCount + ' rows' + (c.localCount > 0 ? ', ' + c.localCount + ' local' : ''));
-            });
-        }
-
-        // Misc
-        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Misc'));
-        addStateRow(stateEl, 'Offline queue', String(offlineQueue));
-        if (lastGcCollected !== null) addStateRow(stateEl, 'Last GC', String(lastGcCollected));
-        if (schemaInfo.version) addStateRow(stateEl, 'Schema v', String(schemaInfo.version));
+        // Schema
+        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Schema'));
+        if (schemaInfo.version) addStateRow(stateEl, 'Version', 'v' + schemaInfo.version);
         if (schemaInfo.fingerprint) addStateRow(stateEl, 'Fingerprint', truncate(schemaInfo.fingerprint, 16));
+
+        // Sync
+        stateEl.appendChild(el('div', CLS.stateGroupLabel, 'Sync'));
+        addStateRow(stateEl, 'Offline queue', offlineQueue > 0 ? offlineQueue + ' pending' : '0');
     }
 
     function addStateRow(parent, label, value) {
@@ -765,7 +745,7 @@
             drawerEl.classList.remove(CLS.hidden);
             if (activeTab === 'data') renderDataSidebar();
             if (activeTab === 'state') renderState();
-            if (activeTab === 'timeline') renderTimelineList();
+            if (activeTab === 'timeline') renderTimeline();
         }
     }
 
@@ -793,18 +773,13 @@
             if (data.sync) syncPhase = data.sync.phase || 'idle';
             if (data.hlc) hlc = data.hlc;
             if (data.offlineQueue !== undefined) offlineQueue = data.offlineQueue;
+            if (Array.isArray(data.offlineEntries)) offlineEntries = data.offlineEntries;
             // Schema & tables
             if (data.schema) schemaInfo = data.schema;
             if (Array.isArray(data.tables)) tables = data.tables;
             if (Array.isArray(data.viewDefs)) viewDefs = data.viewDefs;
             // View row counts
             if (data.views) viewRowCounts = data.views;
-            // Channels
-            if (Array.isArray(data.channels)) {
-                data.channels.forEach(function (ch) {
-                    if (typeof ch === 'string' && !channelSeqs[ch]) channelSeqs[ch] = 0;
-                });
-            }
             // Auto-refresh selected table/view data while drawer is open
             if (drawerOpen && activeTab === 'data' && selectedTable) {
                 var isView = selectedTable.indexOf('view:') === 0;
@@ -812,42 +787,6 @@
                 requestRows(key, isView);
             }
             render();
-        }
-
-        if (data.type === 'devtools-message') {
-            var entry = {
-                ts: data.ts || Date.now(),
-                kind: data.kind || 'unknown',
-                channelId: data.channel || data.channelId || '',
-                seq: data.seq,
-                opCount: data.opCount,
-                table: data.table || data.entity || '',
-                id: data.id || '',
-                fields: data.fields || [],
-                rowCount: data.rowCount,
-                localCount: data.localCount,
-                topic: data.topic || '',
-                event: data.event || '',
-                granted: data.granted,
-                collected: data.collected,
-                payload: data.payload,
-            };
-            timeline.push(entry);
-            while (timeline.length > TIMELINE_MAX) timeline.shift();
-
-            // Update derived state from message
-            if (data.kind === 'delta' && (data.channel || data.channelId) && data.seq != null) {
-                channelSeqs[data.channel || data.channelId] = data.seq;
-            }
-            if (data.kind === 'entity-state' && data.table) {
-                entityCounts[data.table] = { rowCount: data.rowCount || 0, localCount: data.localCount || 0 };
-            }
-            if (data.kind === 'gc' && data.collected != null) {
-                lastGcCollected = data.collected;
-            }
-
-            if (drawerOpen && activeTab === 'timeline') renderTimelineList();
-            renderPill();
         }
 
         if (data.type === 'devtools-query-result') {
@@ -872,6 +811,8 @@
     }
     sendPing();
     setInterval(sendPing, 5000);
+    // Refresh stream timeline every 5s when timeline tab is active
+    setInterval(function () { if (drawerOpen && activeTab === 'timeline') fetchStreamMessages(); }, 5000);
 
     // ── Keyboard shortcut ─────────────────────────────────────────────────
 
