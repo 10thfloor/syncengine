@@ -412,6 +412,7 @@ pub struct DbspEngine {
 impl DbspEngine {
     #[wasm_bindgen(constructor)]
     pub fn new(views_js: JsValue) -> DbspEngine {
+        console_error_panic_hook::set_once();
         let defs: Vec<ViewDef> = serde_wasm_bindgen::from_value(views_js).unwrap();
         DbspEngine {
             views: defs.into_iter().map(ViewState::new).collect(),
@@ -448,7 +449,18 @@ impl DbspEngine {
     }
 
     pub fn step(&mut self, deltas_js: JsValue) -> JsValue {
-        let mut deltas: Vec<Delta> = serde_wasm_bindgen::from_value(deltas_js).unwrap();
+        // Never panic inside step() — a panic in WASM with panic=abort
+        // poisons the RefCell borrow counter permanently, making every
+        // subsequent step() call fail with "recursive use of an object."
+        // Return an empty result on deserialization failure instead.
+        let mut deltas: Vec<Delta> = match serde_wasm_bindgen::from_value(deltas_js) {
+            Ok(d) => d,
+            Err(_) => {
+                let empty = serde_json::json!({"views": {}, "conflicts": []});
+                let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                return empty.serialize(&serializer).unwrap_or(JsValue::NULL);
+            }
+        };
         let mut all_conflicts: Vec<Value> = Vec::new();
 
         // Apply merge resolution for deltas that have HLC timestamps
@@ -549,12 +561,26 @@ impl DbspEngine {
         }
 
         // Return { views: {...}, conflicts: [...] }
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        // Large u64 values (packed HLCs, conflict metadata) can exceed
+        // JS's MAX_SAFE_INTEGER. Serialize them as BigInts so the
+        // conversion doesn't panic. The JS side converts via deepToObject
+        // which calls Number() on BigInts — safe because view output
+        // records (aggregates, projected fields) don't contain HLCs.
+        let serializer = serde_wasm_bindgen::Serializer::new()
+            .serialize_maps_as_objects(true)
+            .serialize_large_number_types_as_bigints(true);
         let return_val = serde_json::json!({
             "views": results,
             "conflicts": all_conflicts,
         });
-        return_val.serialize(&serializer).unwrap()
+        match return_val.serialize(&serializer) {
+            Ok(js) => js,
+            Err(_) => {
+                // Fallback: return empty result rather than panicking
+                let empty = serde_json::json!({"views": {}, "conflicts": []});
+                empty.serialize(&serializer).unwrap_or(JsValue::NULL)
+            }
+        }
     }
 
     /// Reset all view state — used before re-hydration from SQLite

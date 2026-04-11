@@ -307,32 +307,30 @@ async function markConsumerCaughtUp(subject) {
  * flag is derived from the global `sync.isReplaying` at processing time.
  */
 async function processConsumer(codec, source) {
-    const { subject, consumer, messages } = source;
+    const { subject, consumer, messages, skipReplay } = source;
 
     // Probe num_pending upfront so subjects that start fully caught up
     // (empty stream, or lastProcessedSeqs already at the tip) still fire
     // their "caught up" signal — the for-await below would otherwise block
     // forever waiting for a first message that never comes.
     //
-    // If the probe throws (network hiccup, transient broker error), we
-    // must still mark the subject caught up. Otherwise `caughtUp.size`
-    // never reaches `expected`, finalize never runs, `sync.isReplaying`
-    // stays true, and every local mutation silently queues into
-    // `sync.localMutationQueue` forever with no user-visible error.
-    // Assuming caught-up on probe failure is the safer degraded mode:
-    // the for-await will still deliver any messages that actually arrive.
-    try {
-        const info = await consumer.info();
-        if (info.num_pending === 0) {
+    // skipReplay: entity-writes consumers must NOT participate in replay
+    // coordination — they would prematurely trigger finalizeReplay and
+    // corrupt the DBSP engine via an untimely reset().
+    if (!skipReplay) {
+        try {
+            const info = await consumer.info();
+            if (info.num_pending === 0) {
+                await markConsumerCaughtUp(subject);
+            } else {
+                console.log(`[sync] replaying ${info.num_pending} pending from ${subject}`);
+                emitSyncStatus('replaying', 0, { totalMessages: info.num_pending });
+                setConnectionStatus('syncing');
+            }
+        } catch (e) {
+            console.warn(`[sync] consumer.info() failed for ${subject}, assuming caught up:`, e?.message || e);
             await markConsumerCaughtUp(subject);
-        } else {
-            console.log(`[sync] replaying ${info.num_pending} pending from ${subject}`);
-            emitSyncStatus('replaying', 0, { totalMessages: info.num_pending });
-            setConnectionStatus('syncing');
         }
-    } catch (e) {
-        console.warn(`[sync] consumer.info() failed for ${subject}, assuming caught up:`, e?.message || e);
-        await markConsumerCaughtUp(subject);
     }
 
     let processed = 0;
@@ -352,7 +350,7 @@ async function processConsumer(codec, source) {
             let msg;
             try { msg = codec.decode(raw.data); } catch {
                 raw.ack();
-                if (raw.info?.pending === 0) await markConsumerCaughtUp(subject);
+                if (!skipReplay && raw.info?.pending === 0) await markConsumerCaughtUp(subject);
                 continue;
             }
 
@@ -360,7 +358,7 @@ async function processConsumer(codec, source) {
             if (msg._clientId === CLIENT_ID) {
                 raw.ack();
                 sync.lastProcessedSeqs[subject] = raw.seq;
-                if (raw.info?.pending === 0) await markConsumerCaughtUp(subject);
+                if (!skipReplay && raw.info?.pending === 0) await markConsumerCaughtUp(subject);
                 continue;
             }
 
@@ -369,7 +367,7 @@ async function processConsumer(codec, source) {
             if (msg._nonce && dedup(msg._nonce)) {
                 raw.ack();
                 sync.lastProcessedSeqs[subject] = raw.seq;
-                if (raw.info?.pending === 0) await markConsumerCaughtUp(subject);
+                if (!skipReplay && raw.info?.pending === 0) await markConsumerCaughtUp(subject);
                 continue;
             }
 
@@ -429,7 +427,7 @@ async function processConsumer(codec, source) {
             // Primary replay → live transition signal: when the broker
             // tells us the consumer has nothing left pending, this
             // consumer has caught up with the stream's tail.
-            if (raw.info?.pending === 0) {
+            if (!skipReplay && raw.info?.pending === 0) {
                 await markConsumerCaughtUp(subject);
             }
         }
@@ -462,16 +460,10 @@ async function connectNats() {
         nats.conn = await connect(connectOpts);
         console.log(`[nats] connected to ${natsUrl}`);
 
-        // Entity-writes subject: server-side entity handlers can emit
-        // table inserts via `emit()`. These publish to a well-known
-        // subject that we consume alongside the user's channel subjects.
-        const entityWritesSubject = `ws.${nats.config.workspaceId}.entity-writes`;
-        const allSubjects = [...channelSubjects, entityWritesSubject];
-
         // Initialize replay phase — consumers will flip this to false once
         // they've all reported caught-up via `markConsumerCaughtUp`.
         sync.isReplaying = true;
-        resetReplayCoord(allSubjects.length);
+        resetReplayCoord(channelSubjects.length);
         replayCoord.codec = codec;
         authority.backoff = 0;
         authority.backoffUntil = 0;
@@ -484,7 +476,7 @@ async function connectNats() {
         const js = nats.conn.jetstream();
         const streamName = `WS_${nats.config.workspaceId.replace(/-/g, '_')}`;
         const sources = [];
-        for (const s of allSubjects) {
+        for (const s of channelSubjects) {
             const lastSeq = sync.lastProcessedSeqs[s] || 0;
             const consumerOpts = lastSeq > 0
                 ? { filterSubjects: [s], deliver_policy: 'by_start_sequence', opt_start_seq: lastSeq + 1 }
@@ -508,6 +500,28 @@ async function connectNats() {
             processConsumer(codec, source).catch((err) => {
                 console.error(`[sync] processConsumer(${source.subject}) unhandled:`, err);
             });
+        }
+
+        // Entity-writes: server-side entity handlers emit table inserts
+        // via `emit()`. Subscribe AFTER replay consumers and SKIP replay
+        // coordination — entity-writes must not call markConsumerCaughtUp
+        // or it hijacks the finalize check (caughtUp.size === expected)
+        // and triggers a premature dbsp.reset() that corrupts the engine.
+        const entityWritesSubject = `ws.${nats.config.workspaceId}.entity-writes`;
+        try {
+            const ewLastSeq = sync.lastProcessedSeqs[entityWritesSubject] || 0;
+            const ewOpts = ewLastSeq > 0
+                ? { filterSubjects: [entityWritesSubject], deliver_policy: 'by_start_sequence', opt_start_seq: ewLastSeq + 1 }
+                : { filterSubjects: [entityWritesSubject] };
+            const ewConsumer = await js.consumers.get(streamName, ewOpts);
+            const ewMessages = await ewConsumer.consume();
+            const ewSource = { subject: entityWritesSubject, consumer: ewConsumer, messages: ewMessages, skipReplay: true };
+            nats.subs.push(ewSource);
+            processConsumer(codec, ewSource).catch((err) => {
+                console.error(`[sync] processConsumer(entity-writes) unhandled:`, err);
+            });
+        } catch (err) {
+            console.warn(`[sync] entity-writes consumer failed (no entity emits yet?):`, err);
         }
 
         // Other per-connection subscriptions (not the replay path).
@@ -772,19 +786,82 @@ function handleSchemaMigrationNotification(msg) {
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
+let _schemaTables = null;  // saved for engine recovery
+let _schemaViews = null;
+let _schemaMergeConfigs = null;
+
+/**
+ * Recover from a WASM trap by recreating the DBSP engine and
+ * re-hydrating from SQLite. The poisoned engine is discarded;
+ * a fresh one picks up the current table state.
+ */
+function recoverEngine() {
+    if (!_schemaViews) return;
+    dbsp = new DbspEngine(_schemaViews);
+    // Re-register merge configs
+    if (_schemaMergeConfigs) {
+        for (const mc of _schemaMergeConfigs) {
+            dbsp.register_merge(mc.table, { fields: mc.fields });
+        }
+    }
+    // Clear the main thread's store before re-hydrating so views don't
+    // double-count existing rows.
+    self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
+    // Re-hydrate from SQLite
+    if (_schemaTables && db) {
+        const deltas = [];
+        for (const t of _schemaTables) {
+            const rows = db.exec(`SELECT * FROM ${t.name}`, { rowMode: 'object' });
+            for (const row of rows) deltas.push({ source: t.name, record: row, weight: 1 });
+        }
+        if (deltas.length > 0) {
+            const rawResult = dbsp.step(deltas);
+            const rawViews = rawResult.views || rawResult;
+            for (const [viewName, viewDeltas] of rawViews instanceof Map ? rawViews.entries() : Object.entries(rawViews)) {
+                const normalized = viewDeltas.map(d => deepToObject(d));
+                if (normalized.length > 0) {
+                    self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: normalized });
+                }
+            }
+        }
+    }
+    console.log('[dbsp] engine recovered from crash, re-hydrated from SQLite');
+}
+
 function stepEmitBroadcast(deltas, nonce) {
     if (deltas.length === 0) return;
-    const result = dbsp.step(deltas);
 
-    const viewUpdates = result.views || result;
-    const conflicts = result.conflicts || [];
+    let rawResult;
+    try {
+        rawResult = dbsp.step(deltas);
+    } catch (e) {
+        // WASM trap — the RefCell is now poisoned and the engine is dead.
+        // Recover by recreating the engine from scratch and re-hydrating
+        // from SQLite. The current step's deltas are lost but the data
+        // is already in SQLite so the next hydration picks it up.
+        console.warn('[dbsp] step crashed, recovering engine:', e.message);
+        try {
+            recoverEngine();
+        } catch (re) {
+            console.error('[dbsp] recovery failed:', re.message);
+        }
+        return;
+    }
 
-    emitViewUpdates(viewUpdates);
-
+    const rawViews = rawResult.views || rawResult;
     const normalized = {};
-    for (const [viewName, viewDeltas] of viewUpdates instanceof Map ? viewUpdates.entries() : Object.entries(viewUpdates)) {
+    for (const [viewName, viewDeltas] of rawViews instanceof Map ? rawViews.entries() : Object.entries(rawViews)) {
         normalized[viewName] = viewDeltas.map(d => deepToObject(d));
     }
+    const conflicts = (rawResult.conflicts || []).map(c => deepToObject(c));
+
+    // Emit to main thread (using owned copies, not WASM references)
+    for (const [viewName, viewDeltas] of Object.entries(normalized)) {
+        if (viewDeltas.length > 0) {
+            self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: viewDeltas });
+        }
+    }
+
     if (Object.keys(normalized).length > 0 && !sync.isReplaying) broadcastDeltas(normalized, nonce);
 
     if (conflicts.length > 0) {
@@ -834,6 +911,17 @@ async function handleInit(data) {
             pipeline: v.pipeline,
         }))
     );
+
+    // Save view defs + table metadata for engine recovery on WASM trap
+    _schemaTables = schema.tables;
+    _schemaViews = schema.views.map(v => ({
+        name: v.name,
+        source_table: v.source_table || v.tableName,
+        id_key: v.id_key,
+        source_id_key: v.source_id_key || v.id_key,
+        pipeline: v.pipeline,
+    }));
+    _schemaMergeConfigs = schema.mergeConfigs || [];
 
     // 2. SQLite with OPFS persistence
     const sqlite3 = await sqlite3InitModule();
@@ -969,11 +1057,15 @@ function handleInsert(data) {
     // ends up with duplicated entries because right_index has no id-based
     // deduplication on insertion. Capturing the old row here lets us emit a
     // correct (-1 OLD, +1 NEW) pair that DBSP can apply incrementally.
-    const oldRows = db.exec(
-        `SELECT * FROM ${tableName} WHERE ${idCol} = ?`,
-        { bind: [idVal], rowMode: 'object' }
-    );
-    const oldRow = oldRows.length > 0 ? oldRows[0] : null;
+    // Skip old-row lookup when id is null (entity emit inserts without id)
+    let oldRow = null;
+    if (idVal != null) {
+        const oldRows = db.exec(
+            `SELECT * FROM ${tableName} WHERE ${idCol} = ?`,
+            { bind: [idVal], rowMode: 'object' }
+        );
+        oldRow = oldRows.length > 0 ? oldRows[0] : null;
+    }
 
     // HLC: for remote (replay/NATS) inserts, merge with the source clock; for
     // local writes, tick once for the retraction and again for the insertion
@@ -995,8 +1087,22 @@ function handleInsert(data) {
     const values = meta.columns.map(col => record[col] ?? null);
     db.exec(meta.insertSql, { bind: values });
 
-    // Build deltas: retract old (if existed), then insert new.
-    const newRow = { ...record };
+    // Read back the actual row from SQLite to get auto-generated fields
+    // (e.g., INTEGER PRIMARY KEY auto-assigns rowid when null). Entity
+    // emit() inserts often omit the id column, so the record as-passed
+    // would have id=undefined which crashes the DBSP engine.
+    let newRow;
+    if (idVal == null) {
+        // id was null/undefined → SQLite auto-generated it; read it back
+        const lastId = db.exec('SELECT last_insert_rowid() as id', { rowMode: 'object' })[0]?.id;
+        const inserted = db.exec(
+            `SELECT * FROM ${tableName} WHERE ${idCol} = ?`,
+            { bind: [lastId], rowMode: 'object' },
+        );
+        newRow = inserted.length > 0 ? inserted[0] : { ...record, [idCol]: lastId };
+    } else {
+        newRow = { ...record };
+    }
     const deltas = [];
     if (oldRow) {
         deltas.push({ source: tableName, record: oldRow, weight: -1, hlc: hlcRetract });
@@ -1108,12 +1214,23 @@ function hydrateFromSQLite(tables) {
     }
     if (deltas.length === 0) return;
 
-    const result = dbsp.step(deltas);
-    const viewUpdates = result.views || result;
-    emitViewUpdates(viewUpdates);
+    const rawResult = dbsp.step(deltas);
+    const rawViews = rawResult.views || rawResult;
+    // Deep-copy + free immediately (same borrow-release pattern)
+    const owned = {};
+    for (const [k, v] of rawViews instanceof Map ? rawViews.entries() : Object.entries(rawViews)) {
+        owned[k] = v.map(d => deepToObject(d));
+    }
+    if (typeof rawResult.free === 'function') rawResult.free();
+    for (const [viewName, viewDeltas] of Object.entries(owned)) {
+        if (viewDeltas.length > 0) {
+            self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: viewDeltas });
+        }
+    }
 }
 
 function deepToObject(val) {
+    if (typeof val === 'bigint') return Number(val);
     if (val instanceof Map) {
         const obj = {};
         for (const [k, v] of val) obj[k] = deepToObject(v);

@@ -27,7 +27,7 @@
 //    framework imports the same file from both client (typed React hook)
 //    and server (Restate object factory). No codegen, no IDL.
 
-import type { ColumnDef, InferRecord } from './schema';
+import type { ColumnDef, ColumnRef, InferRecord, AnyTable } from "./schema";
 
 // ── State shape ─────────────────────────────────────────────────────────────
 
@@ -55,14 +55,14 @@ export type EntityState<TShape extends EntityStateShape> = InferRecord<TShape>;
  * leaves state unchanged on throw.
  */
 export type EntityHandler<
-    TState,
-    TArgs extends readonly unknown[] = readonly unknown[],
+  TState,
+  TArgs extends readonly unknown[] = readonly unknown[],
 > = (state: TState, ...args: TArgs) => TState | Partial<TState>;
 
 /** A bag of handlers keyed by name. */
 export type EntityHandlerMap<TState> = Record<
-    string,
-    EntityHandler<TState, readonly never[]>
+  string,
+  EntityHandler<TState, readonly never[]>
 >;
 
 // ── Entity definition ──────────────────────────────────────────────────────
@@ -74,30 +74,35 @@ export type EntityHandlerMap<TState> = Record<
  * handler return values before persisting.
  */
 export interface EntityDef<
-    TName extends string,
-    TShape extends EntityStateShape,
-    THandlers extends EntityHandlerMap<EntityState<TShape>>,
+  TName extends string,
+  TShape extends EntityStateShape,
+  THandlers extends EntityHandlerMap<EntityState<TShape>>,
 > {
-    readonly $tag: 'entity';
-    readonly $name: TName;
-    readonly $state: TShape;
-    readonly $handlers: THandlers;
-    /** Initial state — every column's default applied. Used the first time
-     *  an entity instance is read before any handler has run. */
-    readonly $initialState: EntityState<TShape>;
-    /** Phantom field carrying the inferred state record type for callers
-     *  that want `EntityRecord<typeof cart>` without re-deriving it. */
-    readonly $record: EntityState<TShape>;
+  readonly $tag: "entity";
+  readonly $name: TName;
+  readonly $state: TShape;
+  readonly $handlers: THandlers;
+  /** Initial state — every column's default applied. Used the first time
+   *  an entity instance is read before any handler has run. */
+  readonly $initialState: EntityState<TShape>;
+  /** Source projection definitions (Variation D). Empty if no `source`
+   *  was declared on the entity. */
+  readonly $source: SourceProjections;
+  /** Initial projection values (sum/count → 0, min → Infinity, etc.) */
+  readonly $sourceInitial: Record<string, number>;
+  /** Phantom field carrying the inferred state record type for callers
+   *  that want `EntityRecord<typeof cart>` without re-deriving it. */
+  readonly $record: EntityState<TShape>;
 }
 
 /** Type-level shortcut: extract the state record type from an EntityDef. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type EntityRecord<E> = E extends EntityDef<string, infer TShape, any>
-    ? EntityState<TShape>
-    : never;
+export type EntityRecord<E> =
+  E extends EntityDef<string, infer TShape, any> ? EntityState<TShape> : never;
 
 /** Type-level shortcut: extract the handler map from an EntityDef. */
-export type EntityHandlers<E> = E extends EntityDef<string, EntityStateShape, infer THandlers>
+export type EntityHandlers<E> =
+  E extends EntityDef<string, EntityStateShape, infer THandlers>
     ? THandlers
     : never;
 
@@ -117,53 +122,55 @@ export type EntityHandlers<E> = E extends EntityDef<string, EntityStateShape, in
  *     literals
  */
 export function validateEntityState<TShape extends EntityStateShape>(
-    shape: TShape,
-    record: Record<string, unknown>,
-    entityName = '<entity>',
+  shape: TShape,
+  record: Record<string, unknown>,
+  entityName = "<entity>",
 ): EntityState<TShape> {
-    const out: Record<string, unknown> = {};
-    for (const [name, col] of Object.entries(shape)) {
-        const value = record[name];
-        if (value === undefined || value === null) {
-            if (col.nullable) {
-                out[name] = null;
-                continue;
-            }
-            throw new Error(
-                `Entity '${entityName}': column '${name}' is required but missing.`,
-            );
-        }
-        const expectedType = jsTypeForKind(col.kind);
-        if (expectedType && typeof value !== expectedType) {
-            throw new Error(
-                `Entity '${entityName}': column '${name}' expects ${expectedType}, ` +
-                `got ${typeof value} (${JSON.stringify(value)}).`,
-            );
-        }
-        if (col.enum && !col.enum.includes(value as never)) {
-            throw new Error(
-                `Entity '${entityName}': column '${name}' must be one of ` +
-                `${JSON.stringify(col.enum)}, got ${JSON.stringify(value)}.`,
-            );
-        }
-        out[name] = value;
+  const out: Record<string, unknown> = {};
+  for (const [name, col] of Object.entries(shape)) {
+    const value = record[name];
+    if (value === undefined || value === null) {
+      if (col.nullable) {
+        out[name] = null;
+        continue;
+      }
+      throw new Error(
+        `Entity '${entityName}': column '${name}' is required but missing.`,
+      );
     }
-    return out as EntityState<TShape>;
+    const expectedType = jsTypeForKind(col.kind);
+    if (expectedType && typeof value !== expectedType) {
+      throw new Error(
+        `Entity '${entityName}': column '${name}' expects ${expectedType}, ` +
+          `got ${typeof value} (${JSON.stringify(value)}).`,
+      );
+    }
+    if (col.enum && !col.enum.includes(value as never)) {
+      throw new Error(
+        `Entity '${entityName}': column '${name}' must be one of ` +
+          `${JSON.stringify(col.enum)}, got ${JSON.stringify(value)}.`,
+      );
+    }
+    out[name] = value;
+  }
+  return out as EntityState<TShape>;
 }
 
-function jsTypeForKind(kind: import('./schema').ColumnKind): 'string' | 'number' | 'boolean' | null {
-    switch (kind) {
-        case 'id':
-        case 'integer':
-        case 'real':
-            return 'number';
-        case 'text':
-            return 'string';
-        case 'boolean':
-            return 'boolean';
-        default:
-            return null;
-    }
+function jsTypeForKind(
+  kind: import("./schema").ColumnKind,
+): "string" | "number" | "boolean" | null {
+  switch (kind) {
+    case "id":
+    case "integer":
+    case "real":
+      return "number";
+    case "text":
+      return "string";
+    case "boolean":
+      return "boolean";
+    default:
+      return null;
+  }
 }
 
 // ── Initial state ──────────────────────────────────────────────────────────
@@ -175,21 +182,21 @@ function jsTypeForKind(kind: import('./schema').ColumnKind): 'string' | 'number'
  * record, before any handler has run.
  */
 function buildInitialState<TShape extends EntityStateShape>(
-    shape: TShape,
+  shape: TShape,
 ): EntityState<TShape> {
-    const out: Record<string, unknown> = {};
-    for (const [name, col] of Object.entries(shape)) {
-        if (col.nullable) {
-            out[name] = null;
-            continue;
-        }
-        const type = jsTypeForKind(col.kind);
-        if (type === 'number') out[name] = 0;
-        else if (type === 'string') out[name] = col.enum ? col.enum[0] : '';
-        else if (type === 'boolean') out[name] = false;
-        else out[name] = null;
+  const out: Record<string, unknown> = {};
+  for (const [name, col] of Object.entries(shape)) {
+    if (col.nullable) {
+      out[name] = null;
+      continue;
     }
-    return out as EntityState<TShape>;
+    const type = jsTypeForKind(col.kind);
+    if (type === "number") out[name] = 0;
+    else if (type === "string") out[name] = col.enum ? col.enum[0] : "";
+    else if (type === "boolean") out[name] = false;
+    else out[name] = null;
+  }
+  return out as EntityState<TShape>;
 }
 
 // ── defineEntity ────────────────────────────────────────────────────────────
@@ -220,80 +227,100 @@ function buildInitialState<TShape extends EntityStateShape>(
  * the framework — the caller's args start at index 1.
  */
 export function defineEntity<
-    const TName extends string,
-    TShape extends EntityStateShape,
-    THandlers extends EntityHandlerMap<EntityState<TShape>>,
+  const TName extends string,
+  TShape extends EntityStateShape,
+  THandlers extends EntityHandlerMap<EntityState<TShape>>,
 >(
-    name: TName,
-    config: {
-        readonly state: TShape;
-        readonly handlers: THandlers;
-    },
+  name: TName,
+  config: {
+    readonly state: TShape;
+    readonly source?: SourceProjections;
+    readonly handlers: THandlers;
+  },
 ): EntityDef<TName, TShape, THandlers> {
-    // Runtime guards: catch the easy mistakes at construction time so the
-    // user sees them on import, not on first handler call.
-    if (!name || typeof name !== 'string') {
-        throw new Error(`defineEntity: name must be a non-empty string.`);
+  // Runtime guards: catch the easy mistakes at construction time so the
+  // user sees them on import, not on first handler call.
+  if (!name || typeof name !== "string") {
+    throw new Error("defineEntity: name must be a non-empty string.");
+  }
+  if (name.startsWith("$")) {
+    throw new Error(
+      `defineEntity('${name}'): names may not start with '$' ` +
+        `(reserved for framework metadata).`,
+    );
+  }
+  if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(
+      `defineEntity('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/ ` +
+        `so it can be used as a Restate object name and a NATS subject token.`,
+    );
+  }
+  for (const colName of Object.keys(config.state)) {
+    if (colName.startsWith("$")) {
+      throw new Error(
+        `defineEntity('${name}'): state field '${colName}' may not start ` +
+          `with '$' (reserved for framework metadata).`,
+      );
     }
-    if (name.startsWith('$')) {
-        throw new Error(
-            `defineEntity('${name}'): names may not start with '$' ` +
-            `(reserved for framework metadata).`,
-        );
+  }
+  for (const [handlerName, fn] of Object.entries(config.handlers)) {
+    if (typeof fn !== "function") {
+      throw new Error(
+        `defineEntity('${name}'): handler '${handlerName}' must be a function.`,
+      );
     }
-    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
-        throw new Error(
-            `defineEntity('${name}'): name must match /^[a-zA-Z][a-zA-Z0-9_]*$/ ` +
-            `so it can be used as a Restate object name and a NATS subject token.`,
-        );
+    // Restate's handler-name regex is ^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$.
+    // Names starting with `_` (single underscore + letter/digit) are
+    // reserved for the framework's built-in handlers (`_read`, `_init`,
+    // any future additions). `$` is reserved for metadata fields.
+    if (handlerName.startsWith("_") || handlerName.startsWith("$")) {
+      throw new Error(
+        `defineEntity('${name}'): handler name '${handlerName}' is reserved ` +
+          `(framework uses '_'/'$' prefixes for internal handlers).`,
+      );
     }
-    for (const colName of Object.keys(config.state)) {
-        if (colName.startsWith('$')) {
-            throw new Error(
-                `defineEntity('${name}'): state field '${colName}' may not start ` +
-                `with '$' (reserved for framework metadata).`,
-            );
-        }
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(handlerName)) {
+      throw new Error(
+        `defineEntity('${name}'): handler name '${handlerName}' must match ` +
+          `/^[a-zA-Z][a-zA-Z0-9_]*$/ (Restate's handler-name regex).`,
+      );
     }
-    for (const [handlerName, fn] of Object.entries(config.handlers)) {
-        if (typeof fn !== 'function') {
-            throw new Error(
-                `defineEntity('${name}'): handler '${handlerName}' must be a function.`,
-            );
-        }
-        // Restate's handler-name regex is ^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$.
-        // Names starting with `_` (single underscore + letter/digit) are
-        // reserved for the framework's built-in handlers (`_read`, `_init`,
-        // any future additions). `$` is reserved for metadata fields.
-        if (handlerName.startsWith('_') || handlerName.startsWith('$')) {
-            throw new Error(
-                `defineEntity('${name}'): handler name '${handlerName}' is reserved ` +
-                `(framework uses '_'/'$' prefixes for internal handlers).`,
-            );
-        }
-        if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(handlerName)) {
-            throw new Error(
-                `defineEntity('${name}'): handler name '${handlerName}' must match ` +
-                `/^[a-zA-Z][a-zA-Z0-9_]*$/ (Restate's handler-name regex).`,
-            );
-        }
-    }
+  }
 
-    return {
-        $tag: 'entity',
-        $name: name,
-        $state: config.state,
-        $handlers: config.handlers,
-        $initialState: buildInitialState(config.state),
-        $record: undefined as never,
-    };
+  const source = config.source ?? {};
+
+  // Guard: source projection names must not collide with state field names.
+  // The merged state object would silently overwrite one with the other.
+  for (const projName of Object.keys(source)) {
+    if (projName in config.state) {
+      throw new Error(
+        `defineEntity('${name}'): source projection '${projName}' collides ` +
+          `with state field of the same name. Rename one.`,
+      );
+    }
+  }
+
+  return {
+    $tag: "entity",
+    $name: name,
+    $state: config.state,
+    $handlers: config.handlers,
+    $initialState: buildInitialState(config.state),
+    $source: source,
+    $sourceInitial: buildSourceInitial(source),
+    $record: undefined as never,
+  };
 }
 
 // ── Runtime helpers ────────────────────────────────────────────────────────
 
 /** Type guard for any entity definition. */
 export function isEntity(x: unknown): x is AnyEntity {
-    return typeof x === 'object' && x !== null && (x as { $tag?: string }).$tag === 'entity';
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    (x as { $tag?: string }).$tag === "entity"
+  );
 }
 
 // NOTE: an earlier draft exposed a `server<T>(handlers: T): T` identity
@@ -318,12 +345,12 @@ export function isEntity(x: unknown): x is AnyEntity {
 
 /** Well-known Symbol key used to carry emitted table inserts on the
  *  handler's return value. Non-enumerable, invisible to JSON.stringify. */
-export const EMIT_KEY: unique symbol = Symbol.for('syncengine.emit');
+export const EMIT_KEY: unique symbol = Symbol.for("syncengine.emit");
 
 /** A table row to publish as an INSERT delta. */
 export interface EmitInsert {
-    readonly table: string;
-    readonly record: Record<string, unknown>;
+  readonly table: string;
+  readonly record: Record<string, unknown>;
 }
 
 /**
@@ -342,23 +369,211 @@ export interface EmitInsert {
  * ```
  */
 export function emit<S extends Record<string, unknown>>(
-    state: S,
-    ...inserts: EmitInsert[]
+  state: S,
+  ...inserts: EmitInsert[]
 ): S {
-    const wrapped = { ...state };
-    Object.defineProperty(wrapped, EMIT_KEY, {
-        value: inserts,
-        enumerable: false,
-        configurable: true,
-    });
-    return wrapped as S;
+  const wrapped = { ...state };
+  // Non-enumerable: the symbol must NOT survive `{ ...base, ...result }`
+  // spreading in `applyHandler`, otherwise stale emits bleed through to
+  // the next action during client-side `rebase`. `applyHandler` extracts
+  // emits from the raw handler result BEFORE the spread and re-attaches
+  // them to the validated output. JSON.stringify ignores all Symbols.
+  Object.defineProperty(wrapped, EMIT_KEY, {
+    value: inserts,
+    enumerable: false,
+    configurable: true,
+  });
+  return wrapped as S;
 }
 
 /** Extract emitted inserts from a handler return value, if any. */
 export function extractEmits(
-    state: Record<string, unknown>,
+  state: Record<string, unknown>,
 ): EmitInsert[] | undefined {
-    return (state as Record<symbol, unknown>)[EMIT_KEY] as EmitInsert[] | undefined;
+  return (state as Record<symbol, unknown>)[EMIT_KEY] as
+    | EmitInsert[]
+    | undefined;
+}
+
+// ── Source projections — derived entity state from tables ────────────────────
+//
+// `source` declarations on `defineEntity` let an entity track simple
+// aggregates (sum, count, min, max) over table rows linked by a key
+// column. The projections are stored in Restate state alongside the
+// user-defined state and updated incrementally every time the handler
+// calls `emit()`. The handler sees a unified state object with both
+// user fields and projection fields.
+
+/** Wire representation of a single source projection. */
+export interface SourceProjectionDef {
+  readonly table: string;
+  readonly fn: "sum" | "count" | "min" | "max";
+  readonly field: string; // column to aggregate ('*' for count)
+  readonly keyColumn: string; // column in table that matches entity key
+}
+
+/** Map of projection name → definition. */
+export type SourceProjections = Record<string, SourceProjectionDef>;
+
+function refOrStr(x: string | ColumnRef<string, string, unknown>): string {
+  return typeof x === "string" ? x : x.$name;
+}
+
+/** Declare a `sum(column)` projection scoped by a key column. */
+export function sourceSum(
+  table: AnyTable,
+  valueCol: string | ColumnRef<string, string, number>,
+  keyCol: string | ColumnRef<string, string, unknown>,
+): SourceProjectionDef {
+  return {
+    table: table.$name,
+    fn: "sum",
+    field: refOrStr(valueCol),
+    keyColumn: refOrStr(keyCol),
+  };
+}
+
+/** Declare a `count(*)` projection scoped by a key column. */
+export function sourceCount(
+  table: AnyTable,
+  keyCol: string | ColumnRef<string, string, unknown>,
+): SourceProjectionDef {
+  return {
+    table: table.$name,
+    fn: "count",
+    field: "*",
+    keyColumn: refOrStr(keyCol),
+  };
+}
+
+/** Declare a `min(column)` projection scoped by a key column. */
+export function sourceMin(
+  table: AnyTable,
+  valueCol: string | ColumnRef<string, string, number>,
+  keyCol: string | ColumnRef<string, string, unknown>,
+): SourceProjectionDef {
+  return {
+    table: table.$name,
+    fn: "min",
+    field: refOrStr(valueCol),
+    keyColumn: refOrStr(keyCol),
+  };
+}
+
+/** Declare a `max(column)` projection scoped by a key column. */
+export function sourceMax(
+  table: AnyTable,
+  valueCol: string | ColumnRef<string, string, number>,
+  keyCol: string | ColumnRef<string, string, unknown>,
+): SourceProjectionDef {
+  return {
+    table: table.$name,
+    fn: "max",
+    field: refOrStr(valueCol),
+    keyColumn: refOrStr(keyCol),
+  };
+}
+
+/** Compute initial projection values from the aggregate function. */
+export function buildSourceInitial(
+  source: SourceProjections,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [name, def] of Object.entries(source)) {
+    switch (def.fn) {
+      case "sum":
+      case "count":
+        out[name] = 0;
+        break;
+      case "min":
+        out[name] = Number.POSITIVE_INFINITY;
+        break;
+      case "max":
+        out[name] = Number.NEGATIVE_INFINITY;
+        break;
+    }
+  }
+  return out;
+}
+
+// ── Projection merge / split / apply ────────────────────────────────────────
+
+/** Merge user state and source projections into the unified object
+ *  the handler receives. */
+export function mergeSourceIntoState(
+  userState: Record<string, unknown>,
+  projections: Record<string, number>,
+): Record<string, unknown> {
+  return { ...userState, ...projections };
+}
+
+/** Extract only user-defined fields from the handler's return value,
+ *  discarding any source projection fields the handler may have
+ *  returned unchanged. */
+export function pickUserState(
+  result: Record<string, unknown>,
+  stateShape: EntityStateShape,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(stateShape)) {
+    if (key in result) out[key] = result[key];
+  }
+  return out;
+}
+
+/**
+ * Incrementally update source projections based on emitted table
+ * inserts. Each emit is checked against the projection's table and
+ * key column. If the emit's `record[keyColumn]` matches `entityKey`,
+ * the aggregate is updated.
+ *
+ * The `entityKey` parameter is the raw entity instance key (e.g.,
+ * `'alice'`). Emit records that use the literal `'$key'` as the key
+ * value are also matched (the entity runtime resolves `'$key'` to
+ * the actual key before publishing, but at the projection-update
+ * stage we check both).
+ */
+export function applySourceDeltas(
+  current: Record<string, number>,
+  sourceDefs: SourceProjections,
+  emits: EmitInsert[] | undefined,
+  entityKey: string,
+): Record<string, number> {
+  if (!emits || emits.length === 0) return current;
+
+  const updated = { ...current };
+  for (const [projName, def] of Object.entries(sourceDefs)) {
+    for (const insert of emits) {
+      if (insert.table !== def.table) continue;
+      const recordKeyValue = insert.record[def.keyColumn];
+      if (recordKeyValue !== entityKey && recordKeyValue !== "$key") continue;
+
+      const val = def.field === "*" ? 1 : Number(insert.record[def.field]) || 0;
+      switch (def.fn) {
+        case "sum":
+          updated[projName] = (updated[projName] ?? 0) + val;
+          break;
+        case "count":
+          // Every emit is a new row insertion → always +1. A compensating
+          // emit (negative amount) is still a new transaction/event.
+          updated[projName] = (updated[projName] ?? 0) + 1;
+          break;
+        case "min":
+          updated[projName] = Math.min(
+            updated[projName] ?? Number.POSITIVE_INFINITY,
+            val,
+          );
+          break;
+        case "max":
+          updated[projName] = Math.max(
+            updated[projName] ?? Number.NEGATIVE_INFINITY,
+            val,
+          );
+          break;
+      }
+    }
+  }
+  return updated;
 }
 
 // ── Pure handler execution ─────────────────────────────────────────────────
@@ -385,36 +600,58 @@ export function extractEmits(
  * merged into the current record.
  */
 export function applyHandler(
-    entity: AnyEntity,
-    handlerName: string,
-    currentState: Record<string, unknown> | null,
-    args: readonly unknown[],
+  entity: AnyEntity,
+  handlerName: string,
+  currentState: Record<string, unknown> | null,
+  args: readonly unknown[],
 ): Record<string, unknown> {
-    const handlerFn = entity.$handlers[handlerName] as
-        | EntityHandler<Record<string, unknown>, readonly unknown[]>
-        | undefined;
-    if (!handlerFn) {
-        throw new Error(
-            `entity '${entity.$name}': no handler named '${handlerName}'.`,
-        );
-    }
+  const handlerFn = entity.$handlers[handlerName] as
+    | EntityHandler<Record<string, unknown>, readonly unknown[]>
+    | undefined;
+  if (!handlerFn) {
+    throw new Error(
+      `entity '${entity.$name}': no handler named '${handlerName}'.`,
+    );
+  }
 
-    const base = currentState ?? (entity.$initialState as Record<string, unknown>);
+  const base =
+    currentState ?? (entity.$initialState as Record<string, unknown>);
 
-    let next: Record<string, unknown>;
-    try {
-        const result = handlerFn(base, ...args);
-        // Allow handlers to return a partial state — merge into the current
-        // record. Returning the full state also works (the spread is a no-op).
-        next = { ...base, ...result };
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(
-            `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
-        );
-    }
+  let next: Record<string, unknown>;
+  let emits: EmitInsert[] | undefined;
+  try {
+    const result = handlerFn(base, ...args);
+    // Capture emit()ed inserts before the spread (they survive the
+    // spread since EMIT_KEY is enumerable, but validateEntityState
+    // builds a fresh object that drops them).
+    emits = extractEmits(result as Record<string, unknown>);
+    // Allow handlers to return a partial state — merge into the current
+    // record. Returning the full state also works (the spread is a no-op).
+    next = { ...base, ...result };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
+    );
+  }
 
-    return validateEntityState(entity.$state, next, entity.$name) as Record<string, unknown>;
+  const validated = validateEntityState(
+    entity.$state,
+    next,
+    entity.$name,
+  ) as Record<string, unknown>;
+
+  // Re-attach emit()ed inserts to the validated state so the entity
+  // runtime can extract them after applyHandler returns.
+  if (emits) {
+    Object.defineProperty(validated, EMIT_KEY, {
+      value: emits,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  return validated;
 }
 
 // ── Rebase (latency compensation) ──────────────────────────────────────────
@@ -440,44 +677,44 @@ export function applyHandler(
 // concurrently and the caller re-filters the queue).
 
 export interface RebaseResult {
-    /** The optimistic state after folding valid pending actions over
-     *  the confirmed base. If `confirmed` is null, this is also null. */
-    readonly state: Record<string, unknown> | null;
-    /** Stable IDs of pending actions that threw during rebase. The
-     *  caller typically drops these from the pending queue. */
-    readonly failedIds: readonly number[];
+  /** The optimistic state after folding valid pending actions over
+   *  the confirmed base. If `confirmed` is null, this is also null. */
+  readonly state: Record<string, unknown> | null;
+  /** Stable IDs of pending actions that threw during rebase. The
+   *  caller typically drops these from the pending queue. */
+  readonly failedIds: readonly number[];
 }
 
 export interface PendingActionLike {
-    /** Stable, monotonically-increasing id assigned at enqueue time.
-     *  Used by `rebase()` to report failures without relying on array
-     *  indices that may shift if the pending queue is mutated
-     *  concurrently. */
-    readonly id: number;
-    readonly handlerName: string;
-    readonly args: readonly unknown[];
+  /** Stable, monotonically-increasing id assigned at enqueue time.
+   *  Used by `rebase()` to report failures without relying on array
+   *  indices that may shift if the pending queue is mutated
+   *  concurrently. */
+  readonly id: number;
+  readonly handlerName: string;
+  readonly args: readonly unknown[];
 }
 
 export function rebase(
-    entity: AnyEntity,
-    confirmed: Record<string, unknown> | null,
-    pending: readonly PendingActionLike[],
+  entity: AnyEntity,
+  confirmed: Record<string, unknown> | null,
+  pending: readonly PendingActionLike[],
 ): RebaseResult {
-    if (confirmed === null) {
-        return { state: null, failedIds: [] };
+  if (confirmed === null) {
+    return { state: null, failedIds: [] };
+  }
+  let state = confirmed;
+  const failedIds: number[] = [];
+  for (const action of pending) {
+    try {
+      state = applyHandler(entity, action.handlerName, state, action.args);
+    } catch {
+      // Rebase failed on this action — drop it from the chain but
+      // keep folding subsequent actions on the unchanged state.
+      failedIds.push(action.id);
     }
-    let state = confirmed;
-    const failedIds: number[] = [];
-    for (const action of pending) {
-        try {
-            state = applyHandler(entity, action.handlerName, state, action.args);
-        } catch {
-            // Rebase failed on this action — drop it from the chain but
-            // keep folding subsequent actions on the unchanged state.
-            failedIds.push(action.id);
-        }
-    }
-    return { state, failedIds };
+  }
+  return { state, failedIds };
 }
 
 /** Generic alias used in function signatures that accept any entity, the

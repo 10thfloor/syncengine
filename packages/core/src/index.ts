@@ -67,6 +67,14 @@ export {
     emit,
     extractEmits,
     EMIT_KEY,
+    sourceSum,
+    sourceCount,
+    sourceMin,
+    sourceMax,
+    buildSourceInitial,
+    mergeSourceIntoState,
+    pickUserState,
+    applySourceDeltas,
 } from './entity';
 
 // ── Project config (PLAN Phase 8 — workspace resolution) ─────────────────
@@ -79,6 +87,8 @@ export type {
 } from './config';
 export type {
     EmitInsert,
+    SourceProjectionDef,
+    SourceProjections,
     EntityDef,
     AnyEntity,
     EntityState,

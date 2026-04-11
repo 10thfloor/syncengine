@@ -31,6 +31,9 @@ import {
     isEntity,
     applyHandler,
     extractEmits,
+    mergeSourceIntoState,
+    pickUserState,
+    applySourceDeltas,
     type AnyEntity,
     type EmitInsert,
 } from "@syncengine/core";
@@ -38,6 +41,7 @@ import {
 const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
 
 const STATE_KEY = "state";
+const SOURCE_KEY = "source";
 
 /** Result envelope returned by every entity handler. */
 interface HandlerResult {
@@ -63,7 +67,13 @@ export function splitObjectKey(objKey: string): { workspaceId: string; entityKey
 /** Run a user handler on the current state, persist the result, and
  *  broadcast it. Wraps `applyHandler` (the pure piece) with the Restate
  *  context I/O — load, save, publish. Errors from `applyHandler` are
- *  re-thrown as TerminalError so Restate returns a 4xx to the caller. */
+ *  re-thrown as TerminalError so Restate returns a 4xx to the caller.
+ *
+ *  Source projections (Variation D): if the entity declares `source`,
+ *  the handler sees a merged state containing both user fields and
+ *  projection fields. After the handler, user state is split back,
+ *  projections are updated incrementally from any `emit()` inserts,
+ *  and both are persisted separately in Restate state. */
 async function runHandler(
     ctx: restate.ObjectContext,
     entity: AnyEntity,
@@ -71,36 +81,63 @@ async function runHandler(
     args: readonly unknown[],
 ): Promise<HandlerResult> {
     const { workspaceId, entityKey } = splitObjectKey(ctx.key);
+    const hasSource = Object.keys(entity.$source).length > 0;
 
+    // Load user state + source projections
     const stored = await ctx.get<Record<string, unknown>>(STATE_KEY);
+    const projections = hasSource
+        ? (await ctx.get<Record<string, number>>(SOURCE_KEY)) ?? { ...entity.$sourceInitial }
+        : {};
+
+    // Merge into the unified state the handler sees
+    const base = stored ?? (entity.$initialState as Record<string, unknown>);
+    const merged = hasSource ? mergeSourceIntoState(base, projections) : base;
 
     let validated: Record<string, unknown>;
     try {
-        validated = applyHandler(entity, handlerName, stored, args);
+        validated = applyHandler(entity, handlerName, merged, args);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new restate.TerminalError(message);
     }
 
-    // Check for emitted table inserts before persisting — the Symbol
-    // key is non-enumerable and invisible to JSON.stringify, so it
-    // won't leak into Restate's state storage.
-    const emits = extractEmits(validated);
+    // Extract emitted table inserts (Symbol key, invisible to JSON)
+    // Resolve '$key' placeholders in record values to the actual entity key
+    // so published rows have the real key in SQLite, not the literal '$key'.
+    const rawEmits = extractEmits(validated);
+    const emits = rawEmits?.map((ins) => {
+        const hasPlaceholder = Object.values(ins.record).some((v) => v === '$key');
+        if (!hasPlaceholder) return ins;
+        const resolved: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(ins.record)) {
+            resolved[k] = v === '$key' ? entityKey : v;
+        }
+        return { table: ins.table, record: resolved };
+    });
 
-    // Persist atomically (Restate's `ctx.set` is part of the same journal
-    // record as the handler return; either both happen or neither does).
-    ctx.set(STATE_KEY, validated);
+    // Split: persist user state fields only (not projection fields)
+    const userState = hasSource ? pickUserState(validated, entity.$state) : validated;
+    ctx.set(STATE_KEY, userState);
 
-    // Fan out via NATS so subscribed clients update without polling.
-    await publishState(ctx, workspaceId, entity.$name, entityKey, validated);
+    // Update projections incrementally from emitted deltas
+    let updatedProjections = projections;
+    if (hasSource && emits && emits.length > 0) {
+        updatedProjections = applySourceDeltas(projections, entity.$source, emits, entityKey);
+        ctx.set(SOURCE_KEY, updatedProjections);
+    }
 
-    // Publish emitted table deltas to the entity-writes subject so
-    // every client's data worker picks them up through JetStream.
+    // Broadcast the MERGED state so clients see both user + projection fields
+    const broadcastState = hasSource
+        ? mergeSourceIntoState(userState, updatedProjections)
+        : userState;
+    await publishState(ctx, workspaceId, entity.$name, entityKey, broadcastState);
+
+    // Publish emitted table deltas to the entity-writes subject
     if (emits && emits.length > 0) {
         await publishTableDeltas(ctx, workspaceId, emits);
     }
 
-    return { state: validated };
+    return { state: broadcastState };
 }
 
 /** Publish a state-update message via NATS core (ephemeral). The subject
@@ -140,18 +177,20 @@ async function publishTableDeltas(
     inserts: readonly EmitInsert[],
 ): Promise<void> {
     const subject = `ws.${workspaceId}.entity-writes`;
+    // Generate deterministic nonces OUTSIDE ctx.run so Restate journal
+    // replay produces identical values. ctx.rand is deterministic.
+    const nonces = inserts.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
     await ctx.run("publish entity table deltas", async () => {
         const { connect, JSONCodec } = await import("nats");
         const nc = await connect({ servers: NATS_URL });
         const codec = JSONCodec();
-        let seq = 0;
-        for (const insert of inserts) {
+        for (let i = 0; i < inserts.length; i++) {
             nc.publish(subject, codec.encode({
                 type: "INSERT",
-                table: insert.table,
-                record: insert.record,
+                table: inserts[i]!.table,
+                record: inserts[i]!.record,
                 _clientId: "restate-entity-runtime",
-                _nonce: `restate-${ctx.key}-${Date.now()}-${++seq}`,
+                _nonce: nonces[i],
             }));
         }
         await nc.flush();
@@ -170,21 +209,35 @@ function buildHandlerBag(entity: AnyEntity): Record<
         (ctx: restate.ObjectContext, args: unknown) => Promise<HandlerResult>
     > = {};
 
+    const hasSource = Object.keys(entity.$source).length > 0;
+
     // Built-in: _read — returns current state without mutating.
+    // Merges source projections if the entity declares them.
     bag._read = async (ctx: restate.ObjectContext): Promise<HandlerResult> => {
         const stored = await ctx.get<Record<string, unknown>>(STATE_KEY);
         const state = stored ?? (entity.$initialState as Record<string, unknown>);
-        return { state };
+        if (!hasSource) return { state };
+        const projections = (await ctx.get<Record<string, number>>(SOURCE_KEY)) ?? { ...entity.$sourceInitial };
+        return { state: mergeSourceIntoState(state, projections) };
     };
 
     // Built-in: _init — idempotent seed of the initial state. Useful for
     // pre-creating entities before any handler call (rare). Returns the
-    // existing state if already initialized.
+    // existing state if already initialized; also initializes source
+    // projections if not yet present.
     bag._init = async (ctx: restate.ObjectContext): Promise<HandlerResult> => {
         const stored = await ctx.get<Record<string, unknown>>(STATE_KEY);
-        if (stored) return { state: stored };
+        if (stored) {
+            if (!hasSource) return { state: stored };
+            const projections = (await ctx.get<Record<string, number>>(SOURCE_KEY)) ?? { ...entity.$sourceInitial };
+            return { state: mergeSourceIntoState(stored, projections) };
+        }
         const initial = entity.$initialState as Record<string, unknown>;
         ctx.set(STATE_KEY, initial);
+        if (hasSource) {
+            ctx.set(SOURCE_KEY, { ...entity.$sourceInitial });
+            return { state: mergeSourceIntoState(initial, entity.$sourceInitial) };
+        }
         return { state: initial };
     };
 

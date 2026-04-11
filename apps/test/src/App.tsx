@@ -1,32 +1,9 @@
-import { useEffect, useRef, useMemo } from "react";
-import {
-  store,
-  table,
-  id,
-  integer,
-  text,
-  view,
-  sum,
-  count,
-  useStore,
-  useEntity,
-} from "@syncengine/client";
+import { useEffect, useRef, useMemo, useState } from "react";
+import { store, useStore, useEntity } from "@syncengine/client";
+import { clicks, totalsView, channels } from "./schema";
 import { counter } from "./entities/counter.actor";
 import { cursors } from "./entities/cursors.actor";
-
-// ── Schema ───────────────────────────────────────────────────────
-const clicks = table("clicks", {
-  id: id(),
-  label: text(),
-  amount: integer(),
-});
-
-const totalsView = view(clicks).aggregate([], {
-  total: sum(clicks.amount),
-  numClicks: count(),
-});
-
-const channels = [{ name: "main", tables: [clicks] }] as const;
+import { account } from "./entities/account.actor";
 
 // ── Store ────────────────────────────────────────────────────────
 export const db = store({
@@ -209,6 +186,9 @@ export default function App() {
   const total = views.totalsView[0]?.total ?? 0;
   const numClicks = views.totalsView[0]?.numClicks ?? 0;
 
+  const userId = useMemo(getUserId, []);
+  const color = useMemo(randomColor, []);
+
   const { state: counterState, actions: counterActions } = useEntity(
     counter,
     "global",
@@ -217,9 +197,8 @@ export default function App() {
     cursors,
     "global",
   );
-
-  const userId = useMemo(getUserId, []);
-  const color = useMemo(randomColor, []);
+  const { state: acctState, actions: acctActions } = useEntity(account, userId);
+  const [acctError, setAcctError] = useState<string | null>(null);
   const lastSend = useRef(0);
   const actionsRef = useRef(cursorActions);
   actionsRef.current = cursorActions;
@@ -344,6 +323,95 @@ export default function App() {
               }
             >
               +100
+            </button>
+          </div>
+        </section>
+
+        <section style={{ marginTop: "2rem" }}>
+          <h2>Account (source projections)</h2>
+          <p>
+            Balance:{" "}
+            <strong style={{ fontSize: "1.5rem" }}>
+              $
+              {((acctState as Record<string, unknown>)?.balance as number) ?? 0}
+            </strong>{" "}
+            &middot;{" "}
+            {String((acctState as Record<string, unknown>)?.txnCount ?? 0)} txns
+            {((acctState as Record<string, unknown>)?.frozen as boolean) && (
+              <span style={{ color: "#ef4444", marginLeft: "0.5rem" }}>
+                FROZEN
+              </span>
+            )}
+          </p>
+          {acctError && (
+            <p style={{ color: "#ef4444", fontSize: "0.85rem" }}>{acctError}</p>
+          )}
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => {
+                setAcctError(null);
+                acctActions
+                  .deposit(100)
+                  .catch((e: Error) => setAcctError(e.message));
+              }}
+            >
+              Deposit $100
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAcctError(null);
+                acctActions
+                  .deposit(50)
+                  .catch((e: Error) => setAcctError(e.message));
+              }}
+            >
+              Deposit $50
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAcctError(null);
+                acctActions
+                  .withdraw(30)
+                  .catch((e: Error) => setAcctError(e.message));
+              }}
+            >
+              Withdraw $30
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAcctError(null);
+                acctActions
+                  .withdraw(99999)
+                  .catch((e: Error) => setAcctError(e.message));
+              }}
+            >
+              Withdraw $99999
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAcctError(null);
+                acctActions
+                  .freeze()
+                  .catch((e: Error) => setAcctError(e.message));
+              }}
+            >
+              Freeze
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAcctError(null);
+                acctActions
+                  .unfreeze()
+                  .catch((e: Error) => setAcctError(e.message));
+              }}
+            >
+              Unfreeze
             </button>
           </div>
         </section>
