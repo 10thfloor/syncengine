@@ -109,13 +109,15 @@ type WorkerOutMessage =
     | { type: 'VIEW_UPDATE'; viewName: string; deltas: Array<{ record: Record<string, unknown>; weight: number }> }
     | { type: 'FULL_SYNC'; snapshots: Record<string, Record<string, unknown>[]> }
     | { type: 'UNDO_SIZE'; size: number }
-    | { type: 'CONNECTION_STATUS'; status: ConnectionStatus }
+    | { type: 'CONNECTION_STATUS'; status: ConnectionStatus; error?: string }
     | { type: 'SYNC_STATUS'; phase: 'idle' | 'replaying' | 'live'; messagesReplayed: number; totalMessages?: number; snapshotLoaded?: boolean }
     | { type: 'MIGRATION_STATUS'; fromVersion: number; toVersion: number; status: 'running' | 'complete' | 'failed'; stepsApplied: number; error?: string; failedAtVersion?: number }
     | { type: 'CONFLICTS'; conflicts: Array<{ table: string; recordId: string; field: string; winner: unknown; loser: unknown; winnerHlc: number; loserHlc: number; strategy: string }> }
     | { type: 'TOPIC_UPDATE'; name: string; key: string; peerId: string; data: Record<string, unknown>; ts: number; leave: boolean }
     | { type: 'WORKSPACE_STATUS'; wsKey: string; status: string; requestId: string; error?: string }
-    | { type: 'WORKSPACE_REGISTRY'; event: { type: string; workspaceId: string; [key: string]: unknown } };
+    | { type: 'WORKSPACE_REGISTRY'; event: { type: string; workspaceId: string; [key: string]: unknown } }
+    | { type: 'HEARTBEAT' }
+    | { type: 'VIEW_STALENESS'; viewName: string; stale: boolean };
 
 type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
     | TopicSubscribeMessage | TopicPublishMessage | TopicLeaveMessage | TopicUnsubscribeMessage;
@@ -192,6 +194,7 @@ export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> 
     > };
     readonly ready: boolean;
     readonly connection: ConnectionStatus;
+    readonly connectionError?: string;
     readonly sync: SyncStatus;
     readonly conflicts: readonly ConflictRecord[];
     readonly undo: { readonly size: number; run: () => void };
@@ -199,6 +202,8 @@ export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> 
         reset: () => void;
         dismissConflict: (index: number) => void;
     };
+    readonly staleViews: ReadonlySet<string>;
+    readonly workerHealth: 'alive' | 'dead';
     workspace: WorkspaceInfo;
     workspaces: readonly string[];
     setWorkspace: (wsKey: string) => void;
@@ -260,6 +265,12 @@ export interface Store<
 
     /** Switch to a different workspace by key. */
     setWorkspace(wsKey: string): void;
+
+    readonly staleViews: ReadonlySet<string>;
+
+    readonly workerHealth: 'alive' | 'dead';
+
+    readonly connectionError?: string;
 
     /** Per-table typed imperative namespace. */
     readonly tables: TableNamespace<TTables>;
@@ -461,7 +472,21 @@ export function store<
     // Always start in 'connecting' — the runtime config always resolves
     // to a NATS URL (dev default or env-supplied prod value).
     let connectionStatus: ConnectionStatus = 'connecting';
+    let connectionError: string | undefined;
     const connectionSubscribers = new Set<() => void>();
+
+    let staleViews: ReadonlySet<string> = new Set();
+    const stalenessSubscribers = new Set<() => void>();
+
+    let workerHealth: 'alive' | 'dead' = 'alive';
+    let lastHeartbeat = Date.now();
+    const workerHealthSubscribers = new Set<() => void>();
+    const heartbeatCheckInterval = setInterval(() => {
+        if (Date.now() - lastHeartbeat > 15_000 && workerHealth === 'alive') {
+            workerHealth = 'dead';
+            workerHealthSubscribers.forEach((fn) => fn());
+        }
+    }, 5_000);
 
     let syncStatus: SyncStatus = { phase: 'idle', messagesReplayed: 0, snapshotLoaded: false };
     const syncStatusSubscribers = new Set<() => void>();
@@ -640,6 +665,15 @@ export function store<
                 return;
             }
 
+            if (msg.type === 'HEARTBEAT') {
+                lastHeartbeat = Date.now();
+                if (workerHealth === 'dead') {
+                    workerHealth = 'alive';
+                    workerHealthSubscribers.forEach((fn) => fn());
+                }
+                return;
+            }
+
             switch (msg.type) {
                 case 'READY':
                     ready = true;
@@ -670,6 +704,7 @@ export function store<
 
                 case 'CONNECTION_STATUS':
                     connectionStatus = msg.status;
+                    connectionError = msg.status === 'connected' ? undefined : msg.error;
                     connectionSubscribers.forEach((fn) => fn());
                     break;
 
@@ -802,6 +837,19 @@ export function store<
                         knownWorkspaces = Object.freeze(knownWorkspaces.filter((w) => w !== wsId));
                         registrySubscribers.forEach((fn) => fn());
                     }
+                    break;
+                }
+
+                case 'VIEW_STALENESS': {
+                    const viewId = viewDisplayToId.get(msg.viewName) ?? msg.viewName;
+                    const next = new Set(staleViews);
+                    if (msg.stale) {
+                        next.add(viewId);
+                    } else {
+                        next.delete(viewId);
+                    }
+                    staleViews = next;
+                    stalenessSubscribers.forEach((fn) => fn());
                     break;
                 }
 
@@ -958,6 +1006,18 @@ export function store<
         }, []);
         const workspaces = useSyncExternalStore(subRegistry, () => knownWorkspaces);
 
+        const subWorkerHealth = useCallback((onChange: () => void) => {
+            workerHealthSubscribers.add(onChange);
+            return () => { workerHealthSubscribers.delete(onChange); };
+        }, []);
+        const health = useSyncExternalStore(subWorkerHealth, () => workerHealth);
+
+        const subStaleness = useCallback((onChange: () => void) => {
+            stalenessSubscribers.add(onChange);
+            return () => { stalenessSubscribers.delete(onChange); };
+        }, []);
+        const stale = useSyncExternalStore(subStaleness, () => staleViews);
+
         const undoObj = useMemo(
             () => ({ size: undoCount, run: undoRun }),
             [undoCount],
@@ -972,6 +1032,7 @@ export function store<
             views: viewData as UseResult<TViews>['views'],
             ready: isReady,
             connection,
+            connectionError,
             sync,
             conflicts,
             undo: undoObj,
@@ -979,6 +1040,8 @@ export function store<
             workspace,
             workspaces,
             setWorkspace,
+            workerHealth: health,
+            staleViews: stale,
         };
     }
 
@@ -1083,6 +1146,9 @@ export function store<
     getWorker();
 
     const storeHandle: Store<TTables, TChannels> = {
+        get workerHealth() { return workerHealth; },
+        get connectionError() { return connectionError; },
+        get staleViews() { return staleViews; },
         get workspace() { return workspaceStatus; },
         get workspaces() { return knownWorkspaces; },
         setWorkspace,
@@ -1125,6 +1191,9 @@ export function store<
             undoSubscribers.clear();
             workspaceSubscribers.clear();
             registrySubscribers.clear();
+            stalenessSubscribers.clear();
+            clearInterval(heartbeatCheckInterval);
+            workerHealthSubscribers.clear();
             for (const timer of topicTimers.values()) clearInterval(timer);
             topicTimers.clear();
             topicPeers.clear();

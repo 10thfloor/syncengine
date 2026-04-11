@@ -562,9 +562,9 @@ function loadLastProcessedSeqs() {
 
 // ── Status helpers ──────────────────────────────────────────────────────────
 
-function setConnectionStatus(status) {
+function setConnectionStatus(status, error) {
     connectionStatus = status;
-    self.postMessage({ type: 'CONNECTION_STATUS', status });
+    self.postMessage({ type: 'CONNECTION_STATUS', status, ...(error ? { error } : {}) });
     broadcastDevtoolsStatus();
 }
 
@@ -943,9 +943,9 @@ async function connectNats() {
         const errMsg = e.message || String(e);
         console.warn('[nats] connection failed:', errMsg);
         if (errMsg.includes('authorization') || errMsg.includes('authentication') || errMsg.includes('permission')) {
-            setConnectionStatus('auth_failed');
+            setConnectionStatus('auth_failed', errMsg);
         } else {
-            setConnectionStatus('disconnected');
+            setConnectionStatus('disconnected', errMsg);
         }
         nats.conn = null;
         if (isCurrentEpoch(myEpoch)) {
@@ -1037,9 +1037,9 @@ async function connectGateway() {
         const errMsg = e.message || String(e);
         console.warn('[gateway] connection failed:', errMsg);
         if (errMsg.includes('authorization') || errMsg.includes('authentication') || errMsg.includes('permission')) {
-            setConnectionStatus('auth_failed');
+            setConnectionStatus('auth_failed', errMsg);
         } else {
-            setConnectionStatus('disconnected');
+            setConnectionStatus('disconnected', errMsg);
         }
         nats.gwWs = null;
         if (isCurrentEpoch(myEpoch)) {
@@ -1252,6 +1252,7 @@ function sendToAuthority(viewName, deltas) {
         }
         authority.backoff = 0;
         authority.backoffUntil = 0;
+        self.postMessage({ type: 'VIEW_STALENESS', viewName, stale: false });
         return res.json();
     }).then(result => {
         if (result) console.log(`[authority] ${viewName} seq=${result.seq}`);
@@ -1264,6 +1265,12 @@ function applyAuthorityBackoff(reason) {
     authority.backoff = Math.min((authority.backoff || AUTHORITY_BACKOFF_INITIAL_MS) * 2, AUTHORITY_BACKOFF_MAX_MS);
     authority.backoffUntil = Date.now() + authority.backoff;
     console.warn(`[authority] backing off ${authority.backoff}ms: ${reason}`);
+    // Mark all non-monotonic views as stale
+    for (const [viewName, mono] of Object.entries(authority.viewMonotonicity)) {
+        if (mono === 'non_monotonic') {
+            self.postMessage({ type: 'VIEW_STALENESS', viewName, stale: true });
+        }
+    }
 }
 
 async function subscribeAuthority(codec) {
@@ -1805,6 +1812,11 @@ async function handleInit(data) {
     initialized = true;
     for (const msg of pendingMessages) await handleMessage(msg);
     pendingMessages.length = 0;
+
+    // Heartbeat — store monitors this to detect worker crashes
+    setInterval(() => {
+        self.postMessage({ type: 'HEARTBEAT' });
+    }, 5_000);
 }
 
 function handleInsert(data) {
