@@ -151,8 +151,8 @@ async function clearAllEntityState(restateUrl: string): Promise<number> {
             });
             if (!qRes.ok) continue;
 
-            const qData = await qRes.json() as { rows?: string[][] };
-            const keys = (qData.rows ?? []).map((r: string[]) => r[0]).filter(Boolean);
+            const qData = await qRes.json() as { rows?: Array<Record<string, string>> };
+            const keys = (qData.rows ?? []).map((r) => r.service_key ?? Object.values(r)[0]).filter(Boolean);
 
             for (const key of keys) {
                 clearPromises.push(
