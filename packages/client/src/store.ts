@@ -117,6 +117,7 @@ type WorkerOutMessage =
     | { type: 'WORKSPACE_STATUS'; wsKey: string; status: string; requestId: string; error?: string }
     | { type: 'WORKSPACE_REGISTRY'; event: { type: string; workspaceId: string; [key: string]: unknown } }
     | { type: 'HEARTBEAT' }
+    | { type: 'RESET_RELOAD' }
     | { type: 'VIEW_STALENESS'; viewName: string; stale: boolean };
 
 type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
@@ -852,6 +853,15 @@ export function store<
                     stalenessSubscribers.forEach((fn) => fn());
                     break;
                 }
+
+                case 'RESET_RELOAD':
+                    // The server reset the workspace and published
+                    // sys.reset via NATS. The worker already wiped
+                    // OPFS — reload so the app re-initializes cleanly.
+                    // eslint-disable-next-line no-console
+                    console.log('[syncengine] workspace reset — reloading');
+                    window.location.reload();
+                    break;
 
             }
         };

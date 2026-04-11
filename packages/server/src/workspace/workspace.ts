@@ -1,5 +1,5 @@
 import * as restate from "@restatedev/restate-sdk";
-import { getJetStreamManager } from "./nats-client.js";
+import { getJetStream, getJetStreamManager } from "./nats-client.js";
 import { RetentionPolicy, StorageType } from "@nats-io/jetstream";
 import { ENTITY_OBJECT_PREFIX } from "../entity-keys.js";
 import { WORKFLOW_OBJECT_PREFIX } from "../workflow.js";
@@ -481,6 +481,16 @@ export const workspace = restate.object({
         status: "active",
       };
       ctx.set(Keys.STATE, state);
+
+      // Publish a sys.reset message so every connected client clears
+      // its local SQLite/OPFS and reloads. This lands on the freshly
+      // created stream, so clients that reconnect after the reset will
+      // also see it during replay.
+      await ctx.run("reset-notify-clients", async () => {
+        const js = await getJetStream();
+        const subject = `${subjectPrefix(workspaceId)}.sys.reset`;
+        await js.publish(subject, JSON.stringify({ type: "RESET", ts: Date.now() }));
+      });
 
       ctx.console.log(`Workspace ${workspaceId} reset complete`);
       return { ok: true, message: `reset workspace ${workspaceId}` };
