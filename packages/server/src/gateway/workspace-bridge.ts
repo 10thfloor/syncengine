@@ -10,12 +10,18 @@ const ENTITY_WRITES_CONSUMER_KEY = '__entity-writes__';
 const STREAM_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000];
 
 /** Retry an async operation when the error is a JetStream 404 (stream not found). */
+function isStreamNotFoundError(err: any): boolean {
+    return err?.api_error?.err_code === 10059
+        || err?.constructor?.name === 'StreamNotFoundError'
+        || (typeof err?.message === 'string' && err.message.includes('stream not found'));
+}
+
 async function withStreamRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
     for (const delay of STREAM_RETRY_DELAYS_MS) {
         try {
             return await fn();
         } catch (err: any) {
-            if (err?.api_error?.err_code === 10059) {
+            if (isStreamNotFoundError(err)) {
                 console.log(`[gateway] ${label}: stream not found, retrying in ${delay}ms...`);
                 await new Promise((r) => setTimeout(r, delay));
                 continue;
