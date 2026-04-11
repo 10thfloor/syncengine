@@ -245,11 +245,16 @@ function handleDevtoolsAction(action) {
                 nats.conn.close().catch(() => { /* ignore */ });
             }
         } else if (action === 'clear-client-db') {
-            // Purge all tables, reset DBSP pipeline, clear queues.
-            // No need to delete OPFS — handleReset() wipes all data in-place.
-            if (db && schemaTables.length > 0) {
-                handleReset();
-                console.log('[devtools] client data cleared');
+            // Close DB to release OPFS lock, then delete the file.
+            // The page reload (1.5s later) creates a fresh worker + DB.
+            try { if (db) { db.close(); db = null; } } catch { /* */ }
+            if (typeof navigator !== 'undefined' && navigator.storage) {
+                navigator.storage.getDirectory().then(async (root) => {
+                    for await (const [name] of root.entries()) {
+                        await root.removeEntry(name, { recursive: true }).catch(() => {});
+                    }
+                    console.log('[devtools] OPFS cleared');
+                }).catch(() => {});
             }
         }
     } catch (e) {
