@@ -361,9 +361,7 @@
             dataSidebarEl.appendChild(el('div', CLS.dataSidebarGroup, 'Views'));
             viewDefs.forEach(function (v) {
                 var item = el('div', CLS.dataSidebarItem + (selectedTable === ('view:' + v.name) ? ' active' : ''));
-                var label = v.name;
-                if (v.sourceTable) label += ' (' + v.sourceTable + ')';
-                item.appendChild(el('span', null, label));
+                item.appendChild(el('span', null, v.name));
                 var count = viewRowCounts[v.name];
                 if (count != null) {
                     var lbl = el('span', CLS.syncLabel);
@@ -453,8 +451,20 @@
                 var val = row[col];
                 var td = el('td');
                 var valStr = val === null || val === undefined ? '' : String(val);
-                td.textContent = truncate(valStr, 80);
-                td.title = valStr;
+                // Format timestamps (epoch ms > year 2000 and column name hints)
+                if (typeof val === 'number' && val > 946684800000 && /(?:at|time|stamp|date|created|updated)/i.test(col)) {
+                    valStr = new Date(val).toLocaleString();
+                }
+                // Truncate UUIDs but show full on hover
+                if (typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(val)) {
+                    td.textContent = val.slice(0, 8) + '\u2026';
+                    td.title = val;
+                    td.style.cursor = 'pointer';
+                    td.addEventListener('click', function (ev) { ev.stopPropagation(); copyToClipboard(val); });
+                } else {
+                    td.textContent = truncate(valStr, 60);
+                    td.title = valStr;
+                }
                 if (typeof val === 'number') td.classList.add(CLS.num);
                 tbody.appendChild(tr);
                 tr.appendChild(td);
