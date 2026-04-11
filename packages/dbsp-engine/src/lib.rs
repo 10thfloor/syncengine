@@ -23,6 +23,9 @@ pub struct HLC {
     pub count: u32,
 }
 
+/// Maximum counter value that survives pack() — 16-bit field.
+const HLC_COUNTER_MAX: u32 = HLC_COUNTER_MASK as u32; // 65535
+
 impl HLC {
     /// Tick for a local event. Advances the clock.
     pub fn tick(&mut self, now_ms: u64) {
@@ -30,7 +33,8 @@ impl HLC {
             self.ts = now_ms;
             self.count = 0;
         } else {
-            self.count += 1;
+            // Saturate at the pack() limit to prevent silent truncation
+            self.count = self.count.saturating_add(1).min(HLC_COUNTER_MAX);
         }
     }
 
@@ -40,12 +44,12 @@ impl HLC {
             self.ts = now_ms;
             self.count = 0;
         } else if self.ts == remote.ts {
-            self.count = self.count.max(remote.count) + 1;
+            self.count = self.count.max(remote.count).saturating_add(1).min(HLC_COUNTER_MAX);
         } else if remote.ts > self.ts {
             self.ts = remote.ts;
-            self.count = remote.count + 1;
+            self.count = remote.count.saturating_add(1).min(HLC_COUNTER_MAX);
         } else {
-            self.count += 1;
+            self.count = self.count.saturating_add(1).min(HLC_COUNTER_MAX);
         }
     }
 
@@ -244,6 +248,9 @@ struct ViewState {
     topn_sort_by: String,
     agg_state: HashMap<String, HashMap<String, f64>>,
     agg_counts: HashMap<String, HashMap<String, f64>>,
+    /// Per-group multiset of contributed values for min/max recomputation on retraction.
+    /// group_key → agg_name → sorted Vec of f64 values
+    agg_minmax_values: HashMap<String, HashMap<String, Vec<f64>>>,
     left_index: HashMap<String, Vec<Value>>,
     right_index: HashMap<String, Vec<Value>>,
 }
@@ -266,6 +273,7 @@ impl ViewState {
             topn_sort_by,
             agg_state: HashMap::new(),
             agg_counts: HashMap::new(),
+            agg_minmax_values: HashMap::new(),
             left_index: HashMap::new(),
             right_index: HashMap::new(),
         }
@@ -411,15 +419,16 @@ pub struct DbspEngine {
 #[wasm_bindgen]
 impl DbspEngine {
     #[wasm_bindgen(constructor)]
-    pub fn new(views_js: JsValue) -> DbspEngine {
+    pub fn new(views_js: JsValue) -> Result<DbspEngine, JsError> {
         console_error_panic_hook::set_once();
-        let defs: Vec<ViewDef> = serde_wasm_bindgen::from_value(views_js).unwrap();
-        DbspEngine {
+        let defs: Vec<ViewDef> = serde_wasm_bindgen::from_value(views_js)
+            .map_err(|e| JsError::new(&format!("DbspEngine: invalid view definitions: {e}")))?;
+        Ok(DbspEngine {
             views: defs.into_iter().map(ViewState::new).collect(),
             clock: HLC::default(),
             merge_states: HashMap::new(),
             tombstones: HashMap::new(),
-        }
+        })
     }
 
     /// Register merge config for a table. Call after constructor, before step().
@@ -432,8 +441,7 @@ impl DbspEngine {
     /// Stamp a local event and return the HLC as [ts, count].
     pub fn tick(&mut self, now_ms: f64) -> JsValue {
         self.clock.tick(now_ms as u64);
-        let hlc = &self.clock;
-        serde_wasm_bindgen::to_value(&hlc).unwrap()
+        serde_wasm_bindgen::to_value(&self.clock).unwrap_or(JsValue::NULL)
     }
 
     /// Merge with a remote HLC (call on inbound deltas).
@@ -445,7 +453,7 @@ impl DbspEngine {
 
     /// Get current HLC state.
     pub fn get_clock(&self) -> JsValue {
-        serde_wasm_bindgen::to_value(&self.clock).unwrap()
+        serde_wasm_bindgen::to_value(&self.clock).unwrap_or(JsValue::NULL)
     }
 
     pub fn step(&mut self, deltas_js: JsValue) -> JsValue {
@@ -590,6 +598,7 @@ impl DbspEngine {
             view.sorted_set.clear();
             view.agg_state.clear();
             view.agg_counts.clear();
+            view.agg_minmax_values.clear();
             view.left_index.clear();
             view.right_index.clear();
         }
@@ -866,9 +875,30 @@ fn apply_aggregate(
                     *counts.entry(name.clone()).or_insert(0.0) += sign;
                 }
                 "min" | "max" => {
-                    let entry = aggs.entry(name.clone()).or_insert(field_val);
-                    if def.func == "min" && field_val < *entry { *entry = field_val; }
-                    else if def.func == "max" && field_val > *entry { *entry = field_val; }
+                    let values = view.agg_minmax_values
+                        .entry(group_key.clone())
+                        .or_default()
+                        .entry(name.clone())
+                        .or_default();
+                    if d.weight > 0 {
+                        // Insertion: add value to the sorted multiset
+                        let pos = values.binary_search_by(|v| v.partial_cmp(&field_val).unwrap_or(Ordering::Equal)).unwrap_or_else(|p| p);
+                        values.insert(pos, field_val);
+                    } else {
+                        // Retraction: remove one occurrence from the multiset
+                        if let Ok(pos) = values.binary_search_by(|v| v.partial_cmp(&field_val).unwrap_or(Ordering::Equal)) {
+                            values.remove(pos);
+                        }
+                    }
+                    // Recompute the aggregate from the multiset
+                    let new_val = if values.is_empty() {
+                        0.0
+                    } else if def.func == "min" {
+                        values[0]
+                    } else {
+                        values[values.len() - 1]
+                    };
+                    aggs.insert(name.clone(), new_val);
                 }
                 _ => {}
             }
