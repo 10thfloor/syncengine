@@ -106,6 +106,14 @@
     var expandedTimelineIdx = -1;
     var timelineFilters = { delta: true, 'entity-write': true, 'entity-state': true, authority: true, gc: true, topic: true };
     var TIMELINE_KINDS = ['delta', 'entity-write', 'entity-state', 'authority', 'gc', 'topic'];
+    var FILTER_TOOLTIPS = {
+        'delta': 'Row inserts, updates, and deletes synced via NATS',
+        'entity-write': 'Writes to Restate entity actors (server-side state)',
+        'entity-state': 'Entity state snapshots from Restate',
+        'authority': 'Authoritative ordering for non-monotonic views (CALM)',
+        'gc': 'Garbage collection \u2014 old stream messages purged',
+        'topic': 'Pub/sub topic messages (cursors, presence, etc.)',
+    };
 
     // ── DOM references ───────────────────────────────────────────────────
     var pillEl = null;
@@ -480,6 +488,7 @@
         var filtersEl = el('div', CLS.timelineFilters);
         TIMELINE_KINDS.forEach(function (kind) {
             var btn = el('button', CLS.timelineFilter + (timelineFilters[kind] ? ' active' : ''), kind);
+            btn.title = FILTER_TOOLTIPS[kind] || kind;
             btn.addEventListener('click', function () {
                 timelineFilters[kind] = !timelineFilters[kind];
                 btn.classList.toggle('active', !!timelineFilters[kind]);
@@ -523,6 +532,7 @@
         row.appendChild(el('span', CLS.timelineTs, relativeTime(entry.ts)));
 
         var badge = el('span', CLS.timelineBadge + ' ' + (entry.kind || '').replace(/\s+/g, '-'), entry.kind || '?');
+        badge.title = FILTER_TOOLTIPS[entry.kind] || entry.kind || '';
         row.appendChild(badge);
 
         row.appendChild(el('span', CLS.timelineSummary, buildTimelineSummary(entry)));
@@ -547,14 +557,28 @@
     }
 
     function buildTimelineSummary(entry) {
+        var p = entry.payload || {};
         switch (entry.kind) {
-            case 'delta': return (entry.channelId || entry.channel || '') + ' seq=' + (entry.seq || '?') + ' ops=' + (entry.opCount || '?');
-            case 'entity-write': return (entry.table || '') + '#' + (entry.id || '') + ' [' + (entry.fields || []).join(',') + ']';
-            case 'entity-state': return (entry.table || '') + ' rows=' + (entry.rowCount || 0) + ' local=' + (entry.localCount || 0);
-            case 'authority': return (entry.topic || '') + ' ' + (entry.granted ? 'granted' : 'denied');
-            case 'gc': return 'collected ' + (entry.collected || 0);
-            case 'topic': return (entry.topic || '') + ' ' + (entry.event || '');
-            default: return entry.kind || '?';
+            case 'delta': {
+                var ch = entry.channel || '';
+                var op = p.type || '?';
+                var tbl = p.table || ch;
+                var preview = '';
+                if (p.record) {
+                    var keys = Object.keys(p.record).slice(0, 3);
+                    preview = ' {' + keys.map(function(k) { return k + ': ' + truncate(String(p.record[k]), 12); }).join(', ') + '}';
+                }
+                return op + ' \u2192 ' + tbl + preview + (entry.seq ? ' (seq ' + entry.seq + ')' : '');
+            }
+            case 'entity-write': {
+                var tbl2 = p.table || entry.entity || '?';
+                return 'write \u2192 ' + tbl2 + (p.id != null ? '#' + p.id : '');
+            }
+            case 'entity-state': return 'state \u2192 ' + (p.table || entry.entity || '?');
+            case 'authority': return 'authority \u2192 ' + (entry.channel || '?') + (entry.seq ? ' seq ' + entry.seq : '');
+            case 'gc': return 'garbage collection' + (p.collected ? ' (' + p.collected + ' removed)' : '');
+            case 'topic': return 'topic \u2192 ' + (entry.channel || '?');
+            default: return JSON.stringify(entry).slice(0, 60);
         }
     }
 

@@ -278,8 +278,9 @@ function handleDevtoolsQuery(msg) {
     if (!msg.id) return;
 
     // View queries: return from in-memory cache (views aren't SQL tables)
-    if (msg.view && viewRowCache[msg.view]) {
-        const rows = Object.values(viewRowCache[msg.view]);
+    if (msg.view) {
+        const cache = viewRowCache[msg.view] || {};
+        const rows = Object.values(cache);
         const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
         devtoolsChannel.postMessage({
             type: 'devtools-query-result',
