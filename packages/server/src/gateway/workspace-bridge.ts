@@ -169,7 +169,7 @@ export class WorkspaceBridge {
         this.nc.publish(subject, JSON.stringify(payload));
     }
 
-    publishTopicLocal(name: string, key: string, payload: Record<string, unknown>, senderClientId: string): void {
+    publishTopicLocal(name: string, key: string, payload: Record<string, unknown>, _senderClientId: string): void {
         // Local echo: route to interested sessions immediately (low latency
         // for cursors/presence) without waiting for the NATS round-trip.
         const matchKey = `${name}:${key}`;

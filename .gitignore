@@ -4,6 +4,10 @@ node_modules
 # Build output
 dist
 dist-ssr
+*.tsbuildinfo
+
+# Test coverage
+coverage
 
 # Rust / WASM
 packages/dbsp-engine/target

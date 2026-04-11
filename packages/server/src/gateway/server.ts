@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
 import { WorkspaceBridge } from './workspace-bridge.js';
 import { ClientSession } from './client-session.js';
+import { isValidClientMsg } from './protocol.js';
 import type { ClientMsg, ClientInitMessage } from './protocol.js';
 
 export interface GatewayConfig {
@@ -97,7 +98,12 @@ export class GatewayServer {
         ws.on('message', async (data) => {
             let msg: ClientMsg;
             try {
-                msg = JSON.parse(data.toString()) as ClientMsg;
+                const parsed: unknown = JSON.parse(data.toString());
+                if (!isValidClientMsg(parsed)) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
+                    return;
+                }
+                msg = parsed;
             } catch {
                 ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
                 return;

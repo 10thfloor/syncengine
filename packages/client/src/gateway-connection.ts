@@ -4,13 +4,25 @@
 // data-worker.js (worker thread). Handles the open → init → ready lifecycle,
 // then hands off to the caller's onMessage callback.
 
+/** Known server message types. Validated at the JSON.parse boundary. */
+const SERVER_MSG_TYPES = new Set([
+    'ready', 'error', 'delta', 'entity-write', 'entity-state',
+    'authority', 'topic', 'gc', 'replay-end', 'workspace-registry',
+]);
+
+function isValidServerMsg(msg: unknown): msg is Record<string, unknown> & { type: string } {
+    if (typeof msg !== 'object' || msg === null) return false;
+    const obj = msg as Record<string, unknown>;
+    return typeof obj['type'] === 'string' && SERVER_MSG_TYPES.has(obj['type'] as string);
+}
+
 export interface GatewayConnectionConfig {
     url: string;
     workspaceId: string;
     channels: string[];
     clientId: string;
     authToken?: string;
-    onMessage: (msg: Record<string, unknown>) => void;
+    onMessage: (msg: Record<string, unknown> & { type: string }) => void;
     onClose?: () => void;
 }
 
@@ -43,24 +55,26 @@ export function connectToGateway(config: GatewayConnectionConfig): Promise<WebSo
 
         // Temporary handler for the handshake phase only.
         ws.onmessage = (event: MessageEvent) => {
-            const msg = JSON.parse(
+            const raw: unknown = JSON.parse(
                 typeof event.data === 'string' ? event.data : String(event.data),
-            ) as Record<string, unknown>;
-            if (msg['type'] === 'ready') {
+            );
+            if (!isValidServerMsg(raw)) return;
+            if (raw['type'] === 'ready') {
                 settled = true;
                 // Switch to the permanent message handler before resolving so
                 // messages that arrive immediately after ready are not lost.
                 ws.onmessage = (e: MessageEvent) => {
-                    config.onMessage(
-                        JSON.parse(
-                            typeof e.data === 'string' ? e.data : String(e.data),
-                        ) as Record<string, unknown>,
+                    const parsed: unknown = JSON.parse(
+                        typeof e.data === 'string' ? e.data : String(e.data),
                     );
+                    if (isValidServerMsg(parsed)) {
+                        config.onMessage(parsed);
+                    }
                 };
                 resolve(ws);
-            } else if (msg['type'] === 'error') {
+            } else if (raw['type'] === 'error') {
                 settled = true;
-                reject(new Error(typeof msg['message'] === 'string' ? msg['message'] : 'Gateway error'));
+                reject(new Error(typeof raw['message'] === 'string' ? raw['message'] : 'Gateway error'));
             }
         };
 

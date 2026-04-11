@@ -52,7 +52,7 @@ export async function entityCommand(args: string[]): Promise<void> {
             process.exit(1);
         }
 
-        const body = await res.json();
+        const body = await res.json() as Record<string, unknown>;
         // The response is { state: {...} } from the entity runtime's _read handler
         const state = body?.state ?? body;
         process.stdout.write(JSON.stringify(state, null, 2) + '\n');

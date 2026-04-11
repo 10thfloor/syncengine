@@ -228,3 +228,58 @@ export type ServerMsg =
   | ServerGcMessage
   | ServerReplayEndMessage
   | ServerWorkspaceRegistryMessage;
+
+// ============================================================================
+// RUNTIME VALIDATION GUARDS
+// ============================================================================
+
+const CLIENT_MSG_TYPES = new Set([
+  'init', 'subscribe', 'unsubscribe', 'publish',
+] as const);
+
+const SUBSCRIBE_KINDS = new Set(['channel', 'entity', 'topic'] as const);
+const PUBLISH_KINDS = new Set(['delta', 'topic', 'authority'] as const);
+
+/**
+ * Runtime validation guard for inbound client messages.
+ * Validates the message envelope (type + required discriminant fields)
+ * at the JSON.parse boundary before the server trusts the shape.
+ */
+export function isValidClientMsg(msg: unknown): msg is ClientMsg {
+    if (typeof msg !== 'object' || msg === null) return false;
+    const obj = msg as Record<string, unknown>;
+    if (typeof obj['type'] !== 'string') return false;
+    if (!CLIENT_MSG_TYPES.has(obj['type'] as typeof CLIENT_MSG_TYPES extends Set<infer T> ? T : never)) return false;
+
+    switch (obj['type']) {
+        case 'init':
+            return typeof obj['workspaceId'] === 'string'
+                && typeof obj['clientId'] === 'string'
+                && Array.isArray(obj['channels']);
+        case 'subscribe':
+        case 'unsubscribe':
+            return typeof obj['kind'] === 'string'
+                && SUBSCRIBE_KINDS.has(obj['kind'] as 'channel' | 'entity' | 'topic');
+        case 'publish':
+            return typeof obj['kind'] === 'string'
+                && PUBLISH_KINDS.has(obj['kind'] as 'delta' | 'topic' | 'authority');
+        default:
+            return false;
+    }
+}
+
+const SERVER_MSG_TYPES = new Set([
+  'ready', 'error', 'delta', 'entity-write', 'entity-state',
+  'authority', 'topic', 'gc', 'replay-end', 'workspace-registry',
+] as const);
+
+/**
+ * Runtime validation guard for inbound server messages (client-side).
+ * Validates the message envelope at the JSON.parse boundary.
+ */
+export function isValidServerMsg(msg: unknown): msg is ServerMsg {
+    if (typeof msg !== 'object' || msg === null) return false;
+    const obj = msg as Record<string, unknown>;
+    return typeof obj['type'] === 'string'
+        && SERVER_MSG_TYPES.has(obj['type'] as typeof SERVER_MSG_TYPES extends Set<infer T> ? T : never);
+}

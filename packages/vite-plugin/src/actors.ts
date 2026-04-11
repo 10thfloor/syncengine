@@ -23,7 +23,7 @@
  * the two graphs.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Connect, Plugin } from 'vite';
 
@@ -199,7 +199,7 @@ export function stripServerCalls(source: string): string {
         // value must be an object literal `{...}`; any other form
         // (e.g., an external variable) can't be statically stripped
         // and is passed through unchanged.
-        const braceStart = configStart + 1 + handlersRel.valueStart;
+        const braceStart = configStart + 1 + handlersRel!.valueStart;
         if (out[braceStart] !== '{') { cursor = callEnd + 1; continue; }
         const braceEnd = findBalancedClose(out, braceStart, '{', '}');
         if (braceEnd === -1) { cursor = callEnd + 1; continue; }

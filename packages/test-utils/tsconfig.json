@@ -13,6 +13,10 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "isolatedModules": true,
+    "sourceMap": true,
+    "incremental": true,
     "declaration": true
   },
   "include": ["src"]
