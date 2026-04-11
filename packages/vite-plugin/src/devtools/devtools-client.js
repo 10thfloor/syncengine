@@ -779,8 +779,12 @@
 
         if (data.type === 'devtools-status') {
             // Ignore messages from stale workers (HMR can leave old workers alive)
-            if (data._workerTs && data._workerTs < knownWorkerTs) return;
-            if (data._workerTs && data._workerTs > knownWorkerTs) knownWorkerTs = data._workerTs;
+            if (data._workerTs) {
+                if (data._workerTs < knownWorkerTs) return;
+                knownWorkerTs = data._workerTs;
+            } else if (knownWorkerTs > 0) {
+                return; // drop messages from old workers without timestamp
+            }
             // Connection
             if (data.connection !== undefined) connStatus = data.connection;
             if (data.peerId !== undefined) peerId = data.peerId || '';
