@@ -91,6 +91,8 @@
     var viewRowCounts = {};   // { [viewName]: number }
     var offlineQueue = 0;
     var offlineEntries = [];  // [{ table, id }]
+    var prevViewCounts = '';  // JSON snapshot for change detection
+    var prevStreamSeq = 0;    // last known stream lastSeq
     var syncPhase = 'idle';
     var hlc = { ts: 0, counter: 0 };
 
@@ -779,7 +781,21 @@
             if (Array.isArray(data.tables)) tables = data.tables;
             if (Array.isArray(data.viewDefs)) viewDefs = data.viewDefs;
             // View row counts
-            if (data.views) viewRowCounts = data.views;
+            if (data.views) {
+                var newCounts = JSON.stringify(data.views);
+                if (newCounts !== prevViewCounts) {
+                    prevViewCounts = newCounts;
+                    viewRowCounts = data.views;
+                    // Data changed — re-query selected table/view if drawer is open
+                    if (drawerOpen && activeTab === 'data' && selectedTable) {
+                        var isView = selectedTable.indexOf('view:') === 0;
+                        var key = isView ? selectedTable.replace(/^view:/, '') : selectedTable;
+                        requestRows(key, isView);
+                    }
+                    // Stream changed — refresh timeline if visible
+                    if (drawerOpen && activeTab === 'timeline') fetchStreamMessages();
+                }
+            }
             render();
         }
 
@@ -805,16 +821,6 @@
     }
     sendPing();
     setInterval(sendPing, 5000);
-    // Periodic refresh for active tabs (not on every status update — that floods the worker)
-    setInterval(function () {
-        if (!drawerOpen) return;
-        if (activeTab === 'timeline') fetchStreamMessages();
-        if (activeTab === 'data' && selectedTable) {
-            var isView = selectedTable.indexOf('view:') === 0;
-            var key = isView ? selectedTable.replace(/^view:/, '') : selectedTable;
-            requestRows(key, isView);
-        }
-    }, 3000);
 
     // ── Keyboard shortcut ─────────────────────────────────────────────────
 
