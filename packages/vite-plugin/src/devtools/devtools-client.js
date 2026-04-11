@@ -809,14 +809,15 @@
         var dragging = false;
         var dragStartX = 0, dragStartY = 0;
         var elStartX = 0, elStartY = 0;
-        var totalMoved = 0;
+        var lastClientX = 0, lastClientY = 0;
 
         el.addEventListener('mousedown', function (e) {
             if (e.button !== 0) return;
             dragging = true;
-            totalMoved = 0;
             dragStartX = e.clientX;
             dragStartY = e.clientY;
+            lastClientX = e.clientX;
+            lastClientY = e.clientY;
             var rect = el.getBoundingClientRect();
             elStartX = rect.left;
             elStartY = rect.top;
@@ -825,9 +826,10 @@
 
         document.addEventListener('mousemove', function (e) {
             if (!dragging) return;
+            lastClientX = e.clientX;
+            lastClientY = e.clientY;
             var dx = e.clientX - dragStartX;
             var dy = e.clientY - dragStartY;
-            totalMoved += Math.abs(dx) + Math.abs(dy);
 
             var newX = elStartX + dx;
             var newY = elStartY + dy;
@@ -849,11 +851,11 @@
             dragging = false;
             savePillPos();
 
-            // If it was a click (not a drag), toggle popover
-            if (totalMoved < 4) {
+            // Use net displacement from mousedown to distinguish click from drag
+            var displacement = Math.abs(lastClientX - dragStartX) + Math.abs(lastClientY - dragStartY);
+            if (displacement < 4) {
                 toggleExpanded();
             } else if (expanded) {
-                // Re-render popover to reposition relative to new pill position
                 renderPopover();
             }
         });

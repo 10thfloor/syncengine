@@ -200,11 +200,12 @@ const schemaState = { version: 0, fingerprint: '' };
 // ── Devtools BroadcastChannel ────────────────────────────────────────────────
 
 let devtoolsChannel = null;
-let devtoolsActive = false;
+let devtoolsLastPing = 0;
 let devtoolsHeartbeat = null;
+const DEVTOOLS_PING_TTL_MS = 15_000;
 
 function initDevtoolsChannel() {
-    if (devtoolsChannel) return; // already initialized
+    if (devtoolsChannel) return;
     try {
         devtoolsChannel = new BroadcastChannel('syncengine-devtools');
         devtoolsChannel.onmessage = (event) => {
@@ -212,11 +213,13 @@ function initDevtoolsChannel() {
                 const msg = event.data;
                 if (!msg || !msg.type) return;
                 if (msg.type === 'devtools-ping') {
-                    devtoolsActive = true;
+                    devtoolsLastPing = Date.now();
                     broadcastDevtoolsStatus();
                     if (!devtoolsHeartbeat) {
                         devtoolsHeartbeat = setInterval(() => {
-                            if (devtoolsActive) broadcastDevtoolsStatus();
+                            if (Date.now() - devtoolsLastPing < DEVTOOLS_PING_TTL_MS) {
+                                broadcastDevtoolsStatus();
+                            }
                         }, 2000);
                     }
                 } else if (msg.type === 'devtools-action') {
@@ -250,7 +253,7 @@ function handleDevtoolsAction(action) {
 }
 
 function broadcastDevtoolsStatus() {
-    if (!devtoolsActive || !devtoolsChannel) return;
+    if (!devtoolsChannel || Date.now() - devtoolsLastPing >= DEVTOOLS_PING_TTL_MS) return;
     try {
         const channels = nats.routing
             ? nats.routing.subjects.map(s => {
@@ -282,7 +285,7 @@ function broadcastDevtoolsStatus() {
 }
 
 function broadcastDevtoolsMessage(kind, detail) {
-    if (!devtoolsActive || !devtoolsChannel) return;
+    if (!devtoolsChannel || Date.now() - devtoolsLastPing >= DEVTOOLS_PING_TTL_MS) return;
     try {
         devtoolsChannel.postMessage({
             type: 'devtools-message',

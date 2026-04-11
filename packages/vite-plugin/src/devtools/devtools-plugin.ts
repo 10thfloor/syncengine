@@ -162,7 +162,7 @@ async function clearAllEntityState(restateUrl: string): Promise<number> {
             const qRes = await fetch(`${adminUrl}/query`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json', 'accept': 'application/json' },
-                body: JSON.stringify({ query: `SELECT DISTINCT service_key FROM state WHERE service_name = '${svc.name}'` }),
+                body: JSON.stringify({ query: `SELECT DISTINCT service_key FROM state WHERE service_name = '${svc.name.replace(/'/g, "''")}'` }),
             });
             if (!qRes.ok) continue;
 
@@ -243,7 +243,8 @@ export function devtoolsMiddleware(
             ]);
 
             const wsId = clientWsId
-                || (natsStreams.length > 0 ? natsStreams[0]!.name.replace(/^WS_/, '') : 'default');
+                || await resolveWorkspaceIdFromNats()
+                || 'default';
 
             const workspace = await fetchWorkspaceInfo(restateUrl, wsId);
 
@@ -377,7 +378,7 @@ export function devtoolsMiddleware(
                         await restatePost(
                             base,
                             `workspace/${wsEnc}/provision`,
-                            [{ workspaceId: wsId, tenantId: 'default' }],
+                            { tenantId: 'default' },
                         );
 
                         result = { ok: true, message: `reset workspace ${wsId}` };
