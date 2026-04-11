@@ -6,7 +6,9 @@
 
 **Architecture:** Single file rewrite (`init.ts`). Five functions: `initCommand` (orchestrator), `scaffoldProject` (file writer), `detectPackageManager` (pnpm/npm/yarn detection), `installDeps` (spawn + spinner), `printBanner` (final output). Template files are string literals in the source. No external template directory.
 
-**Tech Stack:** Node.js fs/child_process, ANSI escape codes for CLI formatting
+**Error handling:** Uses the `@syncengine/core` error system (`errors.cli(CliCode.X, { message, hint, context })`). The only throw site is `DIRECTORY_NOT_EMPTY`. Install failures print a non-throwing message (scaffold is preserved — user can run install manually). The top-level CLI entry point already renders `SyncEngineError` instances via `formatError` from the error system — no custom error rendering needed here.
+
+**Tech Stack:** Node.js fs/child_process, ANSI escape codes for CLI formatting, `@syncengine/core` error system
 
 ---
 
@@ -15,6 +17,7 @@
 | File | Responsibility |
 |------|---------------|
 | `packages/cli/src/init.ts` | Complete rewrite — all five functions + template strings |
+| `packages/cli/src/index.ts` | Minor edit — render `SyncEngineError` via `formatError` instead of raw stack |
 
 ---
 
@@ -43,7 +46,8 @@ Replace the entire contents of `packages/cli/src/init.ts` with:
 
 import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, resolve, basename, dirname } from 'node:path';
-import { execSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { errors, CliCode } from '@syncengine/core';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────
 
@@ -600,9 +604,11 @@ export async function initCommand(args: string[]): Promise<void> {
         const contents = readdirSync(target);
         const nonDot = contents.filter((f) => !f.startsWith('.'));
         if (nonDot.length > 0) {
-            throw new Error(
-                `Directory ${target} is not empty. Pick an empty directory or a new name.`,
-            );
+            throw errors.cli(CliCode.DIRECTORY_NOT_EMPTY, {
+                message: `Directory ${target} is not empty.`,
+                hint: 'Pick an empty directory or a new name.',
+                context: { directory: target },
+            });
         }
     }
 
@@ -669,7 +675,7 @@ mkdir -p /tmp/test-nonempty && echo "x" > /tmp/test-nonempty/file.txt
 node packages/cli/bin/syncengine.mjs init /tmp/test-nonempty
 ```
 
-Expected: Error message "Directory ... is not empty"
+Expected: A `SyncEngineError` is thrown with `code: 'DIRECTORY_NOT_EMPTY'` and `category: 'cli'`. Since Task 1 hasn't updated `index.ts` yet, this will print via the raw stack fallback. Task 2 improves the rendering. For now just verify the throw happens (exit code 1, error mentions "not empty").
 
 - [ ] **Step 5: Clean up and commit**
 
@@ -681,7 +687,64 @@ Commit message: `feat(cli): rewrite syncengine init — shared notepad demo with
 
 ---
 
-### Task 2: End-to-End Verification
+### Task 2: Render SyncEngineError via formatError in CLI Entry
+
+**Files:**
+- Modify: `packages/cli/src/index.ts`
+
+The init command now throws `SyncEngineError` instances (via `errors.cli(...)`). The CLI entry's current `err?.stack ?? err` prints raw stacks. Switch to `formatError` for nicely formatted output with icons, hints, and collapsed internals.
+
+- [ ] **Step 1: Update the error handler**
+
+In `packages/cli/src/index.ts`, replace the `main().catch(...)` block at the bottom with:
+
+```typescript
+import { formatError, SyncEngineError } from '@syncengine/core';
+
+// ... existing imports and main() ...
+
+main().catch((err) => {
+    if (err instanceof SyncEngineError) {
+        process.stderr.write(`\n${formatError(err)}\n\n`);
+    } else {
+        process.stderr.write(`\nsyncengine: ${err?.stack ?? err}\n`);
+    }
+    process.exit(1);
+});
+```
+
+The `SyncEngineError` import is added to the top-level imports. Non-syncengine errors (e.g., unexpected Node errors) fall through to the raw stack as before.
+
+- [ ] **Step 2: Verify the error output**
+
+```bash
+mkdir -p /tmp/test-fmt && echo "x" > /tmp/test-fmt/file.txt
+node packages/cli/bin/syncengine.mjs init /tmp/test-fmt
+```
+
+Expected output (with colors):
+```
+ ✘ SE::cli DIRECTORY_NOT_EMPTY
+
+   Directory /tmp/test-fmt is not empty.
+
+   hint: Pick an empty directory or a new name.
+
+   → /Users/mk/syncengine/packages/cli/src/init.ts:...
+   ┄ (N syncengine internals hidden)
+```
+
+- [ ] **Step 3: Clean up and commit**
+
+```bash
+rm -rf /tmp/test-fmt
+```
+
+Commit message: `feat(cli): render SyncEngineError via formatError for typed error output`
+
+---
+
+### Task 3: End-to-End Verification
 
 **Files:** None (manual testing only)
 
