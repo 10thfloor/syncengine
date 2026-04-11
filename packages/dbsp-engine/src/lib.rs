@@ -360,19 +360,31 @@ impl TableMergeState {
                     should_upd
                 }
                 MergeStrategy::SetUnion => {
-                    // Always merge — no conflicts for union
+                    // Always merge — no conflicts for union. Uses JSON arrays.
+                    // Migrates legacy comma-separated strings on first access.
                     if let Some((_, old_v)) = entry {
-                        let old_str = old_v.as_str().unwrap_or("");
-                        let new_str = incoming.as_str().unwrap_or("");
-                        let mut parts: Vec<&str> = old_str.split(',')
-                            .chain(new_str.split(','))
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        parts.sort();
-                        parts.dedup();
-                        let combined = parts.join(",");
-                        clocks.insert(field.clone(), (packed, Value::String(combined.clone())));
-                        merged.insert(field.clone(), Value::String(combined));
+                        let old_items: Vec<Value> = match old_v {
+                            Value::Array(arr) => arr.clone(),
+                            Value::String(s) => s.split(',').filter(|p| !p.is_empty())
+                                .map(|p| Value::String(p.to_string())).collect(),
+                            _ => vec![],
+                        };
+                        let new_items: Vec<Value> = match incoming {
+                            Value::Array(arr) => arr.clone(),
+                            Value::String(s) => s.split(',').filter(|p| !p.is_empty())
+                                .map(|p| Value::String(p.to_string())).collect(),
+                            other => vec![other.clone()],
+                        };
+                        let mut combined: Vec<Value> = old_items;
+                        for item in new_items {
+                            if !combined.contains(&item) {
+                                combined.push(item);
+                            }
+                        }
+                        combined.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                        let arr = Value::Array(combined);
+                        clocks.insert(field.clone(), (packed, arr.clone()));
+                        merged.insert(field.clone(), arr);
                         continue;
                     }
                     true
@@ -417,6 +429,10 @@ pub struct DbspEngine {
     /// Tombstones: table → record_id → packed_hlc_at_deletion
     tombstones: HashMap<String, HashMap<String, u64>>,
 }
+
+/// Maximum tombstones per table before automatic pruning kicks in.
+/// When exceeded, the oldest half (by packed HLC) are evicted.
+const TOMBSTONE_AUTO_GC_THRESHOLD: usize = 10_000;
 
 #[wasm_bindgen]
 impl DbspEngine {
@@ -551,10 +567,21 @@ impl DbspEngine {
                     .unwrap_or("id");
                 let id = record_id(&delta.record, id_key);
                 let packed_hlc = delta.hlc.as_ref().map(|h| h.pack()).unwrap_or(0);
-                self.tombstones
+                let table_tombstones = self.tombstones
                     .entry(delta.source.clone())
-                    .or_default()
-                    .insert(id, packed_hlc);
+                    .or_default();
+                table_tombstones.insert(id, packed_hlc);
+
+                // Auto-GC: prune oldest half when threshold exceeded
+                if table_tombstones.len() > TOMBSTONE_AUTO_GC_THRESHOLD {
+                    let mut hlcs: Vec<(&String, &u64)> = table_tombstones.iter().collect();
+                    hlcs.sort_by_key(|(_, hlc)| *hlc);
+                    let prune_count = hlcs.len() / 2;
+                    let to_remove: Vec<String> = hlcs[..prune_count].iter().map(|(k, _)| (*k).clone()).collect();
+                    for k in to_remove {
+                        table_tombstones.remove(&k);
+                    }
+                }
             }
 
             i += 1;
@@ -668,9 +695,10 @@ impl DbspEngine {
     /// Restore the engine's HLC from a snapshot to maintain monotonicity.
     pub fn restore_clock(&mut self, hlc_js: JsValue) {
         if let Ok(remote) = serde_wasm_bindgen::from_value::<HLC>(hlc_js) {
-            // Merge with current clock to ensure monotonicity
-            let now = 0; // Will be merged with real wall clock on next tick()
-            self.clock.merge(&remote, now);
+            // Direct assignment: take the max of current and remote to ensure monotonicity.
+            if remote.ts > self.clock.ts || (remote.ts == self.clock.ts && remote.count > self.clock.count) {
+                self.clock = remote;
+            }
         }
     }
 }
@@ -731,7 +759,7 @@ fn process_view(view: &mut ViewState, all_deltas: &[Delta]) -> Vec<Delta> {
                     .filter(|d| d.source == *right_table)
                     .cloned()
                     .collect();
-                apply_join(view, &current, &right_deltas, left_key, right_key)
+                apply_join(view, &current, &right_deltas, left_key, right_key, right_table)
             }
         };
     }
@@ -947,6 +975,7 @@ fn apply_join(
     right_deltas: &[Delta],
     left_key: &str,
     right_key: &str,
+    right_table: &str,
 ) -> Vec<Delta> {
     let mut output = Vec::new();
     // The left_index dedup must use the SOURCE table's primary key, not the
@@ -966,7 +995,7 @@ fn apply_join(
         let key_val = record_key(&ld.record, left_key);
         if let Some(right_records) = view.right_index.get(&key_val) {
             for rr in right_records {
-                let merged = merge_records(&ld.record, rr);
+                let merged = merge_records(&ld.record, rr, right_table, right_key);
                 output.push(Delta { source: String::new(), record: merged, weight: ld.weight, hlc: None });
             }
         }
@@ -996,7 +1025,7 @@ fn apply_join(
         let key_val = record_key(&rd.record, right_key);
         if let Some(left_records) = view.left_index.get(&key_val) {
             for lr in left_records {
-                let merged = merge_records(lr, &rd.record);
+                let merged = merge_records(lr, &rd.record, right_table, right_key);
                 output.push(Delta { source: String::new(), record: merged, weight: rd.weight, hlc: None });
             }
         }
@@ -1028,13 +1057,28 @@ fn apply_join(
     output
 }
 
-fn merge_records(left: &Value, right: &Value) -> Value {
+/// Merge left + right records for a join. Left fields take priority.
+/// Right-side fields that collide with left-side fields (excluding the
+/// join key) are prefixed with `{right_table}.` to prevent silent clobbering.
+fn merge_records(left: &Value, right: &Value, right_table: &str, join_key: &str) -> Value {
     let mut merged = serde_json::Map::new();
+    let left_keys: std::collections::HashSet<&str> = if let Value::Object(l) = left {
+        l.keys().map(|k| k.as_str()).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+    // Insert right fields, prefixing collisions
     if let Value::Object(r) = right {
         for (k, v) in r {
-            merged.insert(k.clone(), v.clone());
+            if k == join_key || !left_keys.contains(k.as_str()) {
+                merged.insert(k.clone(), v.clone());
+            } else {
+                // Collision: prefix with right table name
+                merged.insert(format!("{right_table}.{k}"), v.clone());
+            }
         }
     }
+    // Insert left fields (overwrite any unprefixed right fields with same name)
     if let Value::Object(l) = left {
         for (k, v) in l {
             merged.insert(k.clone(), v.clone());
@@ -1248,15 +1292,18 @@ mod tests {
                 .collect(),
         });
 
+        // First insert with legacy comma-separated format (migration)
         let record1 = json!({"id": "item1", "tags": "a,b"});
         let hlc1 = HLC { ts: 100, count: 0 };
         let (result1, _) = merge_state.resolve("id", &record1, &hlc1);
+        // Legacy format: first insert stores as-is (string → string)
         assert_eq!(result1["tags"], "a,b");
 
+        // Second insert triggers migration to JSON array
         let record2 = json!({"id": "item1", "tags": "b,c"});
         let hlc2 = HLC { ts: 200, count: 0 };
         let (result2, _) = merge_state.resolve("id", &record2, &hlc2);
-        assert_eq!(result2["tags"], "a,b,c");
+        assert_eq!(result2["tags"], json!(["a", "b", "c"]));
     }
 
     #[test]
@@ -1677,7 +1724,7 @@ mod tests {
             1,
         )];
 
-        let result = apply_join(&mut view, &left_deltas, &right_deltas, "id", "user_id");
+        let result = apply_join(&mut view, &left_deltas, &right_deltas, "id", "user_id", "orders");
         assert!(result.len() > 0);
         let merged = &result[0].record;
         assert_eq!(merged["id"], 1);
@@ -1700,7 +1747,7 @@ mod tests {
         )];
 
         let right_deltas_empty: Vec<Delta> = vec![];
-        let result1 = apply_join(&mut view, &left_deltas, &right_deltas_empty, "id", "user_id");
+        let result1 = apply_join(&mut view, &left_deltas, &right_deltas_empty, "id", "user_id", "orders");
         assert_eq!(result1.len(), 0);
 
         let right_deltas = vec![make_delta(
@@ -1709,7 +1756,7 @@ mod tests {
             1,
         )];
         let left_empty: Vec<Delta> = vec![];
-        let result2 = apply_join(&mut view, &left_empty, &right_deltas, "id", "user_id");
+        let result2 = apply_join(&mut view, &left_empty, &right_deltas, "id", "user_id", "orders");
         assert_eq!(result2.len(), 1);
     }
 
