@@ -232,14 +232,18 @@ export function devtoolsMiddleware(
             const restateUrl = runtime.restateUrl ?? 'http://localhost:8080';
             const adminUrl = restateAdminUrl(restateUrl);
 
+            // Prefer workspace ID from query param (sent by the devtools client
+            // which reads it from the <meta> tag). Fall back to NATS stream heuristic.
+            const qs = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+            const clientWsId = qs.get('wsId');
+
             const [natsStreams, restateHealth] = await Promise.all([
                 fetchNatsStreams(),
                 fetchRestateHealth(adminUrl),
             ]);
 
-            const wsId = natsStreams.length > 0
-                ? natsStreams[0]!.name.replace(/^WS_/, '')
-                : 'default';
+            const wsId = clientWsId
+                || (natsStreams.length > 0 ? natsStreams[0]!.name.replace(/^WS_/, '') : 'default');
 
             const workspace = await fetchWorkspaceInfo(restateUrl, wsId);
 
@@ -261,7 +265,7 @@ export function devtoolsMiddleware(
             for await (const chunk of req) chunks.push(chunk as Buffer);
             const raw = Buffer.concat(chunks).toString('utf8') || '{}';
 
-            let body: { action?: string; streamName?: string };
+            let body: { action?: string; streamName?: string; workspaceId?: string };
             try {
                 body = JSON.parse(raw) as { action?: string; streamName?: string };
             } catch {
@@ -271,13 +275,16 @@ export function devtoolsMiddleware(
                 return;
             }
 
-            const { action, streamName } = body;
+            const { action, streamName, workspaceId: clientWsId } = body;
             const runtime = getRuntimeFn();
             const restateUrl = runtime.restateUrl ?? 'http://localhost:8080';
             const natsUrl = runtime.natsUrl ?? 'ws://localhost:9222';
 
             // Convert ws:// → nats:// for the node transport
             const natsServerUrl = natsUrl.replace(/^ws:\/\//, 'nats://').replace(/^wss:\/\//, 'nats://');
+
+            // Prefer workspace ID from client (read from <meta> tag), fall back to NATS heuristic
+            const resolvedWsId = clientWsId || await resolveWorkspaceIdFromNats() || 'default';
 
             let result: { ok: boolean; message: string };
 
@@ -313,7 +320,7 @@ export function devtoolsMiddleware(
                     }
 
                     case 'trigger-gc': {
-                        const wsId = await resolveWorkspaceIdFromNats() ?? 'default';
+                        const wsId = resolvedWsId;
                         await restatePost(
                             restateUrl,
                             `workspace/${encodeURIComponent(wsId)}/triggerGC`,
@@ -324,7 +331,7 @@ export function devtoolsMiddleware(
                     }
 
                     case 'teardown': {
-                        const wsId = await resolveWorkspaceIdFromNats() ?? 'default';
+                        const wsId = resolvedWsId;
                         await restatePost(
                             restateUrl,
                             `workspace/${encodeURIComponent(wsId)}/teardown`,
@@ -335,7 +342,7 @@ export function devtoolsMiddleware(
                     }
 
                     case 'reset': {
-                        const wsId = await resolveWorkspaceIdFromNats() ?? 'default';
+                        const wsId = resolvedWsId;
                         const base = restateUrl.replace(/\/+$/, '');
                         const wsEnc = encodeURIComponent(wsId);
 

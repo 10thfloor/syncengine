@@ -29,6 +29,12 @@
     };
     var serverMetrics = null;
 
+    // Read workspace ID from the meta tag injected by the workspaces plugin
+    function getWorkspaceId() {
+        var el = document.querySelector('meta[name="syncengine-workspace-id"]');
+        return (el && el.getAttribute('content')) || null;
+    }
+
     // Message log ring buffer
     var MESSAGE_LOG_MAX = 50;
     var messageLog = [];
@@ -761,7 +767,7 @@
         }
 
         // Server-side action
-        var payload = { action: a.action };
+        var payload = { action: a.action, workspaceId: getWorkspaceId() };
 
         fetch('/__syncengine/devtools/action', {
             method: 'POST',
@@ -917,7 +923,8 @@
     // ── Server metrics polling ───────────────────────────────────────────
 
     function pollServerMetrics() {
-        fetch('/__syncengine/devtools/metrics')
+        var wsParam = getWorkspaceId();
+        fetch('/__syncengine/devtools/metrics' + (wsParam ? '?wsId=' + encodeURIComponent(wsParam) : ''))
             .then(function (res) {
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 return res.json();
