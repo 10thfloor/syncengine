@@ -178,7 +178,7 @@ const nats = {
 const topicState = {
     subs: new Map(),       // subjectKey → { natsSub }
     desired: new Set(),    // subjectKey set — survives reconnect for re-subscribe
-    codec: null,           // JSONCodec, set during first topic operation
+    // codec removed — NATS v3 uses msg.json() / JSON.stringify()
 };
 
 // ── Initial sync state machine ──────────────────────────────────────────────
@@ -339,11 +339,10 @@ async function markConsumerCaughtUp(subject) {
         // Flush per-channel offline queues: anything that was queued while
         // we were offline now has a live connection to publish through.
         if (nats.conn && !nats.conn.isClosed()) {
-            const codec = replayCoord.codec;
             for (const s of nats.routing.subjects) {
                 const queue = nats.outboundQueues[s] || [];
                 for (const msg of queue) {
-                    nats.conn.publish(s, codec.encode(msg));
+                    nats.conn.publish(s, JSON.stringify(msg));
                 }
                 nats.outboundQueues[s] = [];
             }
@@ -400,7 +399,7 @@ async function processConsumer(codec, source) {
             }
 
             let msg;
-            try { msg = codec.decode(raw.data); } catch {
+            try { msg = raw.json(); } catch {
                 raw.ack();
                 if (!skipReplay && raw.info?.pending === 0) await markConsumerCaughtUp(subject);
                 continue;
@@ -508,19 +507,17 @@ async function connectNats() {
     setConnectionStatus('connecting');
 
     try {
-        const { connect, JSONCodec } = await import('nats.ws');
-        const codec = JSONCodec();
+        const { wsconnect } = await import('@nats-io/transport-node');
 
         const connectOpts = { servers: natsUrl };
         if (nats.config.authToken) connectOpts.token = nats.config.authToken;
-        nats.conn = await connect(connectOpts);
+        nats.conn = await wsconnect(connectOpts);
         console.log(`[nats] connected to ${natsUrl}`);
 
         // Initialize replay phase — consumers will flip this to false once
         // they've all reported caught-up via `markConsumerCaughtUp`.
         sync.isReplaying = true;
         resetReplayCoord(channelSubjects.length);
-        replayCoord.codec = codec;
         authority.backoff = 0;
         authority.backoffUntil = 0;
 
@@ -782,7 +779,7 @@ function subscribeGC(codec) {
     (async () => {
         for await (const raw of gcSub) {
             let msg;
-            try { msg = codec.decode(raw.data); } catch { continue; }
+            try { msg = raw.json(); } catch { continue; }
             if (msg.type === 'GC_COMPLETE' && msg.gcWatermark) {
                 console.log(`[gc] received GC_COMPLETE watermark=${msg.gcWatermark}`);
                 // GC watermark is stream-global; advance all channels past it
@@ -913,7 +910,7 @@ async function subscribeAuthority(codec) {
         for await (const raw of authority.sub) {
             if (!initialized) continue;
             let msg;
-            try { msg = codec.decode(raw.data); } catch { continue; }
+            try { msg = raw.json(); } catch { continue; }
             if (msg.type !== 'AUTHORITY_UPDATE') continue;
 
             const { viewName, seq, deltas } = msg;
@@ -959,12 +956,9 @@ function natsPublish(msg) {
 
     // Direct NATS path (existing code)
     if (nats.conn && !nats.conn.isClosed()) {
-        import('nats.ws').then(({ JSONCodec }) => {
-            const codec = JSONCodec();
-            for (const s of subjects) {
-                nats.conn.publish(s, codec.encode(msg));
-            }
-        });
+        for (const s of subjects) {
+            nats.conn.publish(s, JSON.stringify(msg));
+        }
     } else if (msg._hlc) {
         enqueueCausal(msg);
     } else {
@@ -1457,12 +1451,7 @@ function handleReset() {
 
 // ── Topic handlers (ephemeral NATS core pub/sub) ────────────────────────────
 
-async function ensureTopicCodec() {
-    if (topicState.codec) return topicState.codec;
-    const { JSONCodec } = await import('nats.ws');
-    topicState.codec = JSONCodec();
-    return topicState.codec;
-}
+// Topic codec removed — NATS v3 uses JSON.stringify() / msg.json()
 
 function topicSubject(name, key) {
     return `ws.${nats.config.workspaceId}.topic.${name}.${key}`;
@@ -1485,7 +1474,6 @@ async function handleTopicSubscribe({ name, key }) {
     if (!nats.conn || nats.conn.isClosed()) return; // will re-subscribe on reconnect
     if (topicState.subs.has(subKey)) return; // already subscribed
 
-    const codec = await ensureTopicCodec();
     const subject = topicSubject(name, key);
     const natsSub = nats.conn.subscribe(subject);
     topicState.subs.set(subKey, { natsSub });
@@ -1494,7 +1482,7 @@ async function handleTopicSubscribe({ name, key }) {
         try {
             for await (const raw of natsSub) {
                 let msg;
-                try { msg = codec.decode(raw.data); } catch { continue; }
+                try { msg = raw.json(); } catch { continue; }
                 // No self-filter — topics deliver your own publishes back
                 // so you can see your own cursor / presence state.
                 self.postMessage({
@@ -1528,10 +1516,9 @@ async function handleTopicPublish({ name, key, data }) {
 
     // Direct NATS path (existing code)
     if (!nats.conn || nats.conn.isClosed()) return; // drop silently when offline
-    const codec = await ensureTopicCodec();
 
     const subject = topicSubject(name, key);
-    nats.conn.publish(subject, codec.encode({
+    nats.conn.publish(subject, JSON.stringify({
         _clientId: CLIENT_ID,
         peerId: CLIENT_ID,
         data,
@@ -1555,9 +1542,8 @@ async function handleTopicLeave({ name, key }) {
 
     // Direct NATS path (existing code)
     if (!nats.conn || nats.conn.isClosed()) return;
-    const codec = await ensureTopicCodec();
     const subject = topicSubject(name, key);
-    nats.conn.publish(subject, codec.encode({
+    nats.conn.publish(subject, JSON.stringify({
         _clientId: CLIENT_ID,
         peerId: CLIENT_ID,
         $leave: true,
