@@ -208,6 +208,25 @@ importers:
         specifier: ^1.0.4
         version: 1.6.1(@types/node@25.6.0)
 
+  packages/test-utils:
+    dependencies:
+      '@syncengine/core':
+        specifier: workspace:*
+        version: link:../core
+      '@syncengine/dbsp':
+        specifier: file:../dbsp-engine/pkg
+        version: file:packages/dbsp-engine/pkg
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      typescript:
+        specifier: ~5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.0.4
+        version: 1.6.1(@types/node@22.19.17)
+
   packages/vite-plugin:
     dependencies:
       '@nats-io/jetstream':
