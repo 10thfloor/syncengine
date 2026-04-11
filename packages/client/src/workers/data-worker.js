@@ -37,6 +37,10 @@ let schemaTables = [];
 
 const undoStack = [];
 
+// ── View row counts (devtools) ───────────────────────────────────────────────
+
+const viewRowCounts = {};
+
 // ── CALM / Authority state ──────────────────────────────────────────────────
 
 const authority = {
@@ -181,6 +185,116 @@ const topicState = {
     // codec removed — NATS v3 uses msg.json() / JSON.stringify()
 };
 
+// ── Connection status (tracked for devtools) ─────────────────────────────────
+
+let connectionStatus = 'disconnected';
+
+// ── Conflict log (accumulated for devtools) ──────────────────────────────────
+
+const conflictLog = [];
+
+// ── Schema state (populated during INIT, for devtools) ───────────────────────
+
+const schemaState = { version: 0, fingerprint: '' };
+
+// ── Devtools BroadcastChannel ────────────────────────────────────────────────
+
+let devtoolsChannel = null;
+let devtoolsActive = false;
+let devtoolsHeartbeat = null;
+
+function initDevtoolsChannel() {
+    if (devtoolsChannel) return; // already initialized
+    try {
+        devtoolsChannel = new BroadcastChannel('syncengine-devtools');
+        devtoolsChannel.onmessage = (event) => {
+            try {
+                const msg = event.data;
+                if (!msg || !msg.type) return;
+                if (msg.type === 'devtools-ping') {
+                    devtoolsActive = true;
+                    broadcastDevtoolsStatus();
+                    if (!devtoolsHeartbeat) {
+                        devtoolsHeartbeat = setInterval(() => {
+                            if (devtoolsActive) broadcastDevtoolsStatus();
+                        }, 2000);
+                    }
+                } else if (msg.type === 'devtools-action') {
+                    handleDevtoolsAction(msg.action);
+                }
+            } catch (e) {
+                console.warn('[devtools] channel message error:', e);
+            }
+        };
+    } catch (e) {
+        console.warn('[devtools] BroadcastChannel not supported:', e);
+    }
+}
+
+function handleDevtoolsAction(action) {
+    if (!action) return;
+    try {
+        if (action === 'force-reconnect') {
+            if (nats.gwWs) {
+                try { nats.gwWs.close(); } catch { /* ignore */ }
+            }
+            if (nats.conn && !nats.conn.isClosed()) {
+                nats.conn.close().catch(() => { /* ignore */ });
+            }
+        } else if (action === 'clear-client-db') {
+            self.postMessage({ type: 'DEVTOOLS_CLEAR_DB' });
+        }
+    } catch (e) {
+        console.warn('[devtools] action error:', e);
+    }
+}
+
+function broadcastDevtoolsStatus() {
+    if (!devtoolsActive || !devtoolsChannel) return;
+    try {
+        const channels = nats.routing
+            ? nats.routing.subjects.map(s => {
+                const parts = s.split('.');
+                return parts[parts.length - 2] || s;
+            })
+            : [];
+        devtoolsChannel.postMessage({
+            type: 'devtools-status',
+            sync: {
+                phase: sync.phase,
+                messagesReplayed: 0,
+                totalMessages: 0,
+                snapshotLoaded: false,
+            },
+            connection: connectionStatus,
+            hlc: { ts: hlcTs, counter: hlcCount },
+            conflicts: conflictLog.filter(c => !c.dismissed),
+            offlineQueue: causalQueue.length,
+            undoDepth: undoStack.length,
+            schema: { version: schemaState.version || 0, fingerprint: schemaState.fingerprint || '' },
+            entities: [],
+            channels,
+            views: Object.assign({}, viewRowCounts),
+        });
+    } catch (e) {
+        console.warn('[devtools] broadcastDevtoolsStatus error:', e);
+    }
+}
+
+function broadcastDevtoolsMessage(kind, detail) {
+    if (!devtoolsActive || !devtoolsChannel) return;
+    try {
+        devtoolsChannel.postMessage({
+            type: 'devtools-message',
+            kind,
+            detail,
+            ts: Date.now(),
+        });
+    } catch (e) {
+        console.warn('[devtools] broadcastDevtoolsMessage error:', e);
+    }
+}
+
 // ── Initial sync state machine ──────────────────────────────────────────────
 
 const sync = {
@@ -233,12 +347,15 @@ function loadLastProcessedSeqs() {
 // ── Status helpers ──────────────────────────────────────────────────────────
 
 function setConnectionStatus(status) {
+    connectionStatus = status;
     self.postMessage({ type: 'CONNECTION_STATUS', status });
+    broadcastDevtoolsStatus();
 }
 
 function emitSyncStatus(phase, messagesReplayed, extra = {}) {
     sync.phase = phase;
     self.postMessage({ type: 'SYNC_STATUS', phase, messagesReplayed, ...extra });
+    broadcastDevtoolsStatus();
 }
 
 // ── Unified JetStream consumer (replay + live on one iterator) ─────────────
@@ -442,18 +559,21 @@ async function processConsumer(codec, source) {
             if (msg.type === 'SCHEMA_MIGRATION' && msg.toVersion && msg.migrations) {
                 handleSchemaMigrationNotification(msg);
             } else if (msg.type === 'INSERT' && msg.table && msg.record) {
+                broadcastDevtoolsMessage('delta', { channel: subject, seq: raw.seq, payload: msg });
                 await handleMessage({
                     type: 'INSERT', table: msg.table, record: msg.record,
                     _noUndo: true, _fromNats: true, _isReplay: isReplay,
                     _nonce: msg._nonce, _hlc: msg._hlc,
                 });
             } else if (msg.type === 'DELETE' && msg.table && msg.id !== undefined) {
+                broadcastDevtoolsMessage('delta', { channel: subject, seq: raw.seq, payload: msg });
                 await handleMessage({
                     type: 'DELETE', table: msg.table, id: msg.id,
                     _fromNats: true, _isReplay: isReplay,
                     _nonce: msg._nonce, _hlc: msg._hlc,
                 });
             } else if (msg.type === 'RESET') {
+                broadcastDevtoolsMessage('delta', { channel: subject, seq: raw.seq, payload: msg });
                 // RESET wipes SQLite + DBSP unconditionally. The live-only
                 // side effects (undo wipe, FULL_SYNC post, cross-tab broadcast)
                 // only fire once we are past the replay phase.
@@ -700,6 +820,8 @@ function handleGatewayMessage(msg) {
             // Track per-subject high-water mark
             if (msg.seq) sync.lastProcessedSeqs[subject] = msg.seq;
 
+            broadcastDevtoolsMessage('delta', { channel: msg.channel, seq: msg.seq, payload });
+
             // Process through DBSP (same path as processConsumer)
             processIncomingDelta(payload, msg.seq);
             break;
@@ -711,6 +833,7 @@ function handleGatewayMessage(msg) {
             if (payload._hlc) hlcMerge(payload._hlc);
             const ewSubject = nats.routing.entityWritesSubject;
             if (msg.seq) sync.lastProcessedSeqs[ewSubject] = msg.seq;
+            broadcastDevtoolsMessage('delta', { channel: 'entity-writes', seq: msg.seq, payload });
             processIncomingDelta(payload, msg.seq);
             break;
         }
@@ -1110,6 +1233,12 @@ function stepEmitBroadcast(deltas, nonce) {
     // Emit to main thread (using owned copies, not WASM references)
     for (const [viewName, viewDeltas] of Object.entries(normalized)) {
         if (viewDeltas.length > 0) {
+            // Update row count estimate for devtools
+            if (!(viewName in viewRowCounts)) viewRowCounts[viewName] = 0;
+            for (const d of viewDeltas) {
+                viewRowCounts[viewName] += (d.weight > 0 ? 1 : -1);
+                if (viewRowCounts[viewName] < 0) viewRowCounts[viewName] = 0;
+            }
             self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: viewDeltas });
         }
     }
@@ -1117,7 +1246,9 @@ function stepEmitBroadcast(deltas, nonce) {
     if (Object.keys(normalized).length > 0 && !sync.isReplaying) broadcastDeltas(normalized, nonce);
 
     if (conflicts.length > 0) {
+        for (const c of conflicts) conflictLog.push(c);
         self.postMessage({ type: 'CONFLICTS', conflicts });
+        broadcastDevtoolsStatus();
     }
 
     // Route non-monotonic view deltas to authority (CALM)
@@ -1197,6 +1328,8 @@ async function handleInit(data) {
     // dreaded "unreachable" WASM crash that requires manual devtools
     // intervention.
     const schemaFingerprint = computeSchemaFingerprint(schema);
+    schemaState.fingerprint = schemaFingerprint;
+    schemaState.version = data.schemaVersion || 1;
     try {
         db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
         const rows = db.exec(
@@ -1399,6 +1532,7 @@ function handleInsert(data) {
         undoStack.push({ table: tableName, id: idVal });
         if (undoStack.length > UNDO_MAX_SIZE) undoStack.shift();
         self.postMessage({ type: 'UNDO_SIZE', size: undoStack.length });
+        broadcastDevtoolsStatus();
     }
 
     if (!data._fromNats && !data._localOnly) {
@@ -1427,6 +1561,7 @@ function handleUndo() {
     natsPublish({ type: 'DELETE', table: undoTable, id: undoId, _nonce: nonce, _hlc: hlc });
     deleteWithFullRetraction(undoTable, undoId, nonce);
     self.postMessage({ type: 'UNDO_SIZE', size: undoStack.length });
+    broadcastDevtoolsStatus();
 }
 
 function handleReset() {
@@ -1443,6 +1578,7 @@ function handleReset() {
     sync.localMutationQueue = [];
 
     self.postMessage({ type: 'UNDO_SIZE', size: 0 });
+    broadcastDevtoolsStatus();
     self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
     broadcastReset(nonce);
     natsPublish({ type: 'RESET', _nonce: nonce, _hlc: hlc });
@@ -1613,7 +1749,7 @@ async function handleMessage(data) {
     }
 
     switch (data.type) {
-        case 'INIT':   return handleInit(data);
+        case 'INIT':   initDevtoolsChannel(); return handleInit(data);
         case 'INSERT': return handleInsert(data);
         case 'DELETE': return handleDelete(data);
         case 'UNDO':   return handleUndo();
