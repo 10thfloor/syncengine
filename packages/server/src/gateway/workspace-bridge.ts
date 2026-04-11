@@ -7,9 +7,9 @@ import { ClientSession } from './client-session.js';
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;
 const ENTITY_WRITES_CONSUMER_KEY = '__entity-writes__';
-const STREAM_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000];
-
-/** Retry an async operation when the error is a JetStream 404 (stream not found). */
+/** Retry an async operation when the error is a JetStream 404 (stream not found).
+ *  Retries with exponential backoff up to 30s total — enough for the workspace
+ *  to be provisioned on first page load during dev boot. */
 function isStreamNotFoundError(err: any): boolean {
     return err?.api_error?.err_code === 10059
         || err?.constructor?.name === 'StreamNotFoundError'
@@ -17,13 +17,16 @@ function isStreamNotFoundError(err: any): boolean {
 }
 
 async function withStreamRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
-    for (const delay of STREAM_RETRY_DELAYS_MS) {
+    const MAX_ATTEMPTS = 15;
+    let delay = 500;
+    for (let i = 0; i < MAX_ATTEMPTS; i++) {
         try {
             return await fn();
         } catch (err: any) {
             if (isStreamNotFoundError(err)) {
-                console.log(`[gateway] ${label}: stream not found, retrying in ${delay}ms...`);
+                console.log(`[gateway] ${label}: stream not found, retrying in ${delay}ms... (${i + 1}/${MAX_ATTEMPTS})`);
                 await new Promise((r) => setTimeout(r, delay));
+                delay = Math.min(delay * 1.5, 5_000);
                 continue;
             }
             throw err;
