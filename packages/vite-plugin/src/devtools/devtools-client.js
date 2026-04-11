@@ -751,6 +751,9 @@
             try {
                 bc.postMessage({ type: 'devtools-action', action: a.action });
                 showToast(a.label + ': sent', true);
+                if (a.action === 'clear-client-db') {
+                    setTimeout(function () { location.reload(); }, 1000);
+                }
             } catch (err) {
                 showToast(a.label + ': ' + err.message, false);
             }
@@ -769,6 +772,9 @@
             .then(function (data) {
                 if (data.ok) {
                     showToast(data.message || (a.label + ': OK'), true);
+                    if (a.action === 'reset' || a.action === 'teardown') {
+                        setTimeout(function () { location.reload(); }, 1000);
+                    }
                 } else {
                     showToast(data.message || data.error || (a.label + ': failed'), false);
                 }
