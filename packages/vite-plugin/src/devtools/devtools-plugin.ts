@@ -29,22 +29,7 @@ function restateAdminUrl(restateIngressUrl: string): string {
         .replace(/:8080\b/, ':9070');
 }
 
-/** Read `.syncengine/dev/runtime.json` from the project root. */
-interface DevRuntimeJson {
-    natsUrl?: string;
-    restateUrl?: string;
-    gatewayUrl?: string;
-    authToken?: string | null;
-}
-
-function readDevRuntime(viteRoot: string): DevRuntimeJson {
-    const path = join(viteRoot, '.syncengine', 'dev', 'runtime.json');
-    try {
-        return JSON.parse(readFileSync(path, 'utf8')) as DevRuntimeJson;
-    } catch {
-        return {};
-    }
-}
+import { readDevRuntime, type DevRuntimeJson } from '../dev-runtime.ts';
 
 // ── NATS monitor helpers ──────────────────────────────────────────────────────
 
@@ -155,10 +140,10 @@ async function clearAllEntityState(restateUrl: string): Promise<number> {
         }
     } catch { /* admin unreachable */ }
 
-    // 2. For each service, query keys and clear state
+    // 2. For each service, query keys and clear state (parallel)
+    const clearPromises: Promise<void>[] = [];
     for (const svc of services) {
         try {
-            // Use the Restate SQL query to find all object keys
             const qRes = await fetch(`${adminUrl}/query`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json', 'accept': 'application/json' },
@@ -166,22 +151,21 @@ async function clearAllEntityState(restateUrl: string): Promise<number> {
             });
             if (!qRes.ok) continue;
 
-            // The query endpoint returns Arrow IPC by default; with accept: application/json it returns JSON
             const qData = await qRes.json() as { rows?: string[][] };
             const keys = (qData.rows ?? []).map((r: string[]) => r[0]).filter(Boolean);
 
             for (const key of keys) {
-                try {
-                    await fetch(`${adminUrl}/services/${svc.name}/state`, {
+                clearPromises.push(
+                    fetch(`${adminUrl}/services/${svc.name}/state`, {
                         method: 'POST',
                         headers: { 'content-type': 'application/json' },
                         body: JSON.stringify({ object_key: key, new_state: {} }),
-                    });
-                    cleared++;
-                } catch { /* individual clear failure */ }
+                    }).then(() => { cleared++; }).catch(() => {}),
+                );
             }
         } catch { /* query failure */ }
     }
+    await Promise.all(clearPromises);
 
     return cleared;
 }
@@ -242,9 +226,11 @@ export function devtoolsMiddleware(
                 fetchRestateHealth(adminUrl),
             ]);
 
+            // Use already-fetched streams to resolve wsId (avoids double NATS fetch)
             const wsId = clientWsId
-                || await resolveWorkspaceIdFromNats()
-                || 'default';
+                || (natsStreams.length > 0
+                    ? [...natsStreams].sort((a, b) => b.messages - a.messages)[0]!.name.replace(/^WS_/, '')
+                    : 'default');
 
             const workspace = await fetchWorkspaceInfo(restateUrl, wsId);
 
@@ -348,7 +334,7 @@ export function devtoolsMiddleware(
                         const wsEnc = encodeURIComponent(wsId);
 
                         // 1. Purge the WS_ stream
-                        const streamToPurge = `WS_${wsId}`;
+                        const streamToPurge = `WS_${wsId.replace(/-/g, '_')}`;
                         try {
                             const { connect } = await import('@nats-io/transport-node');
                             const { jetstreamManager } = await import('@nats-io/jetstream');
@@ -408,8 +394,9 @@ export function devtoolsMiddleware(
 export function devtoolsPlugin(): Plugin {
     let isDev = false;
     let viteRoot = '';
+    let cachedInjection: string | null = null;
+    let runtimeCache: DevRuntimeJson = {};
 
-    // Compute __dirname equivalent at module load time (ESM).
     const pluginDir = fileURLToPath(new URL('.', import.meta.url));
 
     return {
@@ -422,32 +409,35 @@ export function devtoolsPlugin(): Plugin {
 
         configureServer(server) {
             if (!isDev) return;
-            server.middlewares.use(
-                devtoolsMiddleware(() => readDevRuntime(viteRoot || server.config.root)),
-            );
-        },
 
-        transformIndexHtml(html) {
-            if (!isDev) return html;
+            // Cache runtime.json — refresh on file change instead of reading on every request
+            const runtimePath = join(viteRoot || server.config.root, '.syncengine', 'dev', 'runtime.json');
+            const reloadRuntime = () => { runtimeCache = readDevRuntime(viteRoot || server.config.root); };
+            reloadRuntime();
+            server.watcher.add(runtimePath);
+            server.watcher.on('change', (f) => { if (f === runtimePath) reloadRuntime(); });
+            server.watcher.on('add', (f) => { if (f === runtimePath) reloadRuntime(); });
 
+            // Cache the injection snippet — these files are static for the server's lifetime
             const clientJs = readFileSync(join(pluginDir, 'devtools-client.js'), 'utf8');
             const styles = readFileSync(join(pluginDir, 'devtools-styles.css'), 'utf8');
-
-            // Escape backticks and template-literal delimiters so the CSS
-            // string can be safely embedded inside a JS template literal.
             const escapedStyles = styles
                 .replace(/\\/g, '\\\\')
                 .replace(/`/g, '\\`')
                 .replace(/\$\{/g, '\\${');
-
-            const injected = [
+            cachedInjection = [
                 `<script type="module">`,
                 `const __DEVTOOLS_STYLES__ = \`${escapedStyles}\`;`,
                 clientJs,
                 `</script>`,
             ].join('\n');
 
-            return html.replace('</body>', `${injected}\n</body>`);
+            server.middlewares.use(devtoolsMiddleware(() => runtimeCache));
+        },
+
+        transformIndexHtml(html) {
+            if (!isDev || !cachedInjection) return html;
+            return html.replace('</body>', `${cachedInjection}\n</body>`);
         },
     };
 }

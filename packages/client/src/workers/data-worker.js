@@ -265,9 +265,9 @@ function broadcastDevtoolsStatus() {
             type: 'devtools-status',
             sync: {
                 phase: sync.phase,
-                messagesReplayed: 0,
-                totalMessages: 0,
-                snapshotLoaded: false,
+                messagesReplayed: sync.messagesReplayed || 0,
+                totalMessages: sync.totalMessages || 0,
+                snapshotLoaded: !!sync.snapshotLoaded,
             },
             connection: connectionStatus,
             hlc: { ts: hlcTs, counter: hlcCount },
@@ -357,6 +357,9 @@ function setConnectionStatus(status) {
 
 function emitSyncStatus(phase, messagesReplayed, extra = {}) {
     sync.phase = phase;
+    sync.messagesReplayed = messagesReplayed || 0;
+    if (extra.totalMessages != null) sync.totalMessages = extra.totalMessages;
+    if (extra.snapshotLoaded != null) sync.snapshotLoaded = !!extra.snapshotLoaded;
     self.postMessage({ type: 'SYNC_STATUS', phase, messagesReplayed, ...extra });
     broadcastDevtoolsStatus();
 }
@@ -1243,7 +1246,6 @@ function stepEmitBroadcast(deltas, nonce) {
                 if (viewRowCounts[viewName] < 0) viewRowCounts[viewName] = 0;
             }
             self.postMessage({ type: 'VIEW_UPDATE', viewName, deltas: viewDeltas });
-            broadcastDevtoolsStatus();
         }
     }
 
@@ -1252,6 +1254,10 @@ function stepEmitBroadcast(deltas, nonce) {
     if (conflicts.length > 0) {
         for (const c of conflicts) conflictLog.push(c);
         self.postMessage({ type: 'CONFLICTS', conflicts });
+    }
+
+    // Single devtools broadcast per batch (covers view updates + conflicts)
+    if (Object.keys(normalized).length > 0 || conflicts.length > 0) {
         broadcastDevtoolsStatus();
     }
 

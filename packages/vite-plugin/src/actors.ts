@@ -656,25 +656,7 @@ export function buildRpcMiddleware(
 
 // ── Plugin factory ──────────────────────────────────────────────────────────
 
-/** Runtime-config dual: the dev orchestrator writes this file with the
- *  allocated Restate / NATS URLs. Post-Phase-8 the `workspaceId` field
- *  is no longer written — workspaces are resolved per request by the
- *  workspaces sub-plugin. */
-interface DevRuntimeJson {
-    natsUrl?: string;
-    restateUrl?: string;
-    authToken?: string | null;
-}
-
-function readDevRuntime(root: string): DevRuntimeJson {
-    const path = resolve(root, '.syncengine', 'dev', 'runtime.json');
-    if (!existsSync(path)) return {};
-    try {
-        return JSON.parse(readFileSync(path, 'utf8')) as DevRuntimeJson;
-    } catch {
-        return {};
-    }
-}
+import { readDevRuntime } from './dev-runtime.ts';
 
 export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
     const registry = emptyRegistry();

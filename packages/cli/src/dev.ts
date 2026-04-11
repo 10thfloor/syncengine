@@ -276,8 +276,7 @@ async function boot(
     // 6. Vite
     if (!appDir) {
         throw new Error(
-            'No app directory found. Run from a directory with vite.config.ts, ' +
-            'or ensure apps/example exists in the repo.',
+            'No app directory found. Run syncengine dev from a directory containing syncengine.config.ts (or .js/.mjs).',
         );
     }
     banner('starting vite dev server');
