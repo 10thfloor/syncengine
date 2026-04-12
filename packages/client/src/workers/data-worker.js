@@ -534,6 +534,14 @@ function emitSyncStatus(phase, messagesReplayed, extra = {}) {
     if (extra.snapshotLoaded != null) sync.snapshotLoaded = !!extra.snapshotLoaded;
     self.postMessage({ type: 'SYNC_STATUS', phase, messagesReplayed, ...extra });
     broadcastDevtoolsStatus();
+    if (nats._currentRequestId) {
+        if (phase === 'replaying') {
+            emitWorkspaceStatus(currentWsKey, nats._currentRequestId, 'replaying');
+        } else if (phase === 'live') {
+            emitWorkspaceStatus(currentWsKey, nats._currentRequestId, 'live');
+            nats._currentRequestId = null;
+        }
+    }
 }
 
 // ── Unified JetStream consumer (replay + live on one iterator) ─────────────
@@ -1468,6 +1476,137 @@ function deleteWithFullRetraction(tableName, id, nonce) {
 
 // ── Message handlers (broken out from monolithic handleMessage) ─────────────
 
+async function handleSwitchWorkspace(data) {
+    const { wsKey, requestId } = data;
+
+    // Supersede: increment epoch, invalidating all in-flight async work
+    epoch++;
+    const myEpoch = epoch;
+
+    // Teardown old workspace
+    teardownWorkspace();
+    emitWorkspaceStatus(wsKey, requestId, 'switching');
+
+    if (!isCurrentEpoch(myEpoch)) return;
+
+    // Build new sync config from stored schema + new wsKey
+    const syncConfig = { ...nats._lastSyncConfig, workspaceId: wsKey };
+    currentWsKey = wsKey;
+
+    // 1. Open workspace-scoped SQLite
+    emitWorkspaceStatus(wsKey, requestId, 'provisioning');
+    try {
+        const sqlite3 = await sqlite3InitModule();
+        const dbPath = `/syncengine-${wsKey}.sqlite3`;
+        if (sqlite3.oo1.OpfsDb) {
+            db = new sqlite3.oo1.OpfsDb(dbPath);
+        } else {
+            db = new sqlite3.oo1.DB(dbPath, 'ct');
+        }
+    } catch (err) {
+        if (isCurrentEpoch(myEpoch)) {
+            emitWorkspaceStatus(wsKey, requestId, 'error', `SQLite init failed: ${err.message}`);
+        }
+        return;
+    }
+    if (!isCurrentEpoch(myEpoch)) return;
+
+    // 2. Create tables, check schema fingerprint, load high-water marks
+    const schemaFingerprint = computeSchemaFingerprint({ tables: _schemaTables, views: _schemaViews });
+    try {
+        db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
+        const rows = db.exec(
+            "SELECT value FROM _dbsp_meta WHERE key = 'schema_fingerprint'",
+            { rowMode: 'object' },
+        );
+        const stored = rows.length > 0 ? rows[0].value : null;
+        if (stored && stored !== schemaFingerprint) {
+            const existingTables = db.exec(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                { rowMode: 'object' },
+            );
+            for (const row of existingTables) {
+                db.exec(`DROP TABLE IF EXISTS "${row.name}"`);
+            }
+            db.exec("CREATE TABLE IF NOT EXISTS _dbsp_meta (key TEXT PRIMARY KEY, value TEXT)");
+        }
+        db.exec(
+            "INSERT OR REPLACE INTO _dbsp_meta (key, value) VALUES ('schema_fingerprint', ?)",
+            { bind: [schemaFingerprint] },
+        );
+        for (const t of _schemaTables) {
+            db.exec(t.sql);
+            tablesMeta[t.name] = { insertSql: t.insertSql, columns: t.columns };
+        }
+    } catch (err) {
+        if (isCurrentEpoch(myEpoch)) {
+            emitWorkspaceStatus(wsKey, requestId, 'error', `Schema init failed: ${err.message}`);
+        }
+        return;
+    }
+    if (!isCurrentEpoch(myEpoch)) return;
+
+    // 3. Hydrate DBSP from SQLite + load high-water marks
+    dbsp.reset();
+    hydrateFromSQLite(_schemaTables);
+    loadLastProcessedSeqs();
+
+    // 4. Open workspace-scoped BroadcastChannel
+    try { channel.close(); } catch { /* ignore */ }
+    channel = new BroadcastChannel(`syncengine-sync-${wsKey}`);
+    channel.onmessage = handleBroadcastMessage;
+
+    initialized = true;
+    self.postMessage({ type: 'READY' });
+
+    if (!isCurrentEpoch(myEpoch)) return;
+
+    // 5. Connect to NATS/gateway
+    emitWorkspaceStatus(wsKey, requestId, 'connecting');
+
+    nats.config = syncConfig;
+    nats._lastSyncConfig = syncConfig;
+    if (syncConfig.restateUrl) authority.restateUrl = syncConfig.restateUrl;
+
+    nats.routing = buildChannelRouting(syncConfig, _schemaTables.map(t => t.name));
+    for (const s of nats.routing.subjects) {
+        if (!nats.outboundQueues[s]) nats.outboundQueues[s] = [];
+    }
+
+    // Build channel name mappings
+    const channelNames = [];
+    const channelNameToSubject = {};
+    if (syncConfig.channels) {
+        for (const ch of syncConfig.channels) {
+            const chName = ch.name;
+            const subject = `ws.${syncConfig.workspaceId}.ch.${chName}.deltas`;
+            channelNames.push(chName);
+            channelNameToSubject[chName] = subject;
+        }
+    }
+    if (channelNames.length === 0 && nats.routing.subjects.length === 1) {
+        channelNames.push('__default__');
+        channelNameToSubject['__default__'] = nats.routing.subjects[0];
+    }
+    const subjectToChannelName = {};
+    for (const [chName, subj] of Object.entries(channelNameToSubject)) {
+        subjectToChannelName[subj] = chName;
+    }
+    nats.routing.channelNames = channelNames;
+    nats.routing.channelNameToSubject = channelNameToSubject;
+    nats.routing.subjectToChannelName = subjectToChannelName;
+    nats.routing.entityWritesSubject = `ws.${syncConfig.workspaceId}.entity-writes`;
+
+    // Store requestId so sync status transitions can emit workspace status
+    nats._currentRequestId = requestId;
+
+    if (syncConfig.gatewayUrl) {
+        connectGateway();
+    } else {
+        connectNats();
+    }
+}
+
 async function handleInit(data) {
     const { schema } = data;
 
@@ -1500,7 +1639,9 @@ async function handleInit(data) {
 
     // 2. SQLite with OPFS persistence
     const sqlite3 = await sqlite3InitModule();
-    const dbPath = '/react-dbsp.sqlite3';
+    const wsKey = data.sync?.workspaceId || 'default';
+    currentWsKey = wsKey;
+    const dbPath = `/syncengine-${wsKey}.sqlite3`;
 
     if (sqlite3.oo1.OpfsDb) {
         db = new sqlite3.oo1.OpfsDb(dbPath);
@@ -1509,6 +1650,11 @@ async function handleInit(data) {
         db = new sqlite3.oo1.DB(dbPath, 'ct');
         console.log('SQLite initialized in-memory (OPFS unavailable)');
     }
+
+    // Close default channel, open workspace-scoped one
+    try { channel.close(); } catch { /* ignore */ }
+    channel = new BroadcastChannel(`syncengine-sync-${wsKey}`);
+    channel.onmessage = handleBroadcastMessage;
 
     // 2b. Schema fingerprint — auto-wipe on mismatch.
     //
@@ -1601,6 +1747,7 @@ async function handleInit(data) {
     // 8. Connect to NATS
     if (data.sync) {
         nats.config = data.sync;
+        nats._lastSyncConfig = { ...data.sync };
         if (data.sync.restateUrl) authority.restateUrl = data.sync.restateUrl;
 
         // Build channel routing: legacy mode (no channels) uses one default
@@ -1937,13 +2084,16 @@ self.postMessage({ type: 'WORKER_LOADED' });
 async function handleMessage(data) {
     // Queue local mutations during replay — but always allow RESET and
     // TOPIC_* messages through (topics are ephemeral, not replay-gated).
-    if (sync.isReplaying && data.type !== 'INIT' && data.type !== 'RESET' && !data.type.startsWith('TOPIC_') && !data._fromNats && !data._isReplay) {
+    if (sync.isReplaying && data.type !== 'INIT' && data.type !== 'SWITCH_WORKSPACE' && data.type !== 'RESET' && !data.type.startsWith('TOPIC_') && !data._fromNats && !data._isReplay) {
         sync.localMutationQueue.push(data);
         return;
     }
 
     switch (data.type) {
         case 'INIT':   initDevtoolsChannel(); return handleInit(data);
+        case 'SWITCH_WORKSPACE':
+            handleSwitchWorkspace(data);
+            return;
         case 'INSERT': return handleInsert(data);
         case 'DELETE': return handleDelete(data);
         case 'UNDO':   return handleUndo();
