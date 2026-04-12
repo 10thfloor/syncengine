@@ -11,8 +11,12 @@
  * (those differ between Connect middleware and raw Node `http`).
  */
 
-import { ENTITY_OBJECT_PREFIX } from './entity-runtime.js';
-import { WORKFLOW_OBJECT_PREFIX } from './workflow.js';
+// Inline the prefix constants to avoid importing heavy server modules
+// (entity-runtime.js, workflow.js) which pull in @restatedev/restate-sdk.
+// This module is used by @syncengine/vite-plugin which runs in Vite's
+// Node process where those transitive deps may not resolve.
+const ENTITY_OBJECT_PREFIX = 'entity_';
+const WORKFLOW_OBJECT_PREFIX = 'workflow_';
 
 // ── Validation regexes ────────────────────────────────────────────────────
 
