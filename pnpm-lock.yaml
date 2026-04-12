@@ -109,6 +109,9 @@ importers:
       '@syncengine/cli':
         specifier: workspace:*
         version: link:../../packages/cli
+      '@syncengine/server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@syncengine/vite-plugin':
         specifier: workspace:*
         version: link:../../packages/vite-plugin

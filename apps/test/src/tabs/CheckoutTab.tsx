@@ -3,6 +3,7 @@ import { useStore } from '@syncengine/client';
 import type { DB } from '../App';
 import { PRODUCT_SEED, type ProductSlug } from '../schema';
 import { inventory } from '../entities/inventory.actor';
+import { checkout } from '../workflows/checkout.workflow';
 
 const RESERVATION_TTL_MS = 30_000;
 
@@ -107,25 +108,14 @@ const CheckoutFlow = memo(function CheckoutFlow({
     setBuying(true);
     const orderId = crypto.randomUUID();
     try {
-      // Saga step 1: sell (consumes reservation, emits transaction)
-      await actions.sell(userId, orderId, price, Date.now());
-      // Saga step 2: place order via direct RPC (can't useEntity in a callback)
-      const res = await fetch(
-        `/__syncengine/rpc/order/${encodeURIComponent(orderId)}/place`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify([userId, slug, price, Date.now()]),
-        },
-      );
-      if (!res.ok) throw new Error(await res.text());
+      await s.runWorkflow(checkout, { userId, orderId, productSlug: slug, price });
       setReservedAt(null);
     } catch (e: unknown) {
       setError((e as Error).message);
     } finally {
       setBuying(false);
     }
-  }, [actions, userId, price, slug]);
+  }, [s, userId, price, slug]);
 
   const timerSeconds = (timeLeft / 1000).toFixed(1);
 

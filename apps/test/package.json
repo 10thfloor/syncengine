@@ -15,6 +15,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@syncengine/server": "workspace:*",
     "@syncengine/vite-plugin": "workspace:*",
     "@syncengine/cli": "workspace:*",
     "@types/react": "^19.0.0",
