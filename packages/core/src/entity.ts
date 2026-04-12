@@ -637,11 +637,23 @@ export function applyHandler(
     );
   }
 
+  // Validate declared state fields but preserve extra fields (e.g.,
+  // source projection values like balance/txnCount). The handler may
+  // return optimistic projection values for latency compensation —
+  // stripping them would flash $0 until the server responds.
   const validated = validateEntityState(
     entity.$state,
     next,
     entity.$name,
   ) as Record<string, unknown>;
+
+  // Merge back any fields from `next` that aren't in $state — these
+  // are projection fields the handler computed optimistically.
+  for (const k of Object.keys(next)) {
+    if (!(k in entity.$state) && !(k in validated)) {
+      validated[k] = next[k];
+    }
+  }
 
   // Re-attach emit()ed inserts to the validated state so the entity
   // runtime can extract them after applyHandler returns.

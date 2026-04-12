@@ -131,6 +131,7 @@ interface EntitySubscription {
  */
 const subscriptions = new Map<string, EntitySubscription>();
 
+
 /**
  * A lazy NATS connection shared across all entity subscriptions. The
  * promise is nulled on connection close so the next caller reconnects
@@ -229,10 +230,17 @@ function getOrCreateSubscription(
                             state?: Record<string, unknown>;
                         };
                         if (decoded.type === 'ENTITY_STATE' && decoded.state) {
-                            setConfirmed(sub, entity, decoded.state);
+                            const wasReady = sub.ready;
                             sub.ready = true;
                             sub.error = null;
-                            notify(sub);
+                            // setConfirmed skips rebase when pending > 0
+                            // (self-echo protection). Only notify React if
+                            // something actually changed for the UI.
+                            const prevOptimistic = sub.optimistic;
+                            setConfirmed(sub, entity, decoded.state);
+                            if (sub.optimistic !== prevOptimistic || !wasReady) {
+                                notify(sub);
+                            }
                         }
                     } catch {
                         // Drop malformed message — keep the sub alive.
@@ -270,17 +278,40 @@ function setConfirmed(
     next: Record<string, unknown>,
 ): void {
     sub.confirmed = next;
+
+    // While actions are in flight, skip the rebase. The optimistic state
+    // already reflects the pending actions on top of the OLD confirmed.
+    // The new confirmed (from a NATS broadcast) may already include the
+    // pending action's effect — rebasing would double-apply it, causing
+    // a visible spike (e.g., $200 → $300 → $200). The POST response
+    // will remove the pending action and trigger a clean rebase.
+    if (sub.pending.length > 0) return;
+
     const result = rebase(entity, sub.confirmed, sub.pending);
-    sub.optimistic = result.state;
-    // If any pending actions failed during rebase, drop them from the
-    // queue by their stable id. The in-flight POST for each still
-    // carries the authoritative verdict — dropping from the optimistic
-    // chain just means the UI reflects the pre-action state until the
-    // server responds.
+    // Referential stability: keep the old optimistic reference if values
+    // match. useSyncExternalStore uses Object.is — same ref = no re-render.
+    sub.optimistic = shallowEqual(sub.optimistic, result.state)
+        ? sub.optimistic
+        : result.state;
     if (result.failedIds.length > 0) {
         const failedSet = new Set(result.failedIds);
         sub.pending = sub.pending.filter((a) => !failedSet.has(a.id));
     }
+}
+
+function shallowEqual(
+    a: Record<string, unknown> | null,
+    b: Record<string, unknown> | null,
+): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (const k of keysA) {
+        if (a[k] !== b[k]) return false;
+    }
+    return true;
 }
 
 /** Rebase after a pending action is added, removed, or after confirmed
@@ -288,7 +319,9 @@ function setConfirmed(
  *  replacing the base (e.g., after dequeueing a resolved action). */
 function rebaseSub(sub: EntitySubscription, entity: AnyEntity): void {
     const result = rebase(entity, sub.confirmed, sub.pending);
-    sub.optimistic = result.state;
+    sub.optimistic = shallowEqual(sub.optimistic, result.state)
+        ? sub.optimistic
+        : result.state;
     if (result.failedIds.length > 0) {
         const failedSet = new Set(result.failedIds);
         sub.pending = sub.pending.filter((a) => !failedSet.has(a.id));
@@ -326,12 +359,6 @@ async function invokeHandler(
 
     const headers: Record<string, string> = {
         'content-type': 'application/json',
-        // PLAN Phase 8: tell the dev middleware which workspace to
-        // target. The wsKey was resolved per-request by the plugin's
-        // workspaces sub-plugin and injected into the HTML as a meta
-        // tag; the runtime-config virtual module read it at boot and
-        // exported it as `workspaceId`, so this header is always
-        // accurate for the current user session.
         'x-syncengine-workspace': runtimeWorkspaceId,
     };
     if (runtimeAuthToken) headers.authorization = `Bearer ${runtimeAuthToken}`;
@@ -537,21 +564,24 @@ function buildActionProxy<TState, THandlers>(
             // ── Phase 3: POST to Restate, reconcile on response ──────────
             try {
                 const confirmedState = await invokeHandler(entity, key, name, args);
-                // Drop our entry from pending before rebasing — otherwise
-                // it would get double-applied on top of the new confirmed.
+                const prevOptimistic = sub.optimistic;
                 sub.pending = sub.pending.filter((a) => a.id !== action.id);
                 setConfirmed(sub, entity, confirmedState);
                 sub.ready = true;
-                notify(sub);
+                // Only notify React if the optimistic state actually
+                // changed. The pending count going 1→0 is not a visible
+                // change — notifying would cause a redundant re-render
+                // (the flash).
+                if (sub.optimistic !== prevOptimistic) notify(sub);
                 return confirmedState as TState;
             } catch (err) {
-                // Drop the failed action; rebase so optimistic reflects
-                // the remaining pending chain on top of unchanged confirmed.
+                const prevOptimistic = sub.optimistic;
                 sub.pending = sub.pending.filter((a) => a.id !== action.id);
                 rebaseSub(sub, entity);
                 const error = err instanceof Error ? err : new Error(String(err));
                 sub.error = error;
-                notify(sub);
+                // Always notify on error — the UI needs to show it.
+                if (sub.optimistic !== prevOptimistic || sub.error) notify(sub);
                 throw error;
             }
         };

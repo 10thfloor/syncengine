@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo, useState } from "react";
+import { useEffect, useRef, useMemo, useState, memo } from "react";
 import { store, useStore } from "@syncengine/client";
 
 // ── Schema: tables, views, channels ─────────────────────────────
@@ -51,7 +51,7 @@ function randomColor(): string {
 // change together. Never put unrelated useView + useEntity calls
 // in the same component.
 
-function CounterSection() {
+const CounterSection = memo(function CounterSection() {
   const s = useStore<DB>();
   const { state, actions } = s.useEntity(counter, "global");
   return (
@@ -69,9 +69,9 @@ function CounterSection() {
       </div>
     </section>
   );
-}
+});
 
-function ClicksSection({ userId }: { userId: string }) {
+const ClicksSection = memo(function ClicksSection({ userId }: { userId: string }) {
   const s = useStore<DB>();
   const { views } = s.useView({ totalsView });
   const total = views.totalsView[0]?.total ?? 0;
@@ -90,9 +90,9 @@ function ClicksSection({ userId }: { userId: string }) {
       </div>
     </section>
   );
-}
+});
 
-function AccountSection({ userId }: { userId: string }) {
+const AccountSection = memo(function AccountSection({ userId }: { userId: string }) {
   const s = useStore<DB>();
   const { state: acctState, actions: acctActions } = s.useEntity(account, userId);
   const [acctError, setAcctError] = useState<string | null>(null);
@@ -130,9 +130,9 @@ function AccountSection({ userId }: { userId: string }) {
       </div>
     </section>
   );
-}
+});
 
-function NotesSection({ userId }: { userId: string }) {
+const NotesSection = memo(function NotesSection({ userId }: { userId: string }) {
   const s = useStore<DB>();
   const { views } = s.useView({ notesList });
   const [noteText, setNoteText] = useState("");
@@ -186,7 +186,7 @@ function NotesSection({ userId }: { userId: string }) {
       </ul>
     </section>
   );
-}
+});
 
 // ── App (thin shell) ─────────────────────────────────────────────
 // The root component only owns: the ready gate, cursor topic, and
