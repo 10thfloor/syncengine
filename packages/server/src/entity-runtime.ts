@@ -266,6 +266,11 @@ function buildHandlerBag(entity: AnyEntity): Record<
     return bag;
 }
 
+/** Prefix applied to every entity's Restate virtual-object name.
+ *  Exported so other modules (e.g. entityRef) can build the canonical
+ *  object name without duplicating the string literal. */
+export const ENTITY_OBJECT_PREFIX = 'entity_';
+
 /** Build the Restate object for one entity. Used by both `bindEntities`
  *  and tests that want to inspect the wrapped object directly. */
 export function buildEntityObject(entity: AnyEntity): ReturnType<typeof restate.object> {
@@ -273,7 +278,7 @@ export function buildEntityObject(entity: AnyEntity): ReturnType<typeof restate.
         throw new Error(`buildEntityObject: not an entity definition`);
     }
     return restate.object({
-        name: `entity_${entity.$name}`,
+        name: `${ENTITY_OBJECT_PREFIX}${entity.$name}`,
         handlers: buildHandlerBag(entity),
     });
 }
