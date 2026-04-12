@@ -12,6 +12,7 @@ export const ActivityTab = memo(function ActivityTab() {
 
   const stats = views.totalSales[0] ?? { revenue: 0, count: 0 };
   const orderCount = views.allOrders.length;
+  const grossSales = views.allOrders.reduce((sum, o) => sum + Number(o.price), 0);
   const byProduct = [...views.salesByProduct].sort((a, b) => b.total - a.total);
   const recent = views.recentActivity;
 
@@ -33,7 +34,7 @@ export const ActivityTab = memo(function ActivityTab() {
         </div>
         <div className="stat-card">
           <div className="label">Avg Order</div>
-          <div className="value">{orderCount > 0 ? fmt(stats.revenue / orderCount) : '$0'}</div>
+          <div className="value">{orderCount > 0 ? fmt(grossSales / orderCount) : '$0'}</div>
         </div>
       </div>
 
