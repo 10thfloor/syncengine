@@ -77,7 +77,7 @@ interface InitMessage {
             name: string;
             tableName: string;
             source_table: string;
-            id_key: string;
+            id_key: string | string[];
             /** Source table's primary key — independent of `id_key`, which
              *  may be rewritten by an `aggregate` op. The DBSP join uses
              *  this for `left_index` dedup so a downstream aggregate doesn't
@@ -574,14 +574,12 @@ export function store<
     }
 
     /**
-     * Build a record identity string from the view's id_key. For simple keys
-     * this is just `record[key]`. For composite keys (`$composite:a|b|c`)
-     * it joins the values of the named columns with `|`.
+     * Build a record identity string from the view's id_key.
+     * Simple key: `record[key]`. Composite key (string[]): join column values with `|`.
      */
-    function recordId(record: Record<string, unknown>, idKey: string): string {
-        if (idKey.startsWith('$composite:')) {
-            const cols = idKey.slice('$composite:'.length).split('|');
-            return cols.map((c) => String(record[c] ?? '')).join('|');
+    function recordId(record: Record<string, unknown>, idKey: string | string[]): string {
+        if (Array.isArray(idKey)) {
+            return idKey.map((c) => String(record[c] ?? '')).join('|');
         }
         return String(record[idKey]);
     }

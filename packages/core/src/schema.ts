@@ -334,9 +334,9 @@ export interface ViewBuilder<TRecord> {
     readonly $tag: 'view';
     readonly $id: string;
     readonly $tableName: string;
-    /** Post-pipeline natural key. `aggregate([col])` rewrites this to the
-     *  group-by column so the store/worker can index aggregated output rows. */
-    readonly $idKey: string;
+    /** Post-pipeline natural key. Single string for single-column keys,
+     *  string array for composite keys (multi-column group-by aggregates). */
+    readonly $idKey: string | string[];
     /** Source table's primary key — never rewritten by the pipeline. The
      *  worker uses it to dedup the join's `left_index`, which must key on
      *  source-row identity, not the post-aggregate group key. */
@@ -387,7 +387,7 @@ function createViewBuilder<TRecord>(
     $id: string,
     tableName: string,
     sourceIdKey: string,
-    idKey: string,
+    idKey: string | string[],
     pipeline: Operator[],
     sourceTables?: string[],
 ): ViewBuilder<TRecord> {
@@ -440,17 +440,16 @@ function createViewBuilder<TRecord>(
             // Note: $sourceIdKey is left untouched — the join's left_index
             // dedup downstream of an aggregate needs the source PK, not the
             // group-by column.
-            // For multi-column group-by, build a composite key from the
-            // group-by columns. The DBSP aggregate output only contains
-            // group-by + aggregated columns (no source PK), so falling
-            // back to the source PK would produce undefined lookups in
-            // applyDeltas. The composite key is a pipe-joined string
-            // that matches the DBSP engine's internal group_key format.
-            const aggIdKey = groupByNames.length === 1
+            // Aggregate output only contains group-by + aggregated columns
+            // (no source PK). The id_key must match what's in the output:
+            //   - single column  → that column name (string)
+            //   - multiple columns → the column names (string[])
+            //   - zero columns   → '$agg' sentinel (global single-row aggregate)
+            const aggIdKey: string | string[] = groupByNames.length === 1
                 ? groupByNames[0]
                 : groupByNames.length === 0
                     ? '$agg'
-                    : `$composite:${groupByNames.join('|')}`;
+                    : groupByNames;
             return createViewBuilder($id, tableName, sourceIdKey, aggIdKey, [
                 ...pipeline,
                 { op: 'aggregate', group_by: groupByNames, aggregates },
@@ -458,9 +457,10 @@ function createViewBuilder<TRecord>(
         },
 
         distinct() {
+            const distinctKey = Array.isArray(idKey) ? sourceIdKey : idKey;
             return createViewBuilder<TRecord>($id, tableName, sourceIdKey, idKey, [
                 ...pipeline,
-                { op: 'distinct', key: idKey },
+                { op: 'distinct', key: distinctKey },
             ], tables);
         },
 

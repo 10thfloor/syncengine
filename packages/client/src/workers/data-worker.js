@@ -1639,12 +1639,17 @@ async function handleInit(data) {
     // `id_key`, which may be rewritten by an aggregate op. The DBSP join's
     // `left_index` dedup needs the source PK so a downstream aggregate
     // doesn't collapse all rows in a group to one entry.
+    // WASM engine expects id_key as a string; composite keys (string[])
+    // are joined with '|' for the wire format. The engine uses source_id_key
+    // for join/merge dedup on aggregate views, so this is safe.
+    const wasmIdKey = (v) => Array.isArray(v.id_key) ? v.id_key.join('|') : v.id_key;
+
     dbsp = new DbspEngine(
         schema.views.map(v => ({
             name: v.name,
             source_table: v.source_table || v.tableName,
-            id_key: v.id_key,
-            source_id_key: v.source_id_key || v.id_key,
+            id_key: wasmIdKey(v),
+            source_id_key: v.source_id_key || wasmIdKey(v),
             pipeline: v.pipeline,
         }))
     );
@@ -1654,8 +1659,8 @@ async function handleInit(data) {
     _schemaViews = schema.views.map(v => ({
         name: v.name,
         source_table: v.source_table || v.tableName,
-        id_key: v.id_key,
-        source_id_key: v.source_id_key || v.id_key,
+        id_key: wasmIdKey(v),
+        source_id_key: v.source_id_key || wasmIdKey(v),
         pipeline: v.pipeline,
     }));
     _schemaMergeConfigs = schema.mergeConfigs || [];
