@@ -53,86 +53,80 @@ type Tab = (typeof TABS)[number];
 
 // ── Workspace Switcher ──────────────────────────────────────────
 
-const STATUS_COLORS: Record<string, string> = {
-  live: "#22c55e",
-  switching: "#eab308",
-  provisioning: "#eab308",
-  connecting: "#eab308",
-  replaying: "#3b82f6",
-  error: "#ef4444",
+const STATUS_CLASS: Record<string, string> = {
+  live: "ws-live",
+  switching: "ws-transition",
+  provisioning: "ws-transition",
+  connecting: "ws-transition",
+  replaying: "ws-replay",
+  error: "ws-error",
 };
 
 function WorkspaceSwitcher() {
   const s = useStore<DB>();
   const { workspace, workspaces, setWorkspace } = s.use({});
   const [input, setInput] = useState("");
+  const [open, setOpen] = useState(false);
 
   const handleSwitch = useCallback(async () => {
     if (!input.trim()) return;
     const wsKey = await hashWorkspaceId(input.trim());
     setWorkspace(wsKey);
     setInput("");
+    setOpen(false);
   }, [input, setWorkspace]);
 
-  const pill = {
-    background: STATUS_COLORS[workspace.status] ?? "#71717a",
-    color: "white",
-    padding: "2px 8px",
-    borderRadius: "4px",
-    fontFamily: "monospace",
-    fontSize: "0.75rem",
-  } as const;
-
-  const btnStyle = {
-    background: "#3f3f46",
-    border: "none",
-    borderRadius: "4px",
-    color: "#e4e4e7",
-    padding: "2px 8px",
-    cursor: "pointer" as const,
-    fontSize: "0.75rem",
-  };
+  const isTransitioning = workspace.status !== "live" && workspace.status !== "error";
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-      <span style={pill}>
-        {workspace.wsKey.slice(0, 8)}{"\u2026"} {workspace.status}
-      </span>
+    <div className="ws-switcher">
+      <button
+        className={`ws-current ${STATUS_CLASS[workspace.status] ?? ""}`}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="ws-dot" />
+        <span className="ws-id">{workspace.wsKey.slice(0, 10)}</span>
+        <span className="ws-status">{isTransitioning ? workspace.status : ""}</span>
+        <svg className="ws-chevron" width="10" height="10" viewBox="0 0 10 10">
+          <path d="M2.5 3.5L5 6L7.5 3.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
+        </svg>
+      </button>
 
-      {/* Known workspaces as quick-switch buttons */}
-      {workspaces.map((wsKey) => (
-        <button
-          key={wsKey}
-          onClick={() => setWorkspace(wsKey)}
-          disabled={wsKey === workspace.wsKey}
-          style={{
-            ...btnStyle,
-            background: wsKey === workspace.wsKey ? "#22c55e" : "#3f3f46",
-            opacity: wsKey === workspace.wsKey ? 0.7 : 1,
-          }}
-        >
-          {wsKey.slice(0, 8)}{"\u2026"}
-        </button>
-      ))}
-
-      {/* Create new workspace */}
-      <input
-        type="text"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && handleSwitch()}
-        placeholder="new workspace\u2026"
-        style={{
-          background: "#27272a",
-          border: "1px solid #3f3f46",
-          borderRadius: "4px",
-          color: "#e4e4e7",
-          padding: "2px 8px",
-          width: "110px",
-          fontSize: "0.75rem",
-        }}
-      />
-      <button onClick={handleSwitch} style={btnStyle}>+</button>
+      {open && (
+        <div className="ws-dropdown">
+          {workspaces.length > 0 && (
+            <div className="ws-section">
+              <div className="ws-section-label">Workspaces</div>
+              {workspaces.map((wsKey) => (
+                <button
+                  key={wsKey}
+                  className={`ws-option ${wsKey === workspace.wsKey ? "ws-option-active" : ""}`}
+                  onClick={() => { setWorkspace(wsKey); setOpen(false); }}
+                >
+                  <span className="ws-dot" />
+                  <span className="ws-id">{wsKey.slice(0, 16)}</span>
+                  {wsKey === workspace.wsKey && <span className="ws-check">&#10003;</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="ws-section">
+            <div className="ws-section-label">New workspace</div>
+            <form className="ws-new" onSubmit={(e) => { e.preventDefault(); handleSwitch(); }}>
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="workspace name"
+                autoFocus
+              />
+              <button type="submit" className="btn btn-sm" disabled={!input.trim()}>
+                Create
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -150,9 +144,9 @@ export default function App() {
     <div className="app-shell">
       <div className="app-header">
         <h1>syncengine storefront</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          <WorkspaceSwitcher />
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <span className="user-tag">{userId}</span>
+          <WorkspaceSwitcher />
         </div>
       </div>
 

@@ -28,7 +28,7 @@ body {
 
 .app-shell { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }
 
-.app-header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 2rem; }
+.app-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 2rem; }
 .app-header h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; }
 .app-header .user-tag { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
 
@@ -90,5 +90,76 @@ body {
 
 .app-footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); font-size: 0.75rem; color: var(--muted); }
 .app-footer code { font-family: var(--mono); background: var(--bg-card); padding: 1px 4px; border-radius: 3px; }
+
+/* ── Workspace Switcher ───────────────────────────────────────── */
+
+.ws-switcher { position: relative; }
+
+.ws-current {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem 0.5rem 0.3rem 0.6rem;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--fg); font-size: 0.8rem; cursor: pointer;
+  transition: border-color 0.15s;
+}
+.ws-current:hover { border-color: var(--muted); }
+
+.ws-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted); flex-shrink: 0;
+  transition: background 0.2s;
+}
+.ws-live .ws-dot { background: var(--green); }
+.ws-transition .ws-dot { background: var(--yellow); animation: ws-pulse 1.2s ease-in-out infinite; }
+.ws-replay .ws-dot { background: var(--blue); animation: ws-pulse 1.2s ease-in-out infinite; }
+.ws-error .ws-dot { background: var(--red); }
+
+@keyframes ws-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.ws-id { font-family: var(--mono); font-size: 0.75rem; letter-spacing: -0.01em; }
+.ws-status { font-size: 0.65rem; color: var(--muted); }
+.ws-chevron { color: var(--muted); margin-left: 0.1rem; flex-shrink: 0; }
+
+.ws-dropdown {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 100;
+  min-width: 240px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  overflow: hidden;
+}
+
+.ws-section { padding: 0.5rem; }
+.ws-section + .ws-section { border-top: 1px solid var(--border); }
+
+.ws-section-label {
+  font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); padding: 0.2rem 0.4rem 0.4rem;
+}
+
+.ws-option {
+  display: flex; align-items: center; gap: 0.4rem; width: 100%;
+  padding: 0.4rem; border-radius: 5px;
+  background: none; border: none; color: var(--fg); font-size: 0.8rem;
+  cursor: pointer; transition: background 0.1s;
+}
+.ws-option:hover { background: var(--border); }
+.ws-option .ws-dot { background: var(--muted); }
+.ws-option-active .ws-dot { background: var(--green); }
+.ws-check { margin-left: auto; color: var(--green); font-size: 0.75rem; }
+
+.ws-new {
+  display: flex; gap: 0.4rem; padding: 0.2rem 0;
+}
+.ws-new input {
+  flex: 1; min-width: 0;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  padding: 0.35rem 0.5rem; font-size: 0.8rem; font-family: var(--mono);
+  color: var(--fg); outline: none; transition: border-color 0.15s;
+}
+.ws-new input:focus { border-color: var(--accent); }
+.ws-new input::placeholder { color: var(--muted); }
 
 .select { appearance: none; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 2rem 0.4rem 0.6rem; font-size: 0.8rem; color: var(--fg); cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2371717a' d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.5rem center; }
