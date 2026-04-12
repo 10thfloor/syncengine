@@ -33,6 +33,101 @@ let initialized = false;
 const pendingMessages = [];
 let schemaTables = [];
 
+// ── Workspace lifecycle ────────────────────────────────────────────────────
+let epoch = 0;
+let currentWsKey = null;
+
+function isCurrentEpoch(capturedEpoch) {
+    return capturedEpoch === epoch;
+}
+
+function emitWorkspaceStatus(wsKey, requestId, status, error) {
+    self.postMessage({
+        type: 'WORKSPACE_STATUS',
+        wsKey,
+        requestId,
+        status,
+        ...(error ? { error } : {}),
+    });
+}
+
+/**
+ * Tear down all workspace-scoped state. Called before switching to a new
+ * workspace. Best-effort: connections are closed non-blocking, in-memory
+ * state is cleared synchronously.
+ */
+function teardownWorkspace() {
+    // 1. Close connections
+    if (nats.gwWs) {
+        try { nats.gwWs.close(); } catch { /* best effort */ }
+        nats.gwWs = null;
+    }
+    if (nats.conn) {
+        try { nats.conn.close(); } catch { /* best effort */ }
+        nats.conn = null;
+    }
+    for (const source of nats.subs) {
+        try { source.messages.stop(); } catch { /* best effort */ }
+    }
+    nats.subs = [];
+    if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
+
+    // 2. Unsubscribe topics (keep desired set — it represents app intent)
+    for (const [, sub] of topicState.subs) {
+        try { sub.natsSub?.unsubscribe?.(); } catch { /* best effort */ }
+    }
+    topicState.subs.clear();
+
+    // 3. Clear NATS outbound queues
+    nats.outboundQueues = {};
+    nats.config = null;
+    nats.routing = null;
+
+    // 4. Reset DBSP engine (schema survives, materialized state doesn't)
+    if (dbsp) dbsp.reset();
+
+    // 5. Clear in-memory state
+    for (const key of Object.keys(viewRowCounts)) delete viewRowCounts[key];
+    for (const key of Object.keys(viewRowCache)) delete viewRowCache[key];
+    undoStack.length = 0;
+    causalQueue.length = 0;
+    seenNonces.clear();
+    nonceSeq = 0;
+    hlcTs = 0;
+    hlcCount = 0;
+    conflictLog.length = 0;
+
+    // 6. Reset sync state
+    sync.phase = 'idle';
+    sync.lastProcessedSeqs = {};
+    sync.isReplaying = false;
+    sync.localMutationQueue = [];
+    replayCoord.caughtUp.clear();
+    replayCoord.expected = 0;
+    replayCoord.finalizeLatch = null;
+
+    // 7. Reset authority
+    authority.sub = null;
+    authority.seqs = {};
+    authority.backoff = 0;
+    authority.backoffUntil = 0;
+
+    // 8. Close SQLite
+    if (db) {
+        try { db.close(); } catch { /* best effort */ }
+        db = null;
+    }
+
+    // 9. Close BroadcastChannel
+    if (channel) {
+        try { channel.close(); } catch { /* best effort */ }
+        channel = null;
+    }
+
+    connectionStatus = 'disconnected';
+    initialized = false;
+}
+
 // ── Undo stack ──────────────────────────────────────────────────────────────
 
 const undoStack = [];
@@ -143,9 +238,9 @@ function drainCausalQueue() {
 
 // ── Cross-tab sync (BroadcastChannel) ───────────────────────────────────────
 
-const channel = new BroadcastChannel('react-dbsp-sync');
+let channel = new BroadcastChannel('react-dbsp-sync');
 
-channel.onmessage = (event) => {
+function handleBroadcastMessage(event) {
     if (!initialized) return;
     const msg = event.data;
     if (msg._nonce && dedup(msg._nonce)) return;
@@ -158,7 +253,9 @@ channel.onmessage = (event) => {
     if (msg.type === 'DELTAS' && msg.viewUpdates) {
         emitViewUpdates(msg.viewUpdates);
     }
-};
+}
+
+channel.onmessage = handleBroadcastMessage;
 
 function broadcastDeltas(viewUpdates, nonce) {
     channel.postMessage({ type: 'DELTAS', viewUpdates, _nonce: nonce });
