@@ -661,6 +661,7 @@ async function markConsumerCaughtUp(subject) {
  * flag is derived from the global `sync.isReplaying` at processing time.
  */
 async function processConsumer(codec, source) {
+    const myEpoch = epoch;
     const { subject, consumer, messages, skipReplay } = source;
 
     // Probe num_pending upfront so subjects that start fully caught up
@@ -691,6 +692,7 @@ async function processConsumer(codec, source) {
 
     try {
         for await (const raw of messages) {
+            if (!isCurrentEpoch(myEpoch)) break;
             if (!initialized) continue;
 
             // Wait for any in-flight finalize to complete before processing
@@ -793,14 +795,16 @@ async function processConsumer(codec, source) {
             }
         }
     } catch (e) {
-        // Natural termination (disconnect, stop, network error).
-        console.log(`[sync] consumer loop for ${subject} ended:`, e?.message || 'closed');
+        if (isCurrentEpoch(myEpoch)) {
+            console.log(`[sync] consumer loop for ${subject} ended:`, e?.message || 'closed');
+        }
     }
 }
 
 // ── NATS connection ─────────────────────────────────────────────────────────
 
 async function connectNats() {
+    const myEpoch = epoch;
     if (!nats.config) return;
     if (!nats.routing) {
         console.warn('[nats] cannot connect: channel routing not initialized');
@@ -818,6 +822,10 @@ async function connectNats() {
         const connectOpts = { servers: natsUrl };
         if (nats.config.authToken) connectOpts.token = nats.config.authToken;
         nats.conn = await wsconnect(connectOpts);
+        if (!isCurrentEpoch(myEpoch)) {
+            try { nats.conn.close(); } catch { /* stale */ }
+            return;
+        }
         console.log(`[nats] connected to ${natsUrl}`);
 
         // Initialize replay phase — consumers will flip this to false once
@@ -899,7 +907,9 @@ async function connectNats() {
             setConnectionStatus('disconnected');
         }
         nats.conn = null;
-        setTimeout(() => connectNats(), NATS_RECONNECT_RETRY_MS);
+        if (isCurrentEpoch(myEpoch)) {
+            setTimeout(() => connectNats(), NATS_RECONNECT_RETRY_MS);
+        }
     }
 }
 
@@ -923,6 +933,7 @@ function processIncomingDelta(payload, seq) {
 }
 
 async function connectGateway() {
+    const myEpoch = epoch;
     if (!nats.config || !nats.routing) return;
     const gatewayUrl = nats.config.gatewayUrl;
     setConnectionStatus('connecting');
@@ -941,9 +952,13 @@ async function connectGateway() {
                 nats.gwWs = null;
                 topicState.subs.clear();
                 if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
-                setTimeout(() => connectGateway(), NATS_RECONNECT_DELAY_MS);
+                if (isCurrentEpoch(myEpoch)) {
+                    setTimeout(() => connectGateway(), NATS_RECONNECT_DELAY_MS);
+                }
             },
         });
+
+        if (!isCurrentEpoch(myEpoch)) { ws.close(); return; }
 
         nats.gwWs = ws;
         console.log(`[gateway] connected to ${gatewayUrl}`);
@@ -986,7 +1001,9 @@ async function connectGateway() {
             setConnectionStatus('disconnected');
         }
         nats.gwWs = null;
-        setTimeout(() => connectGateway(), NATS_RECONNECT_RETRY_MS);
+        if (isCurrentEpoch(myEpoch)) {
+            setTimeout(() => connectGateway(), NATS_RECONNECT_RETRY_MS);
+        }
     }
 }
 
