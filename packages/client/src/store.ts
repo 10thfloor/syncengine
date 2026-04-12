@@ -44,7 +44,6 @@ import {
     type EntityStateShape,
     type EntityState,
     type EntityHandlerMap,
-    type SourceProjectionDef,
     type SourceState,
 } from '@syncengine/core';
 import { useEntity as useEntityImpl, type UseEntityResult } from './entity-client';
@@ -223,12 +222,13 @@ export interface Store<
     useEntity<
         TName extends string,
         TShape extends EntityStateShape,
-        TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
-        THandlers extends EntityHandlerMap<EntityState<TShape> & SourceState<TSource>> = EntityHandlerMap<EntityState<TShape> & SourceState<TSource>>,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        THandlers extends EntityHandlerMap<any>,
+        TSourceKeys extends string = never,
     >(
-        entityDef: EntityDef<TName, TShape, THandlers, TSource>,
+        entityDef: EntityDef<TName, TShape, THandlers, TSourceKeys>,
         key: string,
-    ): UseEntityResult<EntityState<TShape> & SourceState<TSource>, THandlers>;
+    ): UseEntityResult<EntityState<TShape> & SourceState<TSourceKeys>, THandlers>;
 
     /** Subscribe to an ephemeral topic. Returns a reactive peer map and
      *  a publish function for broadcasting this peer's state. */

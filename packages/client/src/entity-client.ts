@@ -50,7 +50,6 @@ import {
     type EntityHandlerMap,
     type EntityHandler,
     type PendingActionLike,
-    type SourceProjectionDef,
     type SourceState,
 } from '@syncengine/core';
 import {
@@ -488,12 +487,13 @@ async function invokeHandler(
 export function useEntity<
     TName extends string,
     TShape extends EntityStateShape,
-    TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
-    THandlers extends EntityHandlerMap<EntityState<TShape> & SourceState<TSource>> = EntityHandlerMap<EntityState<TShape> & SourceState<TSource>>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    THandlers extends EntityHandlerMap<any>,
+    TSourceKeys extends string = never,
 >(
-    entity: EntityDef<TName, TShape, THandlers, TSource>,
+    entity: EntityDef<TName, TShape, THandlers, TSourceKeys>,
     key: string,
-): UseEntityResult<EntityState<TShape> & SourceState<TSource>, THandlers> {
+): UseEntityResult<EntityState<TShape> & SourceState<TSourceKeys>, THandlers> {
     // Memoize by (entity, key) tuple — a re-render with the same arguments
     // must reuse the same subscription. We track the last (entity, key)
     // pair via a ref and only rebuild when one of them changes.
@@ -559,7 +559,7 @@ export function useEntity<
     // Build the typed action proxy. We rebuild on every render — the
     // closure captures `entity` and `key` so it stays correct under
     // re-renders, and the proxy itself is cheap to construct.
-    type FullState = EntityState<TShape> & SourceState<TSource>;
+    type FullState = EntityState<TShape> & SourceState<TSourceKeys>;
     const actions = buildActionProxy<FullState, THandlers>(
         entity as unknown as AnyEntity,
         key,

@@ -67,10 +67,8 @@ export type EntityHandlerMap<TState> = Record<
 
 // ── Source state mapping ───────────────────────────────────────────────────
 
-/** Maps source projection definitions to their runtime type (always number). */
-export type SourceState<
-  TSource extends Record<string, SourceProjectionDef>,
-> = { readonly [K in keyof TSource]: number };
+/** Maps source projection key names to their runtime type (always number). */
+export type SourceState<TKeys extends string> = { readonly [K in TKeys]: number };
 
 // ── Entity definition ──────────────────────────────────────────────────────
 
@@ -85,7 +83,7 @@ export interface EntityDef<
   TShape extends EntityStateShape,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   THandlers extends EntityHandlerMap<any>,
-  TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
+  TSourceKeys extends string = never,
 > {
   readonly $tag: "entity";
   readonly $name: TName;
@@ -96,26 +94,28 @@ export interface EntityDef<
   readonly $initialState: EntityState<TShape>;
   /** Source projection definitions (Variation D). Empty if no `source`
    *  was declared on the entity. */
-  readonly $source: TSource;
+  readonly $source: SourceProjections;
   /** Initial projection values (sum/count → 0, min → Infinity, etc.) */
   readonly $sourceInitial: Record<string, number>;
   /** Phantom field carrying the inferred state record type for callers
    *  that want `EntityRecord<typeof cart>` without re-deriving it. */
   readonly $record: EntityState<TShape>;
+  /** Phantom: source projection key names, used to type the merged state. */
+  readonly $sourceKeys: TSourceKeys;
 }
 
 /** Type-level shortcut: extract the state record type from an EntityDef,
  *  including source projection fields (always `number`). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type EntityRecord<E> =
-  E extends EntityDef<string, infer TShape, any, infer TSource>
-    ? EntityState<TShape> & SourceState<TSource>
+  E extends EntityDef<string, infer TShape, any, infer TKeys>
+    ? EntityState<TShape> & SourceState<TKeys>
     : never;
 
 /** Type-level shortcut: extract the handler map from an EntityDef. */
 export type EntityHandlers<E> =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  E extends EntityDef<string, EntityStateShape, infer THandlers, any>
+  E extends EntityDef<string, EntityStateShape, infer THandlers, string>
     ? THandlers
     : never;
 
@@ -244,18 +244,16 @@ export { entity as defineEntity };
 export function entity<
   const TName extends string,
   TShape extends EntityStateShape,
-  TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
-  THandlers extends EntityHandlerMap<
-    EntityState<TShape> & SourceState<TSource>
-  > = EntityHandlerMap<EntityState<TShape> & SourceState<TSource>>,
+  const TSourceDef extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
+  THandlers extends EntityHandlerMap<EntityState<TShape> & SourceState<Extract<keyof TSourceDef, string>>> = EntityHandlerMap<EntityState<TShape> & SourceState<Extract<keyof TSourceDef, string>>>,
 >(
   name: TName,
   config: {
     readonly state: TShape;
-    readonly source?: TSource;
+    readonly source?: TSourceDef;
     readonly handlers: THandlers;
   },
-): EntityDef<TName, TShape, THandlers, TSource> {
+): EntityDef<TName, TShape, THandlers, Extract<keyof TSourceDef, string>> {
   // Runtime guards: catch the easy mistakes at construction time so the
   // user sees them on import, not on first handler call.
   if (!name || typeof name !== "string") {
@@ -324,9 +322,10 @@ export function entity<
     $state: config.state,
     $handlers: config.handlers,
     $initialState: buildInitialState(config.state),
-    $source: source as TSource,
+    $source: source,
     $sourceInitial: buildSourceInitial(source),
     $record: undefined as never,
+    $sourceKeys: undefined as never,
   };
 }
 
