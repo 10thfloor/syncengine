@@ -43,6 +43,7 @@ import {
     hashWorkspaceId,
     injectMetaTags,
     escapeAttr,
+    provisionWorkspace,
 } from '@syncengine/core/http';
 
 // Structural types mirroring `@syncengine/core`'s `config.ts`. The
@@ -199,28 +200,6 @@ function makeRuntimeCache(): (root: string) => DevRuntimeJson {
     };
 }
 
-// ── Lazy provisioning ──────────────────────────────────────────────────────
-
-/**
- * POST to the framework's workspace.provision Restate handler. Called
- * the first time each wsKey is seen in a dev session.
- */
-async function provisionWorkspace(
-    wsKey: string,
-    restateIngressUrl: string,
-): Promise<void> {
-    const url = `${restateIngressUrl.replace(/\/+$/, '')}/workspace/${encodeURIComponent(wsKey)}/provision`;
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tenantId: 'default' }),
-    });
-    if (!res.ok) {
-        const text = await res.text().catch(() => '<no body>');
-        throw new Error(`workspace.provision(${wsKey}) → HTTP ${res.status}: ${text}`);
-    }
-}
-
 // ── User extraction from the incoming request ─────────────────────────────
 
 /**
@@ -316,7 +295,7 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
         if (provisioned.has(wsKey)) return;
         let inflight = provisioning.get(wsKey);
         if (!inflight) {
-            inflight = provisionWorkspace(wsKey, restateUrl)
+            inflight = provisionWorkspace(restateUrl, wsKey)
                 .then(() => {
                     provisioned.add(wsKey);
                     provisioning.delete(wsKey);

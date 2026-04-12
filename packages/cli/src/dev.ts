@@ -9,12 +9,12 @@
  *   5. Spawn restate-server → wait for admin /health
  *   6. Spawn workspace service → wait for TCP (service speaks h2c)
  *   7. POST to Restate admin to register the workspace deployment
- *   8. Write runtime.json (NATS / Restate URLs only — workspace ids are
+ *   8. Provision the default workspace (creates NATS JetStream stream)
+ *   9. Write runtime.json (NATS / Restate URLs only — workspace ids are
  *      resolved per-request by the vite plugin's workspaces middleware
- *      based on the user's syncengine.config.ts, and provisioned lazily
- *      on first page load)
- *   9. Spawn Vite dev server
- *  10. Write pids.json with the full child set
+ *      based on the user's syncengine.config.ts)
+ *  10. Spawn Vite dev server
+ *  11. Write pids.json with the full child set
  *
  * On SIGINT, children are terminated in reverse order via process groups
  * and both state files are unlinked. Second Ctrl-C force-kills.
@@ -53,7 +53,9 @@ import {
 } from './state';
 import {
     restateRegisterDeployment,
+    provisionWorkspace,
 } from './client';
+import { hashWorkspaceId } from '@syncengine/core/http';
 
 // ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -198,15 +200,20 @@ async function boot(
             .then(() => note(`restate admin :${ports.restateAdmin}, ingress :${ports.restateIngress}`)),
     ]);
 
-    // 3. Workspace service (tsx directly — going through pnpm breaks the
+    // 3. Resolve app directory early — fail fast before spawning more
+    //    processes if there's no config to be found.
+    const appDir = resolveAppDir(repoRoot);
+    if (!appDir) {
+        throw new Error(
+            'No app directory found. Run syncengine dev from a directory containing syncengine.config.ts (or .js/.mjs).',
+        );
+    }
+
+    // 4. Workspace service (tsx directly — going through pnpm breaks the
     //    process-group kill cascade on shutdown)
     banner('starting workspace service');
     const serverDir = join(repoRoot, 'packages', 'server');
     const tsxBin = join(serverDir, 'node_modules', '.bin', 'tsx');
-    // PLAN Phase 4: tell the server the user's app directory so it can
-    // glob `src/**/*.actor.ts` on startup. Missing dir is OK — the
-    // server runs without entities.
-    const appDir = resolveAppDir(repoRoot);
     const workspace = spawnManaged(tsxBin, ['watch', 'src/index.ts'], {
         name: 'workspace',
         cwd: serverDir,
@@ -214,11 +221,11 @@ async function boot(
             ...process.env,
             PORT: String(ports.workspace),
             NATS_URL: `nats://127.0.0.1:${ports.natsClient}`,
-            ...(appDir ? { SYNCENGINE_APP_DIR: appDir } : {}),
+            SYNCENGINE_APP_DIR: appDir,
         },
     });
     processes.push(workspace);
-    if (appDir) note(`entities → ${appDir.replace(repoRoot + sep, '')}/src/**/*.actor.ts`);
+    note(`entities → ${appDir.replace(repoRoot + sep, '')}/src/**/*.actor.ts`);
     // Restate services speak HTTP/2 cleartext — Node's fetch can't probe
     // them directly, so we use a TCP-level readiness check.
     await waitForTcp(ports.workspace, { label: 'workspace service', timeoutMs: 30_000 });
@@ -228,6 +235,12 @@ async function boot(
     banner('registering workspace service with restate');
     await restateRegisterDeployment(ports, `http://127.0.0.1:${ports.workspace}`);
     note('workspace service registered');
+
+    // 4.1 Provision the default workspace — creates the NATS JetStream
+    // stream so the gateway (and any client) can subscribe immediately.
+    const defaultWsKey = hashWorkspaceId('default');
+    await provisionWorkspace(ports, defaultWsKey);
+    note(`workspace ${defaultWsKey} provisioned (stream ready)`);
 
     // 4.5 Gateway (unless --raw-nats)
     if (!rawNats) {
@@ -274,11 +287,6 @@ async function boot(
     );
 
     // 6. Vite
-    if (!appDir) {
-        throw new Error(
-            'No app directory found. Run syncengine dev from a directory containing syncengine.config.ts (or .js/.mjs).',
-        );
-    }
     banner('starting vite dev server');
     const viteBin = join(appDir, 'node_modules', '.bin', 'vite');
     const vite = spawnManaged(viteBin, [], {
@@ -312,7 +320,7 @@ async function boot(
     // saves during a reload cycle are coalesced into a single follow-up
     // reload when the current one finishes, so we never have two
     // `restateRegisterDeployment` calls in flight at once.
-    if (appDir) {
+    {
         let reloadInFlight = false;
         let reloadQueued = false;
         const reload = async (): Promise<void> => {

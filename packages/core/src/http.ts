@@ -27,6 +27,29 @@ export function hashWorkspaceId(workspaceId: string): string {
     return createHash('sha256').update(workspaceId).digest('hex').slice(0, WSKEY_HEX_CHARS);
 }
 
+// ── Workspace provisioning ─────────────────────────────────────────────────
+
+/**
+ * POST to workspace.provision on a Restate ingress. Idempotent — returns
+ * immediately if the workspace is already active.
+ */
+export async function provisionWorkspace(
+    restateUrl: string,
+    wsKey: string,
+    tenantId = 'default',
+): Promise<void> {
+    const url = `${restateUrl.replace(/\/+$/, '')}/workspace/${encodeURIComponent(wsKey)}/provision`;
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tenantId }),
+    });
+    if (!res.ok) {
+        const text = await res.text().catch(() => '<no body>');
+        throw new Error(`workspace.provision(${wsKey}) → HTTP ${res.status}: ${text}`);
+    }
+}
+
 // ── HTML meta tag injection ────────────────────────────────────────────────
 
 /**

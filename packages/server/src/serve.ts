@@ -37,6 +37,7 @@ import type {
     SyncengineConfig,
     SyncengineUser,
 } from '@syncengine/core';
+import { provisionWorkspace } from '@syncengine/core/http';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -106,24 +107,6 @@ function buildRequest(req: IncomingMessage): Request {
     });
 }
 
-// ── Lazy provisioning ──────────────────────────────────────────────────────
-
-async function provisionWorkspace(
-    wsKey: string,
-    restateUrl: string,
-): Promise<void> {
-    const url = `${restateUrl.replace(/\/+$/, '')}/workspace/${encodeURIComponent(wsKey)}/provision`;
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ tenantId: 'default' }),
-    });
-    if (!res.ok) {
-        const text = await res.text().catch(() => '<no body>');
-        throw new Error(`workspace.provision(${wsKey}) → HTTP ${res.status}: ${text}`);
-    }
-}
-
 // ── Request body helper ────────────────────────────────────────────────────
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -151,7 +134,7 @@ export function startHttpServer(config: ProductionServerConfig): void {
         if (provisioned.has(wsKey)) return;
         let inflight = provisioning.get(wsKey);
         if (!inflight) {
-            inflight = provisionWorkspace(wsKey, restateUrl)
+            inflight = provisionWorkspace(restateUrl, wsKey)
                 .then(() => {
                     provisioned.add(wsKey);
                     provisioning.delete(wsKey);
