@@ -9,6 +9,7 @@
  *   syncengine down                  Stop a running dev stack
  *   syncengine status                Report which services are up
  *   syncengine workspace <verb>      Workspace admin (create/delete/list/info)
+ *   syncengine entity get <n> <k>   Read entity instance state from Restate
  *   syncengine help                  Show this message
  */
 
@@ -19,6 +20,7 @@ import { startCommand } from './start';
 import { downCommand } from './down';
 import { statusCommand } from './status';
 import { workspaceCommand } from './workspace';
+import { entityCommand } from './entity';
 
 async function main(): Promise<void> {
     const [, , cmd, ...args] = process.argv;
@@ -47,6 +49,9 @@ async function main(): Promise<void> {
         case 'ws':
             await workspaceCommand(args);
             break;
+        case 'entity':
+            await entityCommand(args.slice(1));
+            break;
         case undefined:
         case 'help':
         case '--help':
@@ -71,6 +76,7 @@ Usage:
   syncengine down                 Stop a running dev stack
   syncengine status               Report which services are up
   syncengine workspace <verb>     Workspace admin (see \`workspace help\`)
+  syncengine entity get <n> <k>  Read entity instance state from Restate
   syncengine help                 Show this message
 
 Flags:

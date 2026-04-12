@@ -29,6 +29,21 @@
 
 import type { ColumnDef, ColumnRef, InferRecord, AnyTable } from "./schema";
 
+// ── EntityError ──────────────────────────────────────────────────────────────
+
+/**
+ * Typed error for entity handler failures. The `code` field lets UI
+ * distinguish recoverable errors (validation, guard) from fatal ones.
+ */
+export class EntityError extends Error {
+    readonly code: string;
+    constructor(code: string, message: string) {
+        super(message);
+        this.name = 'EntityError';
+        this.code = code;
+    }
+}
+
 // ── State shape ─────────────────────────────────────────────────────────────
 
 /** Map from state field name to its `ColumnDef`. Reuses the schema DSL so

@@ -76,6 +76,7 @@ export {
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
+    EntityError,
 } from './entity';
 
 // ── Project config (PLAN Phase 8 — workspace resolution) ─────────────────

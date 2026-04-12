@@ -98,7 +98,10 @@ async function runHandler(
         validated = applyHandler(entity, handlerName, merged, args);
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        throw new restate.TerminalError(message);
+        const code = (err as any)?.code;
+        // Include code in the error message as a prefix so the client can parse it
+        const fullMessage = code ? `[${code}] ${message}` : message;
+        throw new restate.TerminalError(fullMessage);
     }
 
     // Extract emitted table inserts (Symbol key, invisible to JSON)

@@ -31,7 +31,7 @@
 //   ActivityTab → useView({ salesByProduct, recentActivity, totalSales })
 //     └─ reads the rows emitted by sell(), rendered as a live dashboard
 
-import { entity, integer, text, emit, sourceCount } from '@syncengine/core';
+import { entity, integer, text, emit, sourceCount, EntityError } from '@syncengine/core';
 import { transactions } from '../schema';
 
 // Reservation TTL — if a client disappears, the lock auto-expires so
@@ -56,7 +56,7 @@ export const inventory = entity('inventory', {
   handlers: {
     // ── Simple state mutation (CatalogTab "Restock +5" button) ──────
     restock(state, amount: number) {
-      if (amount <= 0) throw new Error('restock amount must be positive');
+      if (amount <= 0) throw new EntityError('INVALID_AMOUNT', 'restock amount must be positive');
       return { ...state, stock: state.stock + amount };
     },
 
@@ -70,10 +70,10 @@ export const inventory = entity('inventory', {
       }
 
       if (current.reservedBy && current.reservedBy !== userId) {
-        throw new Error(`Already reserved by ${current.reservedBy}`);
+        throw new EntityError('ALREADY_RESERVED', `Already reserved by ${current.reservedBy}`);
       }
       if (current.stock - current.reserved <= 0) {
-        throw new Error('No stock available to reserve');
+        throw new EntityError('OUT_OF_STOCK', 'No stock available to reserve');
       }
 
       return {
@@ -86,7 +86,7 @@ export const inventory = entity('inventory', {
 
     releaseReservation(state, userId: string) {
       if (state.reservedBy !== userId) {
-        throw new Error('You do not hold the reservation');
+        throw new EntityError('NOT_RESERVED', 'You do not hold the reservation');
       }
       return {
         ...state,
@@ -109,10 +109,10 @@ export const inventory = entity('inventory', {
     // orderIndex table — a two-actor saga coordinated from the client.
     sell(state, userId: string, _orderId: string, price: number, now: number) {
       if (state.reservedBy !== userId) {
-        throw new Error('You must hold a reservation to purchase');
+        throw new EntityError('NOT_RESERVED', 'You must hold a reservation to purchase');
       }
       if (state.reservedAt > 0 && now - state.reservedAt > STALE_MS) {
-        throw new Error('Reservation has expired');
+        throw new EntityError('RESERVATION_EXPIRED', 'Reservation has expired');
       }
 
       return emit(
