@@ -104,6 +104,15 @@ export type {
     RebaseResult,
 } from './entity';
 
+// ── Workspace signal (user-facing workspace lifecycle state) ────────────────
+export type WorkspaceStatus = 'switching' | 'provisioning' | 'connecting' | 'replaying' | 'live' | 'error';
+
+export interface WorkspaceInfo {
+    readonly wsKey: string;
+    readonly status: WorkspaceStatus;
+    readonly error?: string;
+}
+
 // ── Workflow tag (minimal type for client-side references) ──────────────────
 /** Minimal structural type for workflow definitions. Used by the client
  *  store's `runWorkflow()` without importing `@syncengine/server`. */

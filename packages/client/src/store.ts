@@ -46,6 +46,8 @@ import {
     type EntityHandlerMap,
     type SourceState,
     type AnyWorkflowDef,
+    type WorkspaceInfo,
+    type WorkspaceStatus,
 } from '@syncengine/core';
 import { useEntity as useEntityImpl, type UseEntityResult } from './entity-client';
 import type { SyncConfig } from '@syncengine/core/internal';
@@ -111,7 +113,8 @@ type WorkerOutMessage =
     | { type: 'SYNC_STATUS'; phase: 'idle' | 'replaying' | 'live'; messagesReplayed: number; totalMessages?: number; snapshotLoaded?: boolean }
     | { type: 'MIGRATION_STATUS'; fromVersion: number; toVersion: number; status: 'running' | 'complete' | 'failed'; stepsApplied: number; error?: string; failedAtVersion?: number }
     | { type: 'CONFLICTS'; conflicts: Array<{ table: string; recordId: string; field: string; winner: unknown; loser: unknown; winnerHlc: number; loserHlc: number; strategy: string }> }
-    | { type: 'TOPIC_UPDATE'; name: string; key: string; peerId: string; data: Record<string, unknown>; ts: number; leave: boolean };
+    | { type: 'TOPIC_UPDATE'; name: string; key: string; peerId: string; data: Record<string, unknown>; ts: number; leave: boolean }
+    | { type: 'WORKSPACE_STATUS'; wsKey: string; status: string; requestId: string; error?: string };
 
 type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
     | TopicSubscribeMessage | TopicPublishMessage | TopicLeaveMessage | TopicUnsubscribeMessage;
@@ -195,6 +198,8 @@ export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> 
         reset: () => void;
         dismissConflict: (index: number) => void;
     };
+    workspace: WorkspaceInfo;
+    setWorkspace: (wsKey: string) => void;
 }
 
 /** Result of `db.useTopic(topicDef, key)`. */
@@ -246,6 +251,12 @@ export interface Store<
         workflow: AnyWorkflowDef & { readonly $handler: (ctx: any, input: TInput) => Promise<void> },
         input: TInput,
     ): Promise<void>;
+
+    /** Current workspace lifecycle state. */
+    readonly workspace: WorkspaceInfo;
+
+    /** Switch to a different workspace by key. */
+    setWorkspace(wsKey: string): void;
 
     /** Per-table typed imperative namespace. */
     readonly tables: TableNamespace<TTables>;
@@ -451,6 +462,37 @@ export function store<
 
     let syncStatus: SyncStatus = { phase: 'idle', messagesReplayed: 0, snapshotLoaded: false };
     const syncStatusSubscribers = new Set<() => void>();
+
+    let workspaceStatus: WorkspaceInfo = {
+        wsKey: runtimeWorkspaceId ?? 'default',
+        status: 'live',
+    };
+    let lastWsRequestId: string | null = null;
+    const workspaceSubscribers = new Set<() => void>();
+
+    function setWorkspace(wsKey: string): void {
+        if (wsKey === workspaceStatus.wsKey && workspaceStatus.status === 'live') return;
+        const requestId = crypto.randomUUID();
+        lastWsRequestId = requestId;
+        workspaceStatus = { wsKey, status: 'switching' };
+        workspaceSubscribers.forEach((fn) => fn());
+
+        for (const viewId of viewSnapshots.keys()) {
+            viewSnapshots.set(viewId, []);
+            notifyView(viewId);
+        }
+        ready = false;
+        readyListeners.clear();
+        seedsApplied = false;
+        pendingViewClear = false;
+
+        topicPeers.clear();
+        for (const [, subs] of topicSubscribers) {
+            subs.forEach((fn) => fn());
+        }
+
+        send({ type: 'SWITCH_WORKSPACE', wsKey, requestId } as any);
+    }
 
     let conflictLog: ConflictRecord[] = [];
     const conflictSubscribers = new Set<() => void>();
@@ -697,6 +739,17 @@ export function store<
                     break;
                 }
 
+                case 'WORKSPACE_STATUS': {
+                    if (msg.requestId !== lastWsRequestId) break;
+                    workspaceStatus = {
+                        wsKey: msg.wsKey,
+                        status: msg.status as WorkspaceStatus,
+                        ...(msg.error ? { error: msg.error } : {}),
+                    };
+                    workspaceSubscribers.forEach((fn) => fn());
+                    break;
+                }
+
             }
         };
 
@@ -838,6 +891,12 @@ export function store<
         }, []);
         const undoCount = useSyncExternalStore(subUndo, () => undoSize);
 
+        const subWorkspace = useCallback((onChange: () => void) => {
+            workspaceSubscribers.add(onChange);
+            return () => { workspaceSubscribers.delete(onChange); };
+        }, []);
+        const workspace = useSyncExternalStore(subWorkspace, () => workspaceStatus);
+
         const undoObj = useMemo(
             () => ({ size: undoCount, run: undoRun }),
             [undoCount],
@@ -856,6 +915,8 @@ export function store<
             conflicts,
             undo: undoObj,
             actions,
+            workspace,
+            setWorkspace,
         };
     }
 
@@ -960,6 +1021,8 @@ export function store<
     getWorker();
 
     const storeHandle: Store<TTables, TChannels> = {
+        get workspace() { return workspaceStatus; },
+        setWorkspace,
         useView: useHook,
         use: useHook,
         useEntity: useEntityImpl as Store<TTables, TChannels>['useEntity'],
@@ -995,6 +1058,7 @@ export function store<
             syncStatusSubscribers.clear();
             conflictSubscribers.clear();
             undoSubscribers.clear();
+            workspaceSubscribers.clear();
             for (const timer of topicTimers.values()) clearInterval(timer);
             topicTimers.clear();
             topicPeers.clear();
