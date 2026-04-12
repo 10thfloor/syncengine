@@ -11,7 +11,7 @@ export const PRODUCT_SLUGS = [
 
 export type ProductSlug = typeof PRODUCT_SLUGS[number];
 
-export const TXN_TYPES = ['sale', 'restock'] as const;
+export const TXN_TYPES = ['sale', 'restock', 'refund'] as const;
 
 export const ORDER_STATUSES = [
   'draft', 'placed', 'packed', 'shipped', 'delivered', 'cancelled',
@@ -70,8 +70,9 @@ export const recentActivity = view(transactions)
   )
   .topN(transactions.timestamp, 10, 'desc');
 
+// Net revenue: sales (positive) + refunds (negative). No filter needed —
+// only sale and refund types emit to transactions (restocks don't).
 export const totalSales = view(transactions)
-  .filter(transactions.type, 'eq', 'sale')
   .aggregate([transactions.productSlug, transactions.userId, transactions.amount, transactions.timestamp], {
     _n: count(),
   })

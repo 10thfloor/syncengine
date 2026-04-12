@@ -3,6 +3,7 @@ import { useStore } from '@syncengine/client';
 import type { DB } from '../App';
 import { allOrders } from '../schema';
 import { order, NEXT_ACTION, STATUS_COLORS } from '../entities/order.actor';
+import { cancelOrder } from '../workflows/cancel-order.workflow';
 
 export const OrdersTab = memo(function OrdersTab({ userId }: { userId: string }) {
   const s = useStore<DB>();
@@ -75,7 +76,13 @@ const OrderRow = memo(function OrderRow({
   async function handleCancel() {
     setError(null);
     try {
-      await actions.cancel();
+      await s.runWorkflow(cancelOrder, {
+        userId: orderUserId,
+        orderId,
+        productSlug,
+        price: orderPrice,
+        timestamp: Date.now(),
+      });
     } catch (e: unknown) {
       setError((e as Error).message);
     }

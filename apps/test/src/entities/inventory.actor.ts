@@ -136,5 +136,27 @@ export const inventory = entity('inventory', {
         },
       );
     },
+
+    // ── Refund: compensating transaction for order cancellation ────
+    // Restocks the item and emits a negative-amount refund transaction.
+    // Called by the cancellation workflow, not directly by the UI.
+    refund(state, userId: string, price: number, now: number) {
+      return emit(
+        {
+          ...state,
+          stock: state.stock + 1,
+        },
+        {
+          table: 'transactions',
+          record: {
+            productSlug: '$key',
+            userId,
+            amount: -price,
+            type: 'refund',
+            timestamp: now,
+          },
+        },
+      );
+    },
   },
 });
