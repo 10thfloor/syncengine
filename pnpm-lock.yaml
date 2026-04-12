@@ -137,6 +137,9 @@ importers:
       '@syncengine/restate-bin':
         specifier: workspace:*
         version: link:../restate-bin
+      '@syncengine/serve-bin':
+        specifier: workspace:*
+        version: link:../serve-bin
       esbuild:
         specifier: ^0.28.0
         version: 0.28.0
@@ -257,6 +260,22 @@ importers:
       typescript:
         specifier: ~5.9.3
         version: 5.9.3
+
+  packages/serve-bin:
+    dependencies:
+      '@syncengine/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      typescript:
+        specifier: ~5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.0.4
+        version: 1.6.1(@types/node@22.19.17)
 
   packages/server:
     dependencies:

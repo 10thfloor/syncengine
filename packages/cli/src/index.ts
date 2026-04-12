@@ -18,6 +18,7 @@ import { initCommand } from './init';
 import { devCommand } from './dev';
 import { buildCommand } from './build';
 import { startCommand } from './start';
+import { serveCommand } from './serve';
 import { downCommand } from './down';
 import { statusCommand } from './status';
 import { workspaceCommand } from './workspace';
@@ -39,6 +40,9 @@ async function main(): Promise<void> {
             break;
         case 'start':
             await startCommand(args);
+            break;
+        case 'serve':
+            await serveCommand(args);
             break;
         case 'down':
             await downCommand(args);
@@ -74,6 +78,7 @@ Usage:
   syncengine dev [--fresh]        Start NATS + Restate + workspace + Vite
   syncengine build                Production build (client + server bundles)
   syncengine start                Run the production server
+  syncengine serve [dist]         Run the production HTTP server (Bun binary)
   syncengine down                 Stop a running dev stack
   syncengine status               Report which services are up
   syncengine workspace <verb>     Workspace admin (see \`workspace help\`)
