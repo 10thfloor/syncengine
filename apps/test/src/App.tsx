@@ -2,7 +2,7 @@ import { useEffect, useRef, useMemo, useState, memo } from "react";
 import { store, useStore } from "@syncengine/client";
 
 // ── Schema: tables, views, channels ─────────────────────────────
-import { clicks, totalsView, notes, notesList, channels } from "./schema";
+import { clicks, totalsView, notes, notesList, mainChannel, notesChannel } from "./schema";
 
 // ── Entities: durable single-writer actors (Restate) ────────────
 import { counter } from "./entities/counter.actor";
@@ -17,7 +17,7 @@ import { CursorLayer, type CursorPos } from "./CursorLayer";
 export const db = store({
   tables: [clicks, notes] as const,
   views: [totalsView, notesList],
-  channels,
+  channels: [mainChannel, notesChannel],
 });
 
 type DB = typeof db;

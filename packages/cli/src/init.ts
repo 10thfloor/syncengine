@@ -149,16 +149,21 @@ createRoot(document.getElementById('root')!).render(
     // ── src/App.tsx ───────────────────────────────────────────────────
     write(target, 'src/App.tsx', `\
 import { useState } from 'react';
-import { store, table, id, integer, text, view, sum, count, useStore } from '@syncengine/client';
+import { store, table, id, integer, text, view, sum, count, channel, useStore } from '@syncengine/client';
 import { counter } from './entities/counter.actor';
 
 // ── Schema ───────────────────────────────────────────────────────
 
-// Channel: main
 const clicks = table('clicks', {
   id: id(),
   label: text(),
   amount: integer(),
+});
+
+const notes = table('notes', {
+  id: id(),
+  author: text(),
+  body: text(),
 });
 
 const totalsView = view(clicks).aggregate([], {
@@ -166,26 +171,16 @@ const totalsView = view(clicks).aggregate([], {
   numClicks: count(),
 });
 
-// Channel: notes
-const notes = table('notes', {
-  id: id(),
-  author: text(),
-  body: text(),
-});
-
 const notesList = view(notes).distinct();
 
-// Channels — each syncs on its own JetStream subject
-const channels = [
-  { name: 'main',  tables: [clicks] },
-  { name: 'notes', tables: [notes] },
-] as const;
-
 // ── Store ────────────────────────────────────────────────────────
+// Tables not assigned to an explicit channel() get their own
+// JetStream subject automatically. Use channel() to group tables
+// that should sync together.
 export const db = store({
   tables: [clicks, notes] as const,
   views: [totalsView, notesList],
-  channels,
+  channels: [channel('main', [clicks]), channel('notes', [notes])],
 });
 
 type DB = typeof db;

@@ -23,6 +23,22 @@ export interface ChannelConfig<TName extends string = string> {
 }
 
 /**
+ * Group tables into a named channel. Tables in the same channel share
+ * a single JetStream subject and replay together.
+ *
+ *     channel('realtime', [clicks, notes])
+ *
+ * Tables not assigned to any explicit channel get their own
+ * auto-generated channel (one per table).
+ */
+export function channel<const TName extends string>(
+    name: TName,
+    tables: readonly AnyTable[],
+): ChannelConfig<TName> {
+    return { name, tables };
+}
+
+/**
  * Extract the union of channel names from a readonly array of
  * `ChannelConfig`s — used by `Store<T>` to type `db.channels` and by
  * nats-acl.ts to constrain role specs.

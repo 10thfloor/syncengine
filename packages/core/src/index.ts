@@ -44,7 +44,7 @@ export type {
 } from './internal/sync-types';
 
 // ── Channels (user-facing access control boundaries) ──────────────────────
-export { buildChannelRouting, resolvePublishSubjects } from './channels';
+export { channel, buildChannelRouting, resolvePublishSubjects } from './channels';
 export type {
     ChannelConfig,
     ChannelNames,

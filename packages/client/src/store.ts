@@ -305,19 +305,7 @@ export function validateStoreConfig(config: StoreConfig): void {
             }
         }
 
-        // 6. Every table must be covered by some channel (only when channels set).
-        const coveredTables = new Set<string>();
-        for (const ch of config.channels) {
-            for (const t of ch.tables) coveredTables.add(t.$name);
-        }
-        for (const t of config.tables) {
-            if (!coveredTables.has(t.$name)) {
-                throw new Error(
-                    `Table '${t.$name}' is not mapped to any channel. Either add it ` +
-                    `to a channel or remove the channels field entirely.`,
-                );
-            }
-        }
+        // 6. (Auto-channeling handles uncovered tables — no error needed.)
     }
 
     // 7. Every seed key must match a real table name.
@@ -349,15 +337,28 @@ export function store<
 ): Store<TTables, TChannels> {
     validateStoreConfig(config);
 
-    // Build the internal SyncConfig from the runtime virtual module. User
-    // code no longer supplies NATS URLs or workspace IDs — the framework
-    // threads them through via `virtual:syncengine/runtime-config`.
+    // ── Auto-channeling: tables not assigned to an explicit channel
+    // get their own channel (one per table). This lets simple apps omit
+    // `channels` entirely while still using per-table JetStream subjects.
+    const explicitChannels = config.channels ? [...config.channels] : [];
+    const coveredTables = new Set<string>();
+    for (const ch of explicitChannels) {
+        for (const t of ch.tables) coveredTables.add(t.$name);
+    }
+    const autoChannels: ChannelConfig[] = [];
+    for (const t of config.tables) {
+        if (!coveredTables.has(t.$name)) {
+            autoChannels.push({ name: t.$name, tables: [t] });
+        }
+    }
+    const allChannels = [...explicitChannels, ...autoChannels];
+
     const syncConfig: SyncConfig = {
         workspaceId: runtimeWorkspaceId,
         natsUrl: runtimeNatsUrl,
         restateUrl: runtimeRestateUrl,
         ...(runtimeAuthToken ? { authToken: runtimeAuthToken } : {}),
-        ...(config.channels ? { channels: [...config.channels] } : {}),
+        channels: allChannels,
     };
 
     // Map each config view's $id → a stable display name the worker uses
