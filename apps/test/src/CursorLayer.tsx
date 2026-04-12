@@ -1,12 +1,16 @@
 import { useEffect, useRef } from "react";
 
-// ── Cursor rendering (rAF-driven interpolation) ─────────────────
+// ── Cursor rendering (spring-damped interpolation) ──────────────
 //
-// Collaborative cursor best practices: decouple network updates
-// (20fps) from rendering (60-144fps). The renderer interpolates
-// between samples using velocity-aware lerp with brief dead
-// reckoning. All DOM writes use CSS transforms (GPU-composited)
-// and bypass React's reconciler entirely via refs + rAF.
+// Smooth collaborative cursors like Miro/Figma:
+//
+//   1. Each network sample (20fps) sets the TARGET position.
+//   2. The rendered position CHASES the target using frame-rate-
+//      independent exponential smoothing (half-life based).
+//   3. Between samples, brief dead reckoning extrapolates using
+//      smoothed velocity — then the spring takes over.
+//   4. All DOM writes use CSS transforms (GPU-composited) and
+//      bypass React's reconciler entirely.
 
 export interface CursorPos {
   x: number;
@@ -15,84 +19,133 @@ export interface CursorPos {
   ts: number;
 }
 
-interface CursorInterp {
-  curr: { x: number; y: number; ts: number };
+interface CursorState {
+  // Target position (latest network sample)
+  tx: number;
+  ty: number;
+  // Rendered position (smoothly chases target)
   rx: number;
   ry: number;
+  // Smoothed velocity (px/ms) for dead reckoning between samples
   vx: number;
   vy: number;
+  // Timing
+  lastSampleTs: number;
+  lastFrameTs: number;
+  // Visual
   color: string;
   el: HTMLDivElement | null;
 }
 
+// ── Tuning knobs ────────────────────────────────────────────────
+//
+// HALF_LIFE: time (ms) for the cursor to close half the gap to its
+// target. Lower = snappier, higher = smoother. 60-80ms feels like
+// Miro. Below 40ms you see network jitter; above 120ms feels laggy.
+const HALF_LIFE_MS = 65;
+// How long to extrapolate with velocity before letting the spring
+// coast to the last known position.
+const EXTRAPOLATE_MS = 80;
+// Velocity smoothing factor (0-1). Higher = more smoothing, more lag.
+// 0.7 gives a good balance — absorbs jitter without adding latency.
+const VELOCITY_SMOOTHING = 0.7;
+// Fade out stale cursors
 const STALE_MS = 5000;
-const EXTRAPOLATE_CAP_MS = 150;
-const LERP_SPEED = 0.15;
+
+/**
+ * Frame-rate-independent exponential smoothing.
+ * Returns how much of the gap to close this frame.
+ *
+ *   halfLife=65, dt=16.7ms (60fps)  → factor ≈ 0.163
+ *   halfLife=65, dt=6.9ms  (144fps) → factor ≈ 0.072
+ *
+ * Both converge at the same wall-clock speed.
+ */
+function smoothFactor(dt: number): number {
+  return 1 - Math.pow(0.5, dt / HALF_LIFE_MS);
+}
 
 export function CursorLayer({ positions }: { positions: Record<string, CursorPos> }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const interpsRef = useRef<Map<string, CursorInterp>>(new Map());
+  const statesRef = useRef<Map<string, CursorState>>(new Map());
   const rafRef = useRef<number>(0);
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
 
   useEffect(() => {
-    const interps = interpsRef.current;
+    const states = statesRef.current;
+    let prevFrameTime = performance.now();
 
-    function tick() {
+    function tick(frameTime: number) {
+      const dt = Math.min(frameTime - prevFrameTime, 100); // cap at 100ms to avoid jumps after tab switch
+      prevFrameTime = frameTime;
       const now = Date.now();
       const current = positionsRef.current;
+      const factor = smoothFactor(dt);
 
+      // ── Phase 1: Ingest new samples ─────────────────────────
       for (const [uid, pos] of Object.entries(current)) {
         if (now - pos.ts > STALE_MS) continue;
 
-        let ci = interps.get(uid);
-        if (!ci) {
+        let cs = states.get(uid);
+        if (!cs) {
           const el = document.createElement("div");
-          el.style.cssText =
-            "position:absolute;left:0;top:0;pointer-events:none;";
+          el.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;will-change:transform,opacity;";
           containerRef.current?.appendChild(el);
           buildCursorDom(el, pos.color, uid);
-          ci = {
-            curr: { x: pos.x, y: pos.y, ts: pos.ts },
-            rx: pos.x,
-            ry: pos.y,
-            vx: 0,
-            vy: 0,
+          cs = {
+            tx: pos.x, ty: pos.y,
+            rx: pos.x, ry: pos.y,
+            vx: 0, vy: 0,
+            lastSampleTs: pos.ts,
+            lastFrameTs: frameTime,
             color: pos.color,
             el,
           };
-          interps.set(uid, ci);
+          states.set(uid, cs);
+          continue; // first sample — snap, don't interpolate
         }
 
-        if (pos.ts !== ci.curr.ts) {
-          const dt = pos.ts - ci.curr.ts;
-          if (dt > 0) {
-            ci.vx = (pos.x - ci.curr.x) / dt;
-            ci.vy = (pos.y - ci.curr.y) / dt;
+        // New sample arrived — update target and velocity
+        if (pos.ts !== cs.lastSampleTs) {
+          const sampleDt = pos.ts - cs.lastSampleTs;
+          if (sampleDt > 0) {
+            const rawVx = (pos.x - cs.tx) / sampleDt;
+            const rawVy = (pos.y - cs.ty) / sampleDt;
+            // Exponential moving average on velocity to absorb jitter
+            cs.vx = cs.vx * VELOCITY_SMOOTHING + rawVx * (1 - VELOCITY_SMOOTHING);
+            cs.vy = cs.vy * VELOCITY_SMOOTHING + rawVy * (1 - VELOCITY_SMOOTHING);
           }
-          ci.curr = { x: pos.x, y: pos.y, ts: pos.ts };
+          cs.tx = pos.x;
+          cs.ty = pos.y;
+          cs.lastSampleTs = pos.ts;
         }
       }
 
-      for (const [uid, ci] of interps) {
-        const age = now - ci.curr.ts;
+      // ── Phase 2: Render ─────────────────────────────────────
+      for (const [uid, cs] of states) {
+        const age = now - cs.lastSampleTs;
         if (age > STALE_MS) {
-          ci.el?.remove();
-          interps.delete(uid);
+          cs.el?.remove();
+          states.delete(uid);
           continue;
         }
 
-        const ext = Math.min(age, EXTRAPOLATE_CAP_MS);
-        const tx = ci.curr.x + ci.vx * ext;
-        const ty = ci.curr.y + ci.vy * ext;
-        ci.rx += (tx - ci.rx) * LERP_SPEED;
-        ci.ry += (ty - ci.ry) * LERP_SPEED;
+        // Dead reckoning: extrapolate target using velocity for a
+        // short window after the last sample, then coast.
+        const extTime = Math.min(age, EXTRAPOLATE_MS);
+        const goalX = cs.tx + cs.vx * extTime;
+        const goalY = cs.ty + cs.vy * extTime;
 
+        // Spring chase: close `factor` of the gap this frame
+        cs.rx += (goalX - cs.rx) * factor;
+        cs.ry += (goalY - cs.ry) * factor;
+
+        // Opacity fade for stale cursors
         const opacity = age > 3000 ? 1 - (age - 3000) / 2000 : 1;
-        if (ci.el) {
-          ci.el.style.transform = `translate(${ci.rx}px, ${ci.ry}px)`;
-          ci.el.style.opacity = String(Math.max(0, opacity));
+        if (cs.el) {
+          cs.el.style.transform = `translate(${cs.rx}px,${cs.ry}px)`;
+          cs.el.style.opacity = String(Math.max(0, opacity));
         }
       }
 

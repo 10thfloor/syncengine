@@ -193,6 +193,41 @@ function maxProcessedSeq() {
     return vals.length > 0 ? Math.max(...vals) : 0;
 }
 
+/** Persist per-subject high-water marks to _dbsp_meta so the next page
+ *  load can resume from the last processed sequence instead of replaying
+ *  the entire stream. */
+function persistLastProcessedSeqs() {
+    if (!db) return;
+    try {
+        db.exec(
+            "INSERT OR REPLACE INTO _dbsp_meta (key, value) VALUES ('last_processed_seqs', ?)",
+            { bind: [JSON.stringify(sync.lastProcessedSeqs)] },
+        );
+    } catch (e) {
+        console.warn('[sync] failed to persist lastProcessedSeqs:', e.message || e);
+    }
+}
+
+/** Load persisted high-water marks from a previous session. */
+function loadLastProcessedSeqs() {
+    if (!db) return;
+    try {
+        const rows = db.exec(
+            "SELECT value FROM _dbsp_meta WHERE key = 'last_processed_seqs'",
+            { rowMode: 'object' },
+        );
+        if (rows.length > 0 && rows[0].value) {
+            const parsed = JSON.parse(rows[0].value);
+            if (parsed && typeof parsed === 'object') {
+                Object.assign(sync.lastProcessedSeqs, parsed);
+                console.log('[sync] restored lastProcessedSeqs:', sync.lastProcessedSeqs);
+            }
+        }
+    } catch (e) {
+        console.warn('[sync] failed to load lastProcessedSeqs:', e.message || e);
+    }
+}
+
 // ── Status helpers ──────────────────────────────────────────────────────────
 
 function setConnectionStatus(status) {
@@ -231,8 +266,22 @@ async function finalizeReplay() {
     // Replay may have applied RESET messages that wiped DBSP state
     // (including join indexes). Rebuild DBSP from SQLite so all views —
     // especially joins — have correct state before going live.
+    //
+    // Clear the main thread's view snapshots BEFORE re-hydrating. The
+    // initial hydrate (handleInit) and incremental replay steps have been
+    // writing VIEW_UPDATEs into the main thread's snapshots, but those
+    // are now stale — dbsp.reset() wipes the engine, and hydrateFromSQLite
+    // rebuilds from the authoritative SQLite state. Without this clear,
+    // entries deleted during replay survive as ghost rows because the
+    // re-hydration only emits weight=1 (additions), never retractions for
+    // rows that no longer exist.
+    self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
     dbsp.reset();
     hydrateFromSQLite(schemaTables);
+
+    // Persist high-water marks so the next page load can resume from where
+    // we left off instead of replaying the entire stream.
+    persistLastProcessedSeqs();
 
     emitSyncStatus('live', maxProcessedSeq(), { snapshotLoaded: false });
 
@@ -427,6 +476,10 @@ async function processConsumer(codec, source) {
             raw.ack();
             processed++;
             sync.lastProcessedSeqs[subject] = raw.seq;
+
+            // Persist high-water marks during live mode so a page close
+            // without clean shutdown still has a recent checkpoint.
+            if (!isReplay) persistLastProcessedSeqs();
 
             if (isReplay && processed % REPLAY_PROGRESS_INTERVAL === 0) {
                 emitSyncStatus('replaying', processed);
@@ -1025,6 +1078,11 @@ async function handleInit(data) {
     schemaTables = schema.tables;
     hydrateFromSQLite(schemaTables);
 
+    // 7b. Restore per-subject high-water marks from the previous session
+    // so NATS consumers can resume from the last processed sequence
+    // instead of replaying the entire stream on every page load.
+    loadLastProcessedSeqs();
+
     self.postMessage({ type: 'READY' });
 
     // 8. Connect to NATS
@@ -1184,10 +1242,7 @@ async function ensureTopicCodec() {
 }
 
 function topicSubject(name, key) {
-    // Use 'tp.' prefix instead of 'ws.' to avoid the workspace JetStream
-    // stream which captures 'ws.{wsId}.>' — JetStream-captured subjects
-    // don't deliver to core subscribers.
-    return `tp.${nats.config.workspaceId}.${name}.${key}`;
+    return `ws.${nats.config.workspaceId}.topic.${name}.${key}`;
 }
 
 async function handleTopicSubscribe({ name, key }) {
