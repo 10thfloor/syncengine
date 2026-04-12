@@ -1,16 +1,17 @@
 import { memo } from 'react';
 import { useStore } from '@syncengine/client';
 import type { DB } from '../App';
-import { totalSales, salesByProduct, recentActivity } from '../schema';
+import { totalSales, salesByProduct, recentActivity, allOrders } from '../schema';
 
 const fmt = (n: number) =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 
 export const ActivityTab = memo(function ActivityTab() {
   const s = useStore<DB>();
-  const { views } = s.useView({ totalSales, salesByProduct, recentActivity });
+  const { views } = s.useView({ totalSales, salesByProduct, recentActivity, allOrders });
 
   const stats = views.totalSales[0] ?? { revenue: 0, count: 0 };
+  const orderCount = views.allOrders.length;
   const byProduct = [...views.salesByProduct].sort((a, b) => b.total - a.total);
   const recent = views.recentActivity;
 
@@ -28,11 +29,11 @@ export const ActivityTab = memo(function ActivityTab() {
         </div>
         <div className="stat-card">
           <div className="label">Orders</div>
-          <div className="value">{stats.count}</div>
+          <div className="value">{orderCount}</div>
         </div>
         <div className="stat-card">
           <div className="label">Avg Order</div>
-          <div className="value">{stats.count > 0 ? fmt(stats.revenue / stats.count) : '$0'}</div>
+          <div className="value">{orderCount > 0 ? fmt(stats.revenue / orderCount) : '$0'}</div>
         </div>
       </div>
 
