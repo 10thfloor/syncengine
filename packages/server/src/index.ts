@@ -5,13 +5,14 @@ import * as restate from "@restatedev/restate-sdk";
 import { workspace } from "./workspace/workspace.js";
 import { bindEntities } from "./entity-runtime.js";
 import { isEntity, type AnyEntity } from "@syncengine/core";
+import { isWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
 
 // ── Load user entities (PLAN Phase 4) ────────────────────────────────────
 //
 // Walk `<appDir>/src` for every `.actor.ts` file and dynamic-import each.
 // Any export that passes `isEntity` gets collected.
 
-function walkActorFiles(srcDir: string): string[] {
+function walkSourceFiles(srcDir: string): string[] {
     const out: string[] = [];
     if (!existsSync(srcDir)) return out;
     const queue: string[] = [srcDir];
@@ -34,7 +35,7 @@ function walkActorFiles(srcDir: string): string[] {
             }
             if (st.isDirectory()) {
                 queue.push(full);
-            } else if (st.isFile() && name.endsWith(".actor.ts")) {
+            } else if (st.isFile() && (name.endsWith(".actor.ts") || name.endsWith(".workflow.ts"))) {
                 out.push(full);
             }
         }
@@ -49,7 +50,7 @@ function walkActorFiles(srcDir: string): string[] {
  */
 export async function loadEntities(appDir: string): Promise<AnyEntity[]> {
     const srcDir = resolve(appDir, "src");
-    const files = walkActorFiles(srcDir);
+    const files = walkSourceFiles(srcDir).filter(f => f.endsWith('.actor.ts'));
     if (files.length === 0) {
         console.warn(
             `[workspace-service] appDir=${appDir} but no .actor.ts files found under src/`,
@@ -74,25 +75,50 @@ export async function loadEntities(appDir: string): Promise<AnyEntity[]> {
     return entities;
 }
 
+export async function loadWorkflows(appDir: string): Promise<WorkflowDef[]> {
+    const srcDir = resolve(appDir, "src");
+    const files = walkSourceFiles(srcDir).filter(f => f.endsWith('.workflow.ts'));
+    const workflows: WorkflowDef[] = [];
+    for (const file of files) {
+        try {
+            const mod = (await import(file)) as Record<string, unknown>;
+            for (const value of Object.values(mod)) {
+                if (isWorkflow(value)) workflows.push(value);
+            }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[workspace-service] failed to load workflow file ${file}: ${msg}`);
+        }
+    }
+    return workflows;
+}
+
 /**
  * Create a Restate HTTP/2 cleartext endpoint with the workspace handler
- * and all user entities bound, then start listening.
+ * and all user entities and workflows bound, then start listening.
  *
  * Returns a reference to the endpoint for external callers that need
  * to inspect it (e.g., the CLI's Restate admin registration).
  */
 export async function startRestateEndpoint(
     entities: AnyEntity[],
+    workflows: WorkflowDef[],
     port: number,
 ): Promise<void> {
     const endpoint = restate.endpoint().bind(workspace);
     const bound = bindEntities(endpoint, entities);
+    for (const wf of workflows) {
+        bound.bind(buildWorkflowObject(wf));
+    }
     await bound.listen(port);
 
     console.log(
         `[workspace-service] listening on :${port}` +
         (entities.length > 0
             ? ` (entities: ${entities.map((e) => e.$name).join(", ")})`
+            : "") +
+        (workflows.length > 0
+            ? ` (workflows: ${workflows.map((w) => w.$name).join(", ")})`
             : ""),
     );
 }
@@ -107,5 +133,9 @@ const appDir = process.env.SYNCENGINE_APP_DIR;
 if (appDir) {
     const PORT = parseInt(process.env.PORT ?? "9080", 10);
     const entities = await loadEntities(appDir);
-    await startRestateEndpoint(entities, PORT);
+    const workflows = await loadWorkflows(appDir);
+    await startRestateEndpoint(entities, workflows, PORT);
 }
+
+export { entityRef, type EntityRefProxy } from './entity-ref.js';
+export { defineWorkflow, isWorkflow, type WorkflowDef } from './workflow.js';
