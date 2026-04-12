@@ -51,7 +51,7 @@ export interface Pids {
     orchestrator: number;
     /** Start timestamp, useful for stale-file detection. */
     startedAt: number;
-    children: Partial<Record<'nats' | 'restate' | 'workspace' | 'vite', number>>;
+    children: Partial<Record<'nats' | 'restate' | 'gateway' | 'workspace' | 'vite', number>>;
 }
 
 // ── Runtime config (consumed by @syncengine/vite-plugin) ─────────────────

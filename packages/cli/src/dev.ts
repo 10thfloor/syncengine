@@ -59,6 +59,7 @@ import {
 
 export async function devCommand(args: string[]): Promise<void> {
     const fresh = args.includes('--fresh');
+    const rawNats = args.includes('--raw-nats');
     const repoRoot = await findRepoRoot();
     const stateDir = stateDirFor(repoRoot);
 
@@ -110,6 +111,7 @@ export async function devCommand(args: string[]): Promise<void> {
         { port: ports.restateIngress, label: 'restate ingress' },
         { port: ports.restateAdmin, label: 'restate admin' },
         { port: ports.restateNode, label: 'restate cluster' },
+        ...(!rawNats ? [{ port: ports.gateway, label: 'gateway' }] : []),
         { port: ports.workspace, label: 'workspace service' },
         { port: ports.vite, label: 'vite' },
     ]);
@@ -120,7 +122,7 @@ export async function devCommand(args: string[]): Promise<void> {
     });
 
     try {
-        await boot(processes, stateDir, repoRoot, ports);
+        await boot(processes, stateDir, repoRoot, ports, rawNats);
         // Everything is up — record the full pid set for `syncengine down`.
         writePids(stateDir, buildPidsSnapshot(processes));
     } catch (err) {
@@ -148,6 +150,7 @@ async function boot(
     stateDir: string,
     repoRoot: string,
     ports: Ports,
+    rawNats: boolean,
 ): Promise<void> {
     // 1. NATS
     banner('starting nats-server');
@@ -219,6 +222,27 @@ async function boot(
     await restateRegisterDeployment(ports, `http://127.0.0.1:${ports.workspace}`);
     note('workspace service registered');
 
+    // 4.5 Gateway (unless --raw-nats)
+    if (!rawNats) {
+        banner('starting gateway');
+        const gw = spawnManaged(tsxBin, ['src/gateway/standalone.ts'], {
+            name: 'gateway',
+            cwd: serverDir,
+            env: {
+                ...process.env,
+                PORT: String(ports.gateway),
+                NATS_URL: `nats://127.0.0.1:${ports.natsClient}`,
+                SYNCENGINE_RESTATE_URL: `http://127.0.0.1:${ports.restateIngress}`,
+            },
+        });
+        processes.push(gw);
+        await waitForHttp(`http://127.0.0.1:${ports.gateway}/healthz`, {
+            label: 'gateway',
+            timeoutMs: 15_000,
+        });
+        note(`gateway :${ports.gateway}`);
+    }
+
     // 5. Write runtime.json so @syncengine/vite-plugin can pick up the
     //    NATS / Restate URLs for the running stack. This must happen
     //    BEFORE vite starts — otherwise the plugin reads a missing file
@@ -232,10 +256,15 @@ async function boot(
     //    single dev run serve any number of users without restarts.
     writeRuntimeConfig(stateDir, {
         natsUrl: `ws://localhost:${ports.natsWs}`,
+        ...(rawNats ? {} : { gatewayUrl: `ws://localhost:${ports.gateway}/gateway` }),
         restateUrl: `http://localhost:${ports.restateIngress}`,
         authToken: null,
     });
-    note(`runtime.json → nats=ws://localhost:${ports.natsWs}, workspaces resolved per request`);
+    note(
+        `runtime.json → nats=ws://localhost:${ports.natsWs}` +
+        (rawNats ? '' : `, gateway=ws://localhost:${ports.gateway}/gateway`) +
+        `, workspaces resolved per request`,
+    );
 
     // 6. Vite
     if (!appDir) {
@@ -309,7 +338,7 @@ async function boot(
     }
 
     if (!process.env.SYNCENGINE_DEV_QUIET) {
-        printReadyBanner(ports);
+        printReadyBanner(ports, rawNats);
     }
 }
 
@@ -487,8 +516,11 @@ logtime: true
 
 // ── Ready banner ──────────────────────────────────────────────────────────
 
-function printReadyBanner(ports: Ports): void {
+function printReadyBanner(ports: Ports, rawNats: boolean): void {
     const bar = '━'.repeat(52);
+    const gatewayLine = rawNats
+        ? ''
+        : `\n  \x1b[1mGateway\x1b[0m       → ws://localhost:${ports.gateway}/gateway`;
     process.stdout.write(`
 \x1b[1;32m${bar}
   syncengine dev — all services ready
@@ -498,7 +530,7 @@ ${bar}\x1b[0m
   \x1b[1mNATS monitor\x1b[0m  → http://localhost:${ports.natsMonitor}
   \x1b[1mRestate\x1b[0m       → http://localhost:${ports.restateIngress}
   \x1b[1mRestate admin\x1b[0m → http://localhost:${ports.restateAdmin}
-  \x1b[1mWorkspace svc\x1b[0m → http://localhost:${ports.workspace}
+  \x1b[1mWorkspace svc\x1b[0m → http://localhost:${ports.workspace}${gatewayLine}
   \x1b[1mWorkspaces\x1b[0m    → resolved per request via syncengine.config.ts
 \x1b[2m
   Ctrl-C to shut everything down.\x1b[0m
