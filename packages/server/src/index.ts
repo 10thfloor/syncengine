@@ -115,9 +115,11 @@ export async function startRestateEndpoint(
 
 const appDir = process.env.SYNCENGINE_APP_DIR;
 if (appDir) {
-    const PORT = parseInt(process.env.PORT ?? "9080", 10);
-    const { entities, workflows } = await loadDefinitions(appDir);
-    await startRestateEndpoint(entities, workflows, PORT);
+    void (async () => {
+        const PORT = parseInt(process.env.PORT ?? "9080", 10);
+        const { entities, workflows } = await loadDefinitions(appDir);
+        await startRestateEndpoint(entities, workflows, PORT);
+    })();
 }
 
 export { entityRef, type EntityRefProxy } from './entity-ref.js';
