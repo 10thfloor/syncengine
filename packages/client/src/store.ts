@@ -755,6 +755,10 @@ export function store<
                         ...(msg.error ? { error: msg.error } : {}),
                     };
                     workspaceSubscribers.forEach((fn) => fn());
+                    if (msg.status === 'live' && !knownWorkspaces.includes(msg.wsKey)) {
+                        knownWorkspaces = Object.freeze([...knownWorkspaces, msg.wsKey]);
+                        registrySubscribers.forEach((fn) => fn());
+                    }
                     break;
                 }
 

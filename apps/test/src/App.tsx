@@ -64,7 +64,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 function WorkspaceSwitcher() {
   const s = useStore<DB>();
-  const { workspace, workspaces, setWorkspace } = s.use({ totalSales });
+  const { workspace, workspaces, setWorkspace } = s.use({});
   const [input, setInput] = useState("");
 
   const handleSwitch = useCallback(async () => {
@@ -141,52 +141,54 @@ function WorkspaceSwitcher() {
 
 export default function App() {
   const s = useStore<DB>();
-  const { ready } = s.useView({ totalSales });
+  const { ready, workspace } = s.use({ totalSales });
 
   const userId = useMemo(getUserId, []);
   const [activeTab, setActiveTab] = useState<Tab>("Catalog");
 
-  if (!ready) {
-    return (
-      <div style={{ padding: "2rem", color: "#71717a" }}>Connecting...</div>
-    );
-  }
-
   return (
-    <>
-      <div className="app-shell">
-        <div className="app-header">
-          <h1>syncengine storefront</h1>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-            <WorkspaceSwitcher />
-            <span className="user-tag">{userId}</span>
-          </div>
+    <div className="app-shell">
+      <div className="app-header">
+        <h1>syncengine storefront</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <WorkspaceSwitcher />
+          <span className="user-tag">{userId}</span>
         </div>
-
-        <div className="tab-bar" role="tablist">
-          {TABS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === tab}
-              onClick={() => setActiveTab(tab)}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-
-        {activeTab === "Catalog" && <CatalogTab userId={userId} />}
-        {activeTab === "Orders" && <OrdersTab userId={userId} />}
-        {activeTab === "Checkout" && <CheckoutTab userId={userId} />}
-        {activeTab === "Activity" && <ActivityTab />}
-
-        <footer className="app-footer">
-          Open two tabs: <code>?user=alice</code> and <code>?user=bob</code> to
-          see live sync and actor contention.
-        </footer>
       </div>
-    </>
+
+      {!ready ? (
+        <div style={{ padding: "2rem", color: "#71717a" }}>
+          {workspace.status === 'error'
+            ? `Error: ${workspace.error ?? 'unknown'}`
+            : `${workspace.status === 'live' ? 'Loading' : workspace.status}…`}
+        </div>
+      ) : (
+        <>
+          <div className="tab-bar" role="tablist">
+            {TABS.map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab}
+                onClick={() => setActiveTab(tab)}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === "Catalog" && <CatalogTab userId={userId} />}
+          {activeTab === "Orders" && <OrdersTab userId={userId} />}
+          {activeTab === "Checkout" && <CheckoutTab userId={userId} />}
+          {activeTab === "Activity" && <ActivityTab />}
+        </>
+      )}
+
+      <footer className="app-footer">
+        Open two tabs: <code>?user=alice</code> and <code>?user=bob</code> to
+        see live sync and actor contention.
+      </footer>
+    </div>
   );
 }
