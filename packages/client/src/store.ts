@@ -573,6 +573,19 @@ export function store<
         return (viewSnapshots.get(viewId) ?? EMPTY) as readonly T[];
     }
 
+    /**
+     * Build a record identity string from the view's id_key. For simple keys
+     * this is just `record[key]`. For composite keys (`$composite:a|b|c`)
+     * it joins the values of the named columns with `|`.
+     */
+    function recordId(record: Record<string, unknown>, idKey: string): string {
+        if (idKey.startsWith('$composite:')) {
+            const cols = idKey.slice('$composite:'.length).split('|');
+            return cols.map((c) => String(record[c] ?? '')).join('|');
+        }
+        return String(record[idKey]);
+    }
+
     function applyDeltas(viewId: string, deltas: Array<{ record: Record<string, unknown>; weight: number }>): void {
         const view = viewsById.get(viewId);
         const idKey = view?.$idKey ?? 'id';
@@ -580,8 +593,8 @@ export function store<
         const next = [...current];
 
         for (const delta of deltas) {
-            const recId = String(delta.record[idKey]);
-            const idx = next.findIndex((item) => String(item[idKey]) === recId);
+            const recId = recordId(delta.record, idKey);
+            const idx = next.findIndex((item) => recordId(item, idKey) === recId);
             if (idx !== -1) next.splice(idx, 1);
             if (delta.weight > 0) next.push(delta.record);
         }

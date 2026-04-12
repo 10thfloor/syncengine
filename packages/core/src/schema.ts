@@ -440,11 +440,17 @@ function createViewBuilder<TRecord>(
             // Note: $sourceIdKey is left untouched — the join's left_index
             // dedup downstream of an aggregate needs the source PK, not the
             // group-by column.
+            // For multi-column group-by, build a composite key from the
+            // group-by columns. The DBSP aggregate output only contains
+            // group-by + aggregated columns (no source PK), so falling
+            // back to the source PK would produce undefined lookups in
+            // applyDeltas. The composite key is a pipe-joined string
+            // that matches the DBSP engine's internal group_key format.
             const aggIdKey = groupByNames.length === 1
                 ? groupByNames[0]
                 : groupByNames.length === 0
                     ? '$agg'
-                    : idKey;
+                    : `$composite:${groupByNames.join('|')}`;
             return createViewBuilder($id, tableName, sourceIdKey, aggIdKey, [
                 ...pipeline,
                 { op: 'aggregate', group_by: groupByNames, aggregates },
