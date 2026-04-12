@@ -1184,7 +1184,10 @@ async function ensureTopicCodec() {
 }
 
 function topicSubject(name, key) {
-    return `ws.${nats.config.workspaceId}.topic.${name}.${key}`;
+    // Use 'tp.' prefix instead of 'ws.' to avoid the workspace JetStream
+    // stream which captures 'ws.{wsId}.>' — JetStream-captured subjects
+    // don't deliver to core subscribers.
+    return `tp.${nats.config.workspaceId}.${name}.${key}`;
 }
 
 async function handleTopicSubscribe({ name, key }) {
@@ -1204,7 +1207,8 @@ async function handleTopicSubscribe({ name, key }) {
             for await (const raw of natsSub) {
                 let msg;
                 try { msg = codec.decode(raw.data); } catch { continue; }
-                if (msg._clientId === CLIENT_ID) continue; // self-filter
+                // No self-filter — topics deliver your own publishes back
+                // so you can see your own cursor / presence state.
                 self.postMessage({
                     type: 'TOPIC_UPDATE',
                     name,

@@ -67,6 +67,8 @@ export interface SyncengineConfig {
  * in test helpers, etc.) can reason about the exact config without
  * losing information to widening.
  */
-export function defineConfig<const T extends SyncengineConfig>(config: T): T {
-    return config;
+export { config as defineConfig };
+
+export function config<const T extends SyncengineConfig>(cfg: T): T {
+    return cfg;
 }

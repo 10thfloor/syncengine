@@ -226,7 +226,9 @@ export function buildInitialState<TShape extends EntityStateShape>(
  * merge in). The first argument is always `state` and is passed by
  * the framework — the caller's args start at index 1.
  */
-export function defineEntity<
+export { entity as defineEntity };
+
+export function entity<
   const TName extends string,
   TShape extends EntityStateShape,
   THandlers extends EntityHandlerMap<EntityState<TShape>>,

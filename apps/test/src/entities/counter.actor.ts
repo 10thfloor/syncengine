@@ -1,6 +1,6 @@
-import { defineEntity, integer, emit } from '@syncengine/core';
+import { entity, integer, emit } from '@syncengine/core';
 
-export const counter = defineEntity('counter', {
+export const counter = entity('counter', {
   state: {
     value: integer(),
   },

@@ -818,13 +818,14 @@ export function store<
                 topicRefCounts.set(subKey, count);
 
                 if (count <= 0) {
-                    // Last subscriber: unsubscribe and clean up.
                     topicRefCounts.delete(subKey);
-                    send({ type: 'TOPIC_UNSUBSCRIBE', name: topicDef.$name, key } as WorkerInMessage);
+                    // Don't send TOPIC_UNSUBSCRIBE — keep the NATS subscription
+                    // alive for the tab's lifetime (same pattern as useEntity).
+                    // StrictMode's mount→cleanup→mount cycle races async worker
+                    // messages; tearing down the sub here causes one tab to lose
+                    // its subscription permanently. Cleanup happens on destroy().
                     const timer = topicTimers.get(subKey);
                     if (timer) { clearInterval(timer); topicTimers.delete(subKey); }
-                    topicPeers.delete(subKey);
-                    topicSubscribers.delete(subKey);
                 }
             };
         // eslint-disable-next-line react-hooks/exhaustive-deps

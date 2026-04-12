@@ -22,11 +22,11 @@
 // server, `server()` is the identity function — the original handlers
 // run as Restate virtual-object methods.
 
-import { defineEntity, integer, text } from '@syncengine/core';
+import { entity, integer, text } from '@syncengine/core';
 
 const CATEGORIES = ['Food', 'Travel', 'Software', 'Office', 'Entertainment'] as const;
 
-export const budgetLock = defineEntity('budgetLock', {
+export const budgetLock = entity('budgetLock', {
     state: {
         category: text({ enum: CATEGORIES }),
         holder: text(),       // empty string == unlocked

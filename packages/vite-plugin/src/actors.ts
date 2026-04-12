@@ -139,14 +139,21 @@ export function stripServerCalls(source: string): string {
     let out = source;
     let cursor = 0;
     while (true) {
-        const idx = out.indexOf('defineEntity(', cursor);
+        // Match both `entity(` and the legacy `defineEntity(` call forms.
+        const idxEntity = out.indexOf('entity(', cursor);
+        const idxDefine = out.indexOf('defineEntity(', cursor);
+        const idx = idxEntity === -1 ? idxDefine
+            : idxDefine === -1 ? idxEntity
+            : Math.min(idxEntity, idxDefine);
         if (idx === -1) break;
 
-        // Word-boundary check so we don't match `myDefineEntity(`.
+        const matchLen = out.startsWith('defineEntity(', idx) ? 'defineEntity('.length : 'entity('.length;
+
+        // Word-boundary check so we don't match `myEntity(` or `myDefineEntity(`.
         const prev = idx === 0 ? '' : out[idx - 1]!;
         if (/[A-Za-z0-9_$]/.test(prev)) { cursor = idx + 1; continue; }
 
-        const openParen = idx + 'defineEntity('.length - 1;
+        const openParen = idx + matchLen - 1;
         const callEnd = findBalancedClose(out, openParen, '(', ')');
         if (callEnd === -1) { cursor = idx + 1; continue; }
 

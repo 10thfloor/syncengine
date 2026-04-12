@@ -71,7 +71,7 @@ export default function App() {
   // Track mouse position and broadcast via topic
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
-      publishRef.current({ x: e.clientX, y: e.clientY, color });
+      publishRef.current({ x: e.clientX, y: e.clientY, color, userId });
     };
 
     const onMouseLeave = () => {
@@ -85,13 +85,14 @@ export default function App() {
       document.removeEventListener("mouseleave", onMouseLeave);
       leaveRef.current();
     };
-  }, [color]);
+  }, [color, userId]);
 
-  // Convert peers Map to positions object for CursorLayer
+  // Convert peers Map to positions object for CursorLayer.
+  // Key by userId (from query string) so the label shows the user name.
   const positions: Record<string, CursorPos> = useMemo(() => {
     const out: Record<string, CursorPos> = {};
-    for (const [peerId, data] of cursorPeers) {
-      out[peerId] = {
+    for (const [, data] of cursorPeers) {
+      out[data.userId as string] = {
         x: data.x as number,
         y: data.y as number,
         color: data.color as string,
@@ -285,8 +286,9 @@ export default function App() {
         <footer
           style={{ marginTop: "3rem", color: "#525252", fontSize: "0.8rem" }}
         >
-          Open in two tabs: <code>?user=alice</code> and <code>?user=bob</code>{" "}
-          to see live cursors and shared state.
+          Open two tabs: <code>?user=alice</code> and{" "}
+          <code>?user=bob</code> to see live cursors and shared state.
+          Add <code>&amp;ws=room1</code> to switch workspaces.
         </footer>
       </div>
     </>

@@ -59,6 +59,7 @@ export type { RoleSpec, Roles, NatsPermissions } from './nats-acl';
 
 // ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
 export {
+    entity,
     defineEntity,
     isEntity,
     validateEntityState,
@@ -78,7 +79,7 @@ export {
 } from './entity';
 
 // ── Project config (PLAN Phase 8 — workspace resolution) ─────────────────
-export { defineConfig } from './config';
+export { config, defineConfig } from './config';
 export type {
     SyncengineConfig,
     SyncengineUser,

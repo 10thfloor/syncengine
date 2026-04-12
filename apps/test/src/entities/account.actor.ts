@@ -1,4 +1,4 @@
-import { defineEntity, boolean, emit, sourceSum, sourceCount } from '@syncengine/core';
+import { entity, boolean, emit, sourceSum, sourceCount } from '@syncengine/core';
 import { clicks } from '../schema';
 
 /**
@@ -12,7 +12,7 @@ import { clicks } from '../schema';
  * because projections are merged into the state object before the
  * handler runs.
  */
-export const account = defineEntity('account', {
+export const account = entity('account', {
     state: {
         frozen: boolean(),
     },
