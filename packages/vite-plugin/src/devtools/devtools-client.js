@@ -210,9 +210,8 @@
 
         // Status area + close button
         var statusArea = el('div', CLS.tabBarStatus);
-        var closeBtn = el('button', null, '\u00D7');
+        var closeBtn = el('button', 'se-close-btn', '\u00D7');
         closeBtn.title = 'Close (Ctrl+Shift+D)';
-        closeBtn.style.cssText = 'background:none;border:none;color:var(--dt-muted);cursor:pointer;font-size:16px;padding:0 4px;line-height:1;font-family:inherit;';
         closeBtn.addEventListener('click', closeDrawer);
         statusArea.appendChild(closeBtn);
         tabBar.appendChild(statusArea);
@@ -313,8 +312,7 @@
     // ── Data panel ────────────────────────────────────────────────────────
 
     function buildDataPanel() {
-        var panel = el('div', null);
-        panel.style.cssText = 'display:flex;flex:1;overflow:hidden;';
+        var panel = el('div', 'se-data-panel');
 
         dataSidebarEl = el('div', CLS.dataSidebar);
         panel.appendChild(dataSidebarEl);
@@ -651,8 +649,7 @@
 
         ACTION_DEFS.forEach(function (def) {
             var card = el('div', CLS.actionCard + (def.variant ? ' ' + def.variant : ''));
-            var info = el('div');
-            info.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
+            var info = el('div', 'se-action-info');
             info.appendChild(el('span', CLS.actionCardLabel, def.label));
             info.appendChild(el('span', CLS.actionCardDesc, def.desc));
             card.appendChild(info);
