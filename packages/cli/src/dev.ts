@@ -152,8 +152,8 @@ async function boot(
     ports: Ports,
     rawNats: boolean,
 ): Promise<void> {
-    // 1. NATS
-    banner('starting nats-server');
+    // 1+2. NATS and Restate (parallel — they're independent)
+    banner('starting nats-server and restate-server');
     const natsPath = await natsBinary();
     const natsConfPath = writeNatsConfig(stateDir, ports);
     const nats = spawnManaged(natsPath, ['-c', natsConfPath], {
@@ -161,15 +161,7 @@ async function boot(
         cwd: repoRoot,
     });
     processes.push(nats);
-    await waitForTcp(ports.natsClient, { label: 'nats client', timeoutMs: 15_000 });
-    await waitForHttp(`http://127.0.0.1:${ports.natsMonitor}/healthz`, {
-        label: 'nats monitor',
-        timeoutMs: 15_000,
-    });
-    note(`nats listening on :${ports.natsClient} (ws :${ports.natsWs}, mon :${ports.natsMonitor})`);
 
-    // 2. Restate
-    banner('starting restate-server');
     const restatePath = await restateBinary();
     const restateBaseDir = join(stateDir, 'restate');
     const restate = spawnManaged(
@@ -185,11 +177,20 @@ async function boot(
         },
     );
     processes.push(restate);
-    await waitForHttp(`http://127.0.0.1:${ports.restateAdmin}/health`, {
-        label: 'restate admin',
-        timeoutMs: 60_000,
-    });
-    note(`restate admin :${ports.restateAdmin}, ingress :${ports.restateIngress}`);
+
+    await Promise.all([
+        waitForTcp(ports.natsClient, { label: 'nats client', timeoutMs: 15_000 })
+            .then(() => waitForHttp(`http://127.0.0.1:${ports.natsMonitor}/healthz`, {
+                label: 'nats monitor',
+                timeoutMs: 15_000,
+            }))
+            .then(() => note(`nats listening on :${ports.natsClient} (ws :${ports.natsWs}, mon :${ports.natsMonitor})`)),
+        waitForHttp(`http://127.0.0.1:${ports.restateAdmin}/health`, {
+            label: 'restate admin',
+            timeoutMs: 60_000,
+        })
+            .then(() => note(`restate admin :${ports.restateAdmin}, ingress :${ports.restateIngress}`)),
+    ]);
 
     // 3. Workspace service (tsx directly — going through pnpm breaks the
     //    process-group kill cascade on shutdown)
