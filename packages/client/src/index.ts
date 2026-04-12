@@ -14,6 +14,7 @@ export type {
     ConnectionStatus,
     SyncStatus,
     ConflictRecord,
+    ServerRewoundEvent,
 } from './store';
 
 // ── React provider ───────────────────────────────────────────────────────
@@ -23,3 +24,7 @@ export type { StoreProviderProps } from './react';
 // ── Entity client (Phase 4 — actor model on Restate virtual objects) ─────
 export { useEntity } from './entity-client';
 export type { UseEntityResult, ActionMap } from './entity-client';
+
+// ── Heartbeat client (declarative recurring work) ────────────────────────
+export { useHeartbeat } from './heartbeat-client';
+export type { UseHeartbeatResult, HeartbeatRef } from './heartbeat-client';

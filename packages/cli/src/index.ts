@@ -13,6 +13,7 @@
  *   syncengine help                  Show this message
  */
 
+import { formatError } from '@syncengine/core';
 import { initCommand } from './init';
 import { devCommand } from './dev';
 import { buildCommand } from './build';
@@ -94,6 +95,10 @@ Environment:
 }
 
 main().catch((err) => {
-    process.stderr.write(`\nsyncengine: ${err?.stack ?? err}\n`);
+    if (err instanceof Error) {
+        process.stderr.write(`\n${formatError(err, { color: process.stderr.isTTY })}\n\n`);
+    } else {
+        process.stderr.write(`\nsyncengine: ${String(err)}\n`);
+    }
     process.exit(1);
 });

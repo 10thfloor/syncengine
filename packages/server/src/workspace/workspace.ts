@@ -4,6 +4,9 @@ import { RetentionPolicy, StorageType } from "@nats-io/jetstream";
 import { ENTITY_OBJECT_PREFIX } from "../entity-keys.js";
 import { WORKFLOW_OBJECT_PREFIX } from "../workflow.js";
 import { errors, StoreCode, ConnectionCode } from "@syncengine/core";
+import { getRegisteredHeartbeats } from "../heartbeat-registry.js";
+import { HEARTBEAT_STATUS_ENTITY_NAME } from "@syncengine/core";
+import { HEARTBEAT_WORKFLOW_PREFIX } from "../heartbeat.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -116,6 +119,72 @@ async function publishToNats(
   });
 }
 
+// ── Boot-triggered heartbeat bootstrap ─────────────────────────────────────
+
+/**
+ * For each registered `trigger: 'boot'` heartbeat with
+ * `scope: 'workspace'`, atomically arm the status entity and fire the
+ * corresponding Restate workflow. Skips heartbeats whose status has
+ * `stoppedByUser = 1` (from a prior client-side stop()).
+ *
+ * Runs inside `workspace.provision`; idempotent because arm() no-ops
+ * while the heartbeat is already running.
+ */
+async function fireBootHeartbeats(
+  ctx: restate.ObjectContext,
+  workspaceId: string,
+): Promise<void> {
+  const heartbeats = getRegisteredHeartbeats();
+  if (heartbeats.length === 0) return;
+
+  const statusObjectName = `${ENTITY_OBJECT_PREFIX}${HEARTBEAT_STATUS_ENTITY_NAME}`;
+
+  for (const hb of heartbeats) {
+    if (hb.$trigger !== 'boot') continue;
+    // v1 limitation: global-scope boot registration not wired here.
+    if (hb.$scope !== 'workspace') continue;
+
+    const statusKey = `${workspaceId}/${hb.$name}`;
+    const statusClient = ctx.objectClient(
+      { name: statusObjectName },
+      statusKey,
+    ) as unknown as {
+      _read(args: unknown[]): Promise<{ state: Record<string, unknown> }>;
+      arm(args: [string, number]): Promise<{ state: Record<string, unknown> }>;
+    };
+
+    try {
+      const current = await statusClient._read([]);
+      if (Number(current.state.stoppedByUser ?? 0) === 1) continue;
+
+      const armed = await statusClient.arm([hb.$trigger, hb.$maxRuns]);
+      const sessionToken = String(armed.state.currentSession ?? '');
+      if (!sessionToken) continue;
+
+      const wfKey = `${workspaceId}/${sessionToken}`;
+      const wfClient = ctx.workflowSendClient(
+        { name: `${HEARTBEAT_WORKFLOW_PREFIX}${hb.$name}` },
+        wfKey,
+      ) as unknown as { run(input: unknown): void };
+      wfClient.run({
+        scopeKey: workspaceId,
+        trigger: hb.$trigger,
+        maxRuns: hb.$maxRuns,
+        runAtStart: hb.$runAtStart,
+      });
+
+      ctx.console.log(
+        `[heartbeat] armed '${hb.$name}' for workspace ${workspaceId} (session ${sessionToken})`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.console.error(
+        `[heartbeat] failed to arm '${hb.$name}' for workspace ${workspaceId}: ${msg}`,
+      );
+    }
+  }
+}
+
 // ── Restate Virtual Object: Workspace ──────────────────────────────────────
 
 export const workspace = restate.object({
@@ -168,6 +237,11 @@ export const workspace = restate.object({
         tenantId: req.tenantId,
         createdAt: state.createdAt,
       });
+
+      // Fire trigger: 'boot' heartbeats for this workspace. Each heartbeat
+      // with stoppedByUser=1 (from a prior explicit stop()) is skipped so
+      // stop semantics survive restarts.
+      await fireBootHeartbeats(ctx, workspaceId);
 
       ctx.console.log(`Workspace ${workspaceId} provisioned`);
       return state;

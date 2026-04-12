@@ -29,6 +29,7 @@ import {
 import {
     resolveWorkspaceId,
     resolveWorkflowTarget,
+    resolveHeartbeatTarget,
     resolveEntityTarget,
     isRpcError,
 } from './rpc-proxy.js';
@@ -306,6 +307,7 @@ export function startHttpServer(config: ProductionServerConfig): void {
     ): Promise<void> {
         const pathname = (req.url ?? '').split('?')[0]!;
         const isWorkflow = pathname.startsWith('/__syncengine/rpc/workflow/');
+        const isHeartbeat = pathname.startsWith('/__syncengine/rpc/heartbeat/');
 
         // Resolve workspace (shared validation)
         const wsResult = resolveWorkspaceId(
@@ -318,9 +320,11 @@ export function startHttpServer(config: ProductionServerConfig): void {
         }
 
         // Resolve target URL (shared validation + URL construction)
-        const target = isWorkflow
-            ? resolveWorkflowTarget(pathname, wsResult, restateIngressUrl)
-            : resolveEntityTarget(pathname, wsResult, restateIngressUrl);
+        const target = isHeartbeat
+            ? resolveHeartbeatTarget(pathname, wsResult, restateIngressUrl)
+            : isWorkflow
+                ? resolveWorkflowTarget(pathname, wsResult, restateIngressUrl)
+                : resolveEntityTarget(pathname, wsResult, restateIngressUrl);
         if (isRpcError(target)) {
             res.writeHead(target.status).end(target.message);
             return;

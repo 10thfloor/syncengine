@@ -17,6 +17,7 @@
 // Node process where those transitive deps may not resolve.
 const ENTITY_OBJECT_PREFIX = 'entity_';
 const WORKFLOW_OBJECT_PREFIX = 'workflow_';
+const HEARTBEAT_WORKFLOW_PREFIX = 'heartbeat_';
 
 // ── Validation regexes ────────────────────────────────────────────────────
 
@@ -112,6 +113,51 @@ export function resolveWorkflowTarget(
     const base = restateUrl.replace(/\/+$/, '');
     const url =
         `${base}/${WORKFLOW_OBJECT_PREFIX}${wfName}` +
+        `/${encodeURIComponent(`${workspaceId}/${invocationId}`)}/run`;
+
+    return { url };
+}
+
+// ── Heartbeat target resolution ───────────────────────────────────────────
+
+/**
+ * Resolve a heartbeat RPC pathname `/rpc/heartbeat/<name>/<invocationId>`
+ * to the Restate ingress URL. Heartbeats register as workflows under the
+ * `heartbeat_` prefix (distinct from user workflows under `workflow_`),
+ * so they get their own proxy route rather than sharing the `/rpc/workflow/`
+ * namespace.
+ */
+export function resolveHeartbeatTarget(
+    pathname: string,
+    workspaceId: string,
+    restateUrl: string,
+): RpcTarget | RpcError {
+    const parts = pathname.slice('/__syncengine/rpc/heartbeat/'.length).split('/');
+    if (parts.length !== 2) {
+        return { status: 400, message: 'Expected /__syncengine/rpc/heartbeat/<name>/<invocationId>' };
+    }
+    const [hbNameRaw, invocationIdRaw] = parts as [string, string];
+
+    let hbName: string;
+    let invocationId: string;
+    try {
+        hbName = decodeURIComponent(hbNameRaw);
+        invocationId = decodeURIComponent(invocationIdRaw);
+    } catch {
+        return { status: 400, message: 'Malformed URL-encoded path component' };
+    }
+
+    if (!NAME_REGEX.test(hbName)) {
+        return { status: 400, message: 'Invalid heartbeat name' };
+    }
+    // eslint-disable-next-line no-control-regex
+    if (invocationId.length === 0 || invocationId.length > 512 || /[\x00-\x1f]/.test(invocationId)) {
+        return { status: 400, message: 'Invalid invocationId' };
+    }
+
+    const base = restateUrl.replace(/\/+$/, '');
+    const url =
+        `${base}/${HEARTBEAT_WORKFLOW_PREFIX}${hbName}` +
         `/${encodeURIComponent(`${workspaceId}/${invocationId}`)}/run`;
 
     return { url };

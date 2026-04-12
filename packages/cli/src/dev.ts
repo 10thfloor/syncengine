@@ -428,7 +428,11 @@ function watchActorFiles(appDir: string, onChange: () => void): void {
             { recursive: true, persistent: false },
             (_event, filename) => {
                 const fname = String(filename);
-                if (!filename || !(fname.endsWith('.actor.ts') || fname.endsWith('.workflow.ts'))) return;
+                if (!filename || !(
+                    fname.endsWith('.actor.ts') ||
+                    fname.endsWith('.workflow.ts') ||
+                    fname.endsWith('.heartbeat.ts')
+                )) return;
                 if (debounceTimer) clearTimeout(debounceTimer);
                 debounceTimer = setTimeout(() => {
                     debounceTimer = null;

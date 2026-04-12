@@ -88,7 +88,7 @@ function startSpinner(msg: string): { stop(finalMsg: string): void } {
 async function installDeps(target: string, pm: PM): Promise<boolean> {
     const spinner = startSpinner('Installing dependencies...');
 
-    return new Promise((resolve) => {
+    return new Promise((done) => {
         const child = spawn(pm, ['install'], {
             cwd: target,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -98,16 +98,16 @@ async function installDeps(target: string, pm: PM): Promise<boolean> {
         child.on('close', (code) => {
             if (code === 0) {
                 spinner.stop('Installed dependencies');
-                resolve(true);
+                done(true);
             } else {
                 spinner.stop(`Install failed (exit ${code})`);
-                resolve(false);
+                done(false);
             }
         });
 
         child.on('error', () => {
             spinner.stop('Install failed');
-            resolve(false);
+            done(false);
         });
     });
 }
@@ -140,6 +140,7 @@ function scaffoldProject(target: string, name: string, useWorkspace: boolean): v
         dependencies: {
             '@syncengine/client': depVersion,
             '@syncengine/core': depVersion,
+            '@syncengine/server': depVersion,
             'react': '^19.0.0',
             'react-dom': '^19.0.0',
         },
@@ -195,7 +196,16 @@ import { defineConfig } from '@syncengine/core';
 
 export default defineConfig({
   workspaces: {
-    resolve: () => 'default',
+    // Return the workspace id for this request. Any stable string works
+    // ('user:' + user.id, 'org:' + orgId, a URL path segment, etc.) —
+    // syncengine hashes it to a bounded wsKey internally.
+    //
+    // The demo uses ?workspace=<name> so you can open two tabs at
+    // http://localhost:5173/?workspace=alice to see real-time sync.
+    resolve: ({ request, user }) => {
+      const url = new URL(request.url);
+      return url.searchParams.get('workspace') ?? 'default';
+    },
   },
 });
 `);
@@ -250,18 +260,241 @@ export const stats = view(notes).aggregate([], {
 
 export const recentNotes = view(notes)
   .topN(notes.createdAt, 20, 'desc');
+
+// Per-message thumbs-up. Each row = one thumbs-up by one user on one note.
+// Toggling a thumb inserts or removes a row; counts fall out of a view.
+export const thumbs = table('thumbs', {
+  id: id(),
+  noteId: integer(),
+  userId: text(),
+});
+
+// Every thumbs-up row (unaggregated). The UI derives per-note counts and
+// "did I already thumb this?" by filtering this locally — it's a SQLite
+// replica so the scan is cheap.
+export const allThumbs = view(thumbs);
+
+// Grouped aggregate — one row per author with their running note count.
+// DBSP recomputes each group incrementally, so a million notes stay cheap.
+export const notesByAuthor = view(notes).aggregate([notes.author], {
+  count: count(),
+});
+`);
+
+    // ── src/entities/reactions.actor.ts
+    write(target, 'src/entities/reactions.actor.ts', `\
+import { defineEntity, integer } from '@syncengine/core';
+
+/**
+ * Tables vs entities — the core mental model.
+ *
+ * Tables are local state you also sync. Every client keeps a full
+ * replica of the log, queries run on-device in SQLite, and offline
+ * writes merge back in via CRDT when you reconnect.
+ *
+ * Entities are server state you subscribe to. The authoritative value
+ * lives on a Restate virtual object, handlers execute serialized there,
+ * and clients receive snapshots. No CRDT merge — the server is the
+ * arbiter, so atomic counters and state machines stay exact no matter
+ * how many tabs are writing.
+ *
+ * Rule of thumb:
+ *   - table  → data you own and want offline / queryable locally
+ *   - entity → shared state the server needs to referee
+ *
+ * This file is the counter flavor. \`REACTIONS\` is the single source
+ * of truth — adding a new emoji is just one line here. The entity
+ * state, handler, and UI all derive from it.
+ */
+export const REACTIONS = [
+  { key: 'fire',  emoji: '🔥', label: 'fire'  },
+  { key: 'heart', emoji: '❤️', label: 'heart' },
+  { key: 'star',  emoji: '⭐', label: 'star'  },
+  { key: 'party', emoji: '🎉', label: 'party' },
+] as const;
+
+export type ReactionKey = (typeof REACTIONS)[number]['key'];
+
+export const reactions = defineEntity('reactions', {
+  state: {
+    fire: integer(),
+    heart: integer(),
+    star: integer(),
+    party: integer(),
+  },
+  handlers: {
+    bump(state, kind: ReactionKey) {
+      return { [kind]: state[kind] + 1 };
+    },
+    reset() {
+      return { fire: 0, heart: 0, star: 0, party: 0 };
+    },
+  },
+});
+`);
+
+    // ── src/entities/focus.actor.ts
+    write(target, 'src/entities/focus.actor.ts', `\
+import { defineEntity, text, integer } from '@syncengine/core';
+
+/**
+ * The state-machine flavor of entity.
+ *
+ *   idle → running → done → idle
+ *
+ * \`transitions\` declares the legal edges. Restate rejects any handler
+ * that tries to set \`status\` to a value that isn't reachable from the
+ * current one, and the same guard runs client-side, so the UI can't
+ * invent illegal actions. You get server-validated state transitions
+ * for free — exactly what you'd reach for workflows, checkout flows,
+ * ticket status, game rounds, etc.
+ */
+const STATUS = ['idle', 'running', 'done'] as const;
+
+export const focus = defineEntity('focus', {
+  state: {
+    status: text({ enum: STATUS }),
+    topic: text(),
+    startedAt: integer(),
+    endsAt: integer(),  // 0 = no scheduled end; >0 = pomodoro deadline
+  },
+  transitions: {
+    idle:    ['running'],
+    running: ['done', 'idle'],
+    done:    ['idle'],
+  },
+  handlers: {
+    start(state, topic: string, now: number, endsAt: number) {
+      return { ...state, status: 'running' as const, topic, startedAt: now, endsAt };
+    },
+    finish(state) {
+      return { ...state, status: 'done' as const };
+    },
+    reset() {
+      return { status: 'idle' as const, topic: '', startedAt: 0, endsAt: 0 };
+    },
+  },
+});
+`);
+
+    // ── src/heartbeats/pulse.heartbeat.ts
+    write(target, 'src/heartbeats/pulse.heartbeat.ts', `\
+import { heartbeat } from '@syncengine/server';
+
+/**
+ * Heartbeats are the framework's primitive for durable recurring work.
+ *
+ * This file declares *what* should run and *how often* — the framework
+ * handles scheduling, crash recovery, leader election across replicas,
+ * and lifecycle state. No entity to hand-roll, no workflow loop to
+ * write, no worker to kick off from the client.
+ *
+ * Key points to read off the config below:
+ *
+ *   - \`trigger: 'manual'\` means the client calls \`start()\` to launch it.
+ *     Use \`'boot'\` (the default) for background jobs that should run
+ *     automatically when a workspace comes up.
+ *   - \`every: '5s'\` is the interval between ticks. Durations accept
+ *     single units ('30s', '5m', '1h', '1d') or cron expressions.
+ *   - \`maxRuns: 12\` bounds the run. Omit for unbounded.
+ *   - \`scope: 'workspace'\` (default) runs one instance per workspace.
+ *     Switch to \`'global'\` for a single cluster-wide loop.
+ *
+ * Ctrl-C \`syncengine dev\` mid-run and restart — the workflow resumes
+ * on schedule. setInterval would have lost those ticks.
+ */
+export const pulse = heartbeat('pulse', {
+  trigger: 'manual',
+  scope: 'workspace',
+  every: '5s',
+  maxRuns: 12,
+  run: async (ctx) => {
+    // Each tick runs server-side on Restate. \`ctx\` is a full workflow
+    // context (ctx.sleep, ctx.run, ctx.date.now, entityRef). The handler
+    // can call entities, perform durable external calls, whatever you
+    // need. For the demo we just let the framework track run numbers.
+    void ctx;
+  },
+});
+`);
+
+    // ── src/topics/presence.topic.ts
+    write(target, 'src/topics/presence.topic.ts', `\
+import { topic, text } from '@syncengine/core';
+
+/**
+ * Topics are the third flavor of state: ephemeral NATS pub/sub.
+ *
+ *   - table  → durable log, CRDT-merged, fully replicated client-side
+ *   - entity → durable server state, serialized handlers
+ *   - topic  → transient broadcast, no persistence, no replay
+ *
+ * Topics shine for presence, cursors, typing indicators, drag positions,
+ * and anything else that's fine to lose on refresh. Each connected tab
+ * publishes its own payload; peers maintain a live map keyed by the
+ * publisher's identity. Throttled by the runtime, TTL-reaped when a
+ * peer stops broadcasting.
+ */
+export const presence = topic('presence', {
+  userId: text(),
+  color: text(),
+});
+`);
+
+    // ── src/workflows/pomodoro.workflow.ts
+    write(target, 'src/workflows/pomodoro.workflow.ts', `\
+import { defineWorkflow, entityRef } from '@syncengine/server';
+import { focus } from '../entities/focus.actor';
+
+interface PomodoroInput {
+  key: string;         // focus entity key, usually 'global'
+  durationMs: number;  // how long to focus for
+}
+
+/**
+ * Durable timer — Restate's killer feature.
+ *
+ * \`ctx.sleep()\` is checkpointed by Restate. You can kill the server
+ * mid-sleep, restart it hours later, and the workflow resumes from the
+ * same line honoring the original wall-clock deadline. Try it:
+ *
+ *   1. Click "pomodoro 30s" in the UI to schedule a finish.
+ *   2. Ctrl-C \`syncengine dev\` and restart.
+ *   3. Watch the focus session still complete on schedule.
+ *
+ * That durability is why you reach for a workflow instead of setTimeout:
+ * nothing a client or server crash can do will skip or double-fire it.
+ */
+export const pomodoro = defineWorkflow('pomodoro', async (ctx, input: PomodoroInput) => {
+  await ctx.sleep(input.durationMs);
+
+  // Ref the focus entity by key; the finish() handler advances status.
+  // If the user reset the session while we slept, the transition guard
+  // rejects the call — we swallow it so the workflow exits cleanly.
+  const f = entityRef(ctx, focus, input.key);
+  try {
+    await f.finish();
+  } catch {
+    // User cancelled the focus mid-pomodoro — nothing to do.
+  }
+});
 `);
 
     // ── src/App.tsx
     write(target, 'src/App.tsx', `\
-import { useState, useMemo } from 'react';
-import { store, useStore } from '@syncengine/client';
-import { notes, stats, recentNotes } from './schema';
+import { useState, useMemo, useEffect, useRef } from 'react';
+import { store, useStore, useHeartbeat } from '@syncengine/client';
+import { notes, thumbs, stats, recentNotes, allThumbs, notesByAuthor } from './schema';
+import { reactions, REACTIONS } from './entities/reactions.actor';
+import { focus } from './entities/focus.actor';
+import { pulse } from './heartbeats/pulse.heartbeat';
+import { presence } from './topics/presence.topic';
+import { pomodoro } from './workflows/pomodoro.workflow';
 
 // ── Store ────────────────────────────────────────────────────────
 export const db = store({
-  tables: [notes] as const,
-  views: { stats, recentNotes },
+  tables: [notes, thumbs] as const,
+  views: { stats, recentNotes, allThumbs, notesByAuthor },
 });
 
 type DB = typeof db;
@@ -278,7 +511,7 @@ function authorHue(name: string): number {
 // ── App ──────────────────────────────────────────────────────────
 export default function App() {
   const s = useStore<DB>();
-  const { views, ready } = s.use({ stats, recentNotes });
+  const { views, ready } = s.use({ stats, recentNotes, allThumbs, notesByAuthor });
   const [input, setInput] = useState('');
 
   const userId = useMemo(() => {
@@ -289,11 +522,30 @@ export default function App() {
   const hue = authorHue(userId);
   const totalNotes = views.stats[0]?.totalNotes ?? 0;
 
+  // Index thumbs by noteId once per render. Local scan over SQLite-backed
+  // view rows — no network, no subscription overhead.
+  const thumbsByNote = useMemo(() => {
+    const map = new Map<number, Array<{ id: number; userId: string }>>();
+    for (const t of views.allThumbs) {
+      const noteId = Number(t.noteId);
+      const arr = map.get(noteId) ?? [];
+      arr.push({ id: Number(t.id), userId: String(t.userId) });
+      map.set(noteId, arr);
+    }
+    return map;
+  }, [views.allThumbs]);
+
   function handleSubmit() {
     const body = input.trim();
     if (!body) return;
     s.tables.notes.insert({ body, author: userId, createdAt: Date.now() });
     setInput('');
+  }
+
+  function toggleThumb(noteId: number) {
+    const mine = (thumbsByNote.get(noteId) ?? []).find((t) => t.userId === userId);
+    if (mine) s.tables.thumbs.remove(mine.id);
+    else s.tables.thumbs.insert({ noteId, userId });
   }
 
   if (!ready) {
@@ -305,6 +557,7 @@ export default function App() {
       <header>
         <h1>syncengine</h1>
         <div className="badges">
+          <WorkspaceSwitcher />
           <span className="badge" style={{ background: \`hsl(\${hue}, 70%, 40%)\` }}>
             {userId}
           </span>
@@ -328,12 +581,23 @@ export default function App() {
       <div className="feed">
         {views.recentNotes.map((n) => {
           const h = authorHue(String(n.author));
+          const noteId = Number(n.id);
+          const rows = thumbsByNote.get(noteId) ?? [];
+          const thumbCount = rows.length;
+          const thumbed = rows.some((t) => t.userId === userId);
           return (
             <div key={String(n.id)} className="note-card">
               <span className="note-author" style={{ color: \`hsl(\${h}, 70%, 65%)\` }}>
                 {String(n.author)}
               </span>
               <span className="note-body">{String(n.body)}</span>
+              <button
+                className={\`thumb \${thumbed ? 'thumbed' : ''}\`}
+                onClick={() => toggleThumb(noteId)}
+                title={thumbed ? 'remove thumbs-up' : 'thumbs-up'}
+              >
+                👍{thumbCount > 0 && <span className="thumb-count">{thumbCount}</span>}
+              </button>
               <span className="note-time">
                 {new Date(Number(n.createdAt)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
               </span>
@@ -347,11 +611,473 @@ export default function App() {
         )}
       </div>
 
+      <Leaderboard rows={views.notesByAuthor} />
+      <Focus />
+      <Reactions />
+      <Heartbeat />
+      <Presence userId={userId} hue={hue} />
+
       <footer>
         Open another tab with{' '}
         <code>?user=bob</code>{' '}
-        to see real-time sync.
+        to see real-time sync. Switch workspaces with{' '}
+        <code>?workspace=team-b</code>.
       </footer>
+    </div>
+  );
+}
+
+// ── WorkspaceSwitcher ──────────────────────────────────────────
+// Switch between workspaces by URL query param; each is a fully
+// isolated data scope (separate NATS stream, SQLite replica, entity
+// state). Previously-visited workspaces are remembered in
+// localStorage so the dropdown builds up as the user explores.
+//
+// We reload the page on switch rather than calling store.setWorkspace()
+// — simpler teardown (every subscription + worker gets fresh), and
+// the URL stays bookmarkable / shareable.
+const WS_STORAGE_KEY = 'syncengine:workspaces';
+const WS_DEFAULT = 'default';
+const WS_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/;
+
+function loadKnownWorkspaces(current: string): string[] {
+  const base = new Set<string>([WS_DEFAULT, current]);
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(WS_STORAGE_KEY) : null;
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed)) {
+      for (const v of parsed) {
+        if (typeof v === 'string' && WS_NAME_RE.test(v)) base.add(v);
+      }
+    }
+  } catch { /* ignore */ }
+  return Array.from(base);
+}
+
+function saveKnownWorkspaces(list: readonly string[]): void {
+  try {
+    localStorage.setItem(WS_STORAGE_KEY, JSON.stringify(list));
+  } catch { /* ignore */ }
+}
+
+function currentWorkspaceFromUrl(): string {
+  if (typeof window === 'undefined') return WS_DEFAULT;
+  return new URL(window.location.href).searchParams.get('workspace') ?? WS_DEFAULT;
+}
+
+function WorkspaceSwitcher() {
+  const current = useMemo(currentWorkspaceFromUrl, []);
+  const [known, setKnown] = useState<string[]>(() => loadKnownWorkspaces(current));
+  const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [focusIdx, setFocusIdx] = useState(-1);
+
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Persist list whenever we add a new one.
+  useEffect(() => { saveKnownWorkspaces(known); }, [known]);
+
+  // Close on outside click + Escape; manage focus return on close.
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) {
+      const t = e.target as Node;
+      if (popoverRef.current?.contains(t)) return;
+      if (triggerRef.current?.contains(t)) return;
+      close();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+    }
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  function close() {
+    setOpen(false);
+    setCreating(false);
+    setDraft('');
+    setFocusIdx(-1);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  function switchTo(name: string) {
+    if (name === current) { close(); return; }
+    const url = new URL(window.location.href);
+    if (name === WS_DEFAULT) url.searchParams.delete('workspace');
+    else url.searchParams.set('workspace', name);
+    window.location.href = url.toString();
+  }
+
+  function submitCreate() {
+    const name = draft.trim();
+    if (!WS_NAME_RE.test(name)) return;
+    if (!known.includes(name)) {
+      setKnown((prev) => [...prev, name]);
+    }
+    switchTo(name);
+  }
+
+  function onListKey(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setFocusIdx((i) => Math.min(i + 1, known.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setFocusIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter' && focusIdx >= 0 && focusIdx < known.length) {
+      e.preventDefault();
+      switchTo(known[focusIdx]!);
+    }
+  }
+
+  return (
+    <div className="ws-switcher">
+      <button
+        ref={triggerRef}
+        className={'ws-trigger' + (open ? ' is-open' : '')}
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <span className="ws-label">workspace</span>
+        <span className="ws-name">{current}</span>
+        <span className="ws-caret" aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div
+          ref={popoverRef}
+          className="ws-popover"
+          role="menu"
+          onKeyDown={onListKey}
+        >
+          <div className="ws-list">
+            {known.map((name, i) => (
+              <button
+                key={name}
+                role="menuitem"
+                className={
+                  'ws-item' +
+                  (name === current ? ' is-current' : '') +
+                  (i === focusIdx ? ' is-focused' : '')
+                }
+                onClick={() => switchTo(name)}
+                onMouseEnter={() => setFocusIdx(i)}
+              >
+                <span className="ws-item-name">{name}</span>
+                {name === current && <span className="ws-item-check" aria-hidden>●</span>}
+              </button>
+            ))}
+          </div>
+          <div className="ws-divider" />
+          {!creating ? (
+            <button
+              className="ws-create"
+              onClick={() => {
+                setCreating(true);
+                requestAnimationFrame(() => inputRef.current?.focus());
+              }}
+            >
+              <span className="ws-create-icon" aria-hidden>+</span>
+              <span>Create workspace</span>
+            </button>
+          ) : (
+            <form
+              className="ws-create-form"
+              onSubmit={(e) => { e.preventDefault(); submitCreate(); }}
+            >
+              <input
+                ref={inputRef}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32))}
+                placeholder="name"
+                aria-label="New workspace name"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button type="submit" disabled={!WS_NAME_RE.test(draft.trim())}>go</button>
+            </form>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Leaderboard (grouped DBSP view: notes per author) ───────────
+// Pure read of a server-pushed aggregate — every tab sees the
+// same incrementally-maintained counts.
+function Leaderboard({ rows }: { rows: ReadonlyArray<{ readonly author: unknown; readonly count: unknown }> }) {
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) => Number(b.count) - Number(a.count)).slice(0, 5);
+  const max = Math.max(...sorted.map((r) => Number(r.count)), 1);
+  return (
+    <section className="leaderboard">
+      <h2>top authors</h2>
+      <ul>
+        {sorted.map((r) => {
+          const author = String(r.author);
+          const pct = (Number(r.count) / max) * 100;
+          return (
+            <li key={author}>
+              <span className="bar-label" style={{ color: \`hsl(\${authorHue(author)}, 70%, 65%)\` }}>
+                {author}
+              </span>
+              <span className="bar-track">
+                <span className="bar-fill" style={{ width: pct + '%', background: \`hsl(\${authorHue(author)}, 60%, 45%)\` }} />
+              </span>
+              <span className="bar-count">{Number(r.count)}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// ── Heartbeat (declarative recurring primitive) ────────────────────
+// \`useHeartbeat(pulse)\` subscribes to the framework-owned status entity
+// and returns both the live state (status, runNumber, lastRunAt) and
+// lifecycle methods (start/stop/reset). No entity, workflow, or client
+// kick-off code to hand-roll.
+//
+// Crash-safe: kill \`syncengine dev\` mid-run, restart it, and ticks
+// resume on the original schedule. setInterval can't do this — its
+// timer dies with its process.
+function Heartbeat() {
+  const hb = useHeartbeat(pulse);
+  const [, setNow] = useState(Date.now());
+
+  // Keep "Ns ago" fresh.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const maxRuns = pulse.$maxRuns || 12;
+  const sinceLast = hb.lastRunAt > 0 ? Math.floor((Date.now() - hb.lastRunAt) / 1000) : null;
+  const pct = maxRuns > 0 ? Math.min(100, (hb.runNumber / maxRuns) * 100) : 0;
+
+  return (
+    <section className="heartbeat-wrap">
+      <div className="heartbeat">
+        <span className="focus-label">heartbeat</span>
+
+        {hb.status === 'running' && (
+          <>
+            <span className="pulse-dot" />
+            <span className="heartbeat-progress">
+              tick {hb.runNumber} / {maxRuns}
+            </span>
+            <span className="heartbeat-bar">
+              <span className="heartbeat-bar-fill" style={{ width: pct + '%' }} />
+            </span>
+            <span className="heartbeat-since muted">
+              {sinceLast === null ? 'priming...' : sinceLast < 2 ? 'just now' : sinceLast + 's ago'}
+            </span>
+            <button className="ghost" onClick={() => hb.stop()}>stop</button>
+          </>
+        )}
+
+        {hb.status === 'done' && (
+          <>
+            <span className="heartbeat-progress done">
+              ✓ {hb.runNumber} pulses delivered
+            </span>
+            <button onClick={() => hb.start()}>run again</button>
+            <button className="ghost" onClick={() => hb.reset()}>reset</button>
+          </>
+        )}
+
+        {hb.status === 'idle' && (
+          <>
+            <span className="muted" style={{ flex: 1 }}>
+              Declarative recurring heartbeat — {maxRuns} ticks × 5s
+            </span>
+            <button onClick={() => hb.start()}>start</button>
+          </>
+        )}
+      </div>
+
+      <p className="heartbeat-hint muted">
+        {hb.status === 'running'
+          ? 'Try this: Ctrl-C syncengine dev and restart. Ticks resume on schedule.'
+          : 'Click start, then Ctrl-C syncengine dev mid-run and restart — setInterval would die, this heartbeat resumes.'}
+      </p>
+    </section>
+  );
+}
+
+// ── Presence (ephemeral NATS topic, TTL-reaped when peers leave) ──
+// Each tab publishes its userId + color on mount and leaves on
+// unmount. No DB write, no Restate call — just pub/sub.
+function Presence({ userId, hue }: { userId: string; hue: number }) {
+  const s = useStore<DB>();
+  const { peers, publish, leave } = s.useTopic(presence, 'global');
+
+  useEffect(() => {
+    publish({ userId, color: \`hsl(\${hue}, 70%, 50%)\` });
+    const interval = setInterval(() => publish({ userId, color: \`hsl(\${hue}, 70%, 50%)\` }), 5000);
+    const onLeave = () => leave();
+    window.addEventListener('beforeunload', onLeave);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', onLeave);
+      leave();
+    };
+  }, [userId, hue, publish, leave]);
+
+  const others = Array.from(peers.values()).filter((p) => p.userId !== userId);
+  if (others.length === 0) {
+    return (
+      <div className="presence">
+        <span className="focus-label">live</span>
+        <span className="muted">just you — open another tab to see presence</span>
+      </div>
+    );
+  }
+  return (
+    <div className="presence">
+      <span className="focus-label">live</span>
+      {others.map((p) => (
+        <span key={String(p.userId)} className="peer-dot" title={String(p.userId)} style={{ background: String(p.color) }}>
+          {String(p.userId)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ── Reactions (server-side counter entity, keyed 'global') ──────
+// Row iterates the REACTIONS array so adding a new emoji is a one-line
+// change in the entity file — no JSX edits. Every bump() runs
+// serialized on Restate; counts stay exact no matter how many tabs click.
+function Reactions() {
+  const s = useStore<DB>();
+  const { state, actions } = s.useEntity(reactions, 'global');
+  const total = REACTIONS.reduce((n, r) => n + Number(state?.[r.key] ?? 0), 0);
+
+  return (
+    <div className="reactions">
+      <span className="focus-label">reactions</span>
+      <div className="reactions-row">
+        {REACTIONS.map((r) => {
+          const count = Number(state?.[r.key] ?? 0);
+          return (
+            <button
+              key={r.key}
+              onClick={() => actions.bump(r.key)}
+              title={r.label}
+              className={count > 0 ? 'has-count' : ''}
+            >
+              <span className="emoji">{r.emoji}</span>
+              <span className="count">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+      <button
+        className="reactions-reset"
+        onClick={() => actions.reset()}
+        disabled={total === 0}
+        title="reset all counts to zero"
+      >
+        ↺
+      </button>
+    </div>
+  );
+}
+
+// ── Focus (server-side state machine entity, keyed 'global') ────
+// idle → running → done → idle. The transitions declared on the
+// entity are enforced server-side; this component just picks which
+// action to offer based on the current status.
+function Focus() {
+  const s = useStore<DB>();
+  const { state, actions } = s.useEntity(focus, 'global');
+  const status = state?.status ?? 'idle';
+  const topic = state?.topic ?? '';
+  const endsAt = Number(state?.endsAt ?? 0);
+  const [draft, setDraft] = useState('');
+
+  // Tick once per second so the countdown updates while a pomodoro is running.
+  const [, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (status !== 'running' || endsAt <= 0) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [status, endsAt]);
+
+  async function start(withPomodoroMs?: number) {
+    const label = draft.trim();
+    if (!label) return;
+    const now = Date.now();
+    const endsAt = withPomodoroMs ? now + withPomodoroMs : 0;
+    actions.start(label, now, endsAt);
+    setDraft('');
+    if (withPomodoroMs) {
+      // Fire-and-forget a durable Restate workflow. Survives server crashes —
+      // try killing \`syncengine dev\` mid-timer and watch finish() still fire.
+      await s.runWorkflow(pomodoro, { key: 'global', durationMs: withPomodoroMs });
+    }
+  }
+
+  if (status === 'running') {
+    const remaining = endsAt > 0 ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null;
+    return (
+      <div className="focus">
+        <span className="focus-label">{remaining !== null ? '🍅 pomodoro' : 'working on'}</span>
+        <span className="focus-topic">{topic || 'something'}</span>
+        {remaining !== null && (
+          <span className="focus-countdown" title="durable Restate workflow">
+            {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
+          </span>
+        )}
+        <button onClick={() => actions.finish()}>done</button>
+        <button className="ghost" onClick={() => actions.reset()}>cancel</button>
+      </div>
+    );
+  }
+
+  if (status === 'done') {
+    return (
+      <div className="focus">
+        <span className="focus-label">finished</span>
+        <span className="focus-topic">{topic || 'a task'}</span>
+        <button onClick={() => actions.reset()}>reset</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="focus">
+      <span className="focus-label">focus</span>
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') start();
+        }}
+        placeholder="What are we working on?"
+      />
+      <button disabled={!draft.trim()} onClick={() => start()}>
+        start
+      </button>
+      <button
+        className="pomodoro"
+        disabled={!draft.trim()}
+        onClick={() => start(30_000)}
+        title="Schedules a durable Restate workflow that auto-finishes in 30s — survives server restarts"
+      >
+        🍅 30s
+      </button>
     </div>
   );
 }
@@ -400,7 +1126,7 @@ h1 {
   letter-spacing: -0.02em;
 }
 
-.badges { display: flex; gap: 0.4rem; }
+.badges { display: flex; gap: 0.4rem; align-items: center; }
 
 .badge {
   font-family: var(--mono);
@@ -414,6 +1140,260 @@ h1 {
   background: var(--bg-card);
   border: 1px solid var(--border);
   color: var(--muted);
+}
+
+/* ── Workspace switcher ────────────────────────────────────── */
+
+.ws-switcher {
+  position: relative;
+  display: inline-flex;
+}
+
+.ws-trigger {
+  appearance: none;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 9px 3px 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--fg);
+  font-size: 0.7rem;
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.06s;
+  user-select: none;
+}
+
+.ws-trigger:hover {
+  border-color: #3a3a42;
+  background: #1c1c21;
+}
+
+.ws-trigger:active {
+  transform: scale(0.98);
+}
+
+.ws-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+}
+
+.ws-trigger.is-open {
+  border-color: var(--accent);
+  background: #1c1c21;
+}
+
+.ws-label {
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.6rem;
+}
+
+.ws-name {
+  color: var(--fg);
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-caret {
+  color: var(--muted);
+  font-size: 0.55rem;
+  line-height: 1;
+  margin-left: 0.05rem;
+  transition: transform 0.15s ease;
+}
+
+.ws-trigger.is-open .ws-caret {
+  transform: rotate(180deg);
+}
+
+.ws-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 11rem;
+  background: #101014;
+  border: 1px solid #26262c;
+  border-radius: 10px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 12px 32px rgba(0, 0, 0, 0.55),
+    0 2px 6px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  z-index: 20;
+  transform-origin: top right;
+  animation: ws-pop-in 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes ws-pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-popover { animation: none; }
+  .ws-caret { transition: none; }
+}
+
+.ws-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 14rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a31 transparent;
+}
+
+.ws-list::-webkit-scrollbar { width: 6px; }
+.ws-list::-webkit-scrollbar-thumb { background: #2a2a31; border-radius: 3px; }
+
+.ws-item {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+  gap: 0.5rem;
+}
+
+.ws-item.is-focused,
+.ws-item:hover {
+  background: #1c1c21;
+}
+
+.ws-item.is-current {
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.ws-item.is-current.is-focused,
+.ws-item.is-current:hover {
+  background: rgba(99, 102, 241, 0.18);
+}
+
+.ws-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-item-check {
+  color: var(--accent);
+  font-size: 0.45rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.ws-divider {
+  height: 1px;
+  background: #26262c;
+  margin: 4px 2px;
+}
+
+.ws-create {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.12s, background 0.12s;
+}
+
+.ws-create:hover {
+  color: var(--fg);
+  background: #1c1c21;
+}
+
+.ws-create-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px dashed #2f2f36;
+  border-radius: 5px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  transition: border-color 0.12s, color 0.12s;
+  line-height: 1;
+}
+
+.ws-create:hover .ws-create-icon {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ws-create-form {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  align-items: stretch;
+}
+
+.ws-create-form input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-card);
+  border: 1px solid #26262c;
+  border-radius: 6px;
+  padding: 0.35rem 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--fg);
+  outline: none;
+  transition: border-color 0.12s;
+}
+
+.ws-create-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18);
+}
+
+.ws-create-form input::placeholder {
+  color: var(--muted);
+}
+
+.ws-create-form button {
+  background: var(--accent);
+  border: 0;
+  border-radius: 6px;
+  color: white;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  padding: 0 0.7rem;
+  cursor: pointer;
+  transition: opacity 0.1s, transform 0.06s;
+}
+
+.ws-create-form button:hover:not(:disabled) { opacity: 0.92; }
+.ws-create-form button:active:not(:disabled) { transform: scale(0.96); }
+
+.ws-create-form button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .input-row {
@@ -477,7 +1457,382 @@ h1 {
   flex-shrink: 0;
 }
 
+.thumb {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg);
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: transform 0.06s, border-color 0.15s, background 0.15s;
+}
+
+.thumb:hover { border-color: var(--accent); }
+.thumb:active { transform: scale(0.9); }
+
+.thumb.thumbed {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent);
+}
+
+.thumb-count {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.thumb.thumbed .thumb-count { color: var(--fg); }
+
 .muted { color: var(--muted); font-size: 0.85rem; }
+
+.focus {
+  margin-top: 1.5rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.focus-label {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
+}
+
+.focus-topic {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focus input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--fg);
+  font-size: 0.85rem;
+}
+
+.focus input::placeholder {
+  color: var(--muted);
+}
+
+.focus button {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.06s;
+}
+
+.focus button:hover:not(:disabled) { opacity: 0.9; }
+.focus button:active:not(:disabled) { transform: scale(0.96); }
+
+.focus button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.focus button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.focus button.pomodoro {
+  background: #dc2626;
+}
+
+.focus-countdown {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: #f87171;
+  padding: 2px 6px;
+  background: rgba(220, 38, 38, 0.15);
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.leaderboard {
+  margin-top: 1.5rem;
+  padding: 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.leaderboard h2 {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+}
+
+.leaderboard ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.leaderboard li {
+  display: grid;
+  grid-template-columns: 5rem 1fr 2rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.leaderboard .bar-label {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leaderboard .bar-track {
+  height: 6px;
+  background: #232326;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.leaderboard .bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.leaderboard .bar-count {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-align: right;
+}
+
+.heartbeat-wrap {
+  margin-top: 0.75rem;
+}
+
+.heartbeat {
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.heartbeat-progress {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.heartbeat-progress.done { color: #22c55e; }
+
+.heartbeat-bar {
+  flex: 1;
+  min-width: 3rem;
+  height: 6px;
+  background: #232326;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.heartbeat-bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e, #4ade80);
+  transition: width 0.3s ease;
+}
+
+.heartbeat-hint {
+  font-size: 0.7rem;
+  margin-top: 0.35rem;
+  padding: 0 0.75rem;
+}
+
+.pulse-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6);
+  animation: pulse 1.6s infinite;
+}
+
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0   rgba(34, 197, 94, 0.5); }
+  70%  { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);   }
+  100% { box-shadow: 0 0 0 0   rgba(34, 197, 94, 0);   }
+}
+
+.heartbeat-since {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+
+.heartbeat button {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.06s;
+}
+
+.heartbeat button:hover { opacity: 0.9; }
+.heartbeat button:active { transform: scale(0.96); }
+
+.heartbeat button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.presence {
+  margin-top: 0.75rem;
+  padding: 0.45rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+}
+
+.peer-dot {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: white;
+}
+
+.reactions {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.reactions-row {
+  display: flex;
+  gap: 0.3rem;
+  flex: 1;
+  justify-content: center;
+}
+
+.reactions-row button {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg);
+  padding: 0.25rem 0.65rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition: transform 0.06s, border-color 0.15s, background 0.15s;
+}
+
+.reactions-row button:hover {
+  border-color: var(--accent);
+  background: #1f1f23;
+}
+
+.reactions-row button:active {
+  transform: scale(0.92);
+}
+
+.reactions-row button.has-count {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.reactions-row .emoji {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.reactions-row .count {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  min-width: 1ch;
+  text-align: right;
+}
+
+.reactions-row button.has-count .count {
+  color: var(--fg);
+}
+
+.reactions-reset {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--muted);
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.reactions-reset:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.reactions-reset:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
 
 footer {
   margin-top: 2.5rem;
@@ -543,13 +1898,13 @@ function printHeader(name: string): void {
     process.stdout.write('\n');
 }
 
-function printSuccess(name: string, pm: PM): void {
+function printSuccess(dir: string, pm: PM): void {
     const bar = `  ${DIM}${'━'.repeat(43)}${RESET}`;
-    const run = pm === 'npm' ? 'npx syncengine dev' : `${pm === 'yarn' ? 'yarn' : 'pnpm'} syncengine dev`;
+    const run = pm === 'npm' ? 'npm run dev' : `${pm} dev`;
 
     process.stdout.write(`\n${bar}\n\n`);
     process.stdout.write(`  ${BOLD}Your syncengine app is ready.${RESET}\n\n`);
-    process.stdout.write(`    ${CYAN}cd${RESET} ${name}\n`);
+    process.stdout.write(`    ${CYAN}cd${RESET} ${dir}\n`);
     process.stdout.write(`    ${CYAN}${run}${RESET}\n\n`);
     process.stdout.write(`  ${DIM}Then open two browser tabs to see real-time sync.${RESET}\n\n`);
 }
@@ -562,8 +1917,11 @@ function printInstallFailed(pm: PM): void {
 // ── Entry ────────────────────────────────────────────────────────────────
 
 export async function initCommand(args: string[]): Promise<void> {
-    const target = resolve(args[0] ?? '.');
+    const rawArg = args[0] ?? '.';
+    const target = resolve(rawArg);
     const name = basename(target);
+    // Show whatever the user typed for `cd`, so absolute paths and `.` round-trip faithfully.
+    const cdArg = rawArg === '.' ? name : rawArg;
 
     // Validate target directory
     if (existsSync(target)) {
@@ -597,5 +1955,5 @@ export async function initCommand(args: string[]): Promise<void> {
         return;
     }
 
-    printSuccess(name, pm);
+    printSuccess(cdArg, pm);
 }

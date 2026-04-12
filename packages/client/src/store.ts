@@ -111,7 +111,7 @@ type WorkerOutMessage =
     | { type: 'WORKER_LOADED' }
     | { type: 'READY' }
     | { type: 'VIEW_UPDATE'; viewName: string; deltas: Array<{ record: Record<string, unknown>; weight: number }> }
-    | { type: 'FULL_SYNC'; snapshots: Record<string, Record<string, unknown>[]> }
+    | { type: 'FULL_SYNC'; snapshots: Record<string, Record<string, unknown>[]>; reset?: boolean }
     | { type: 'UNDO_SIZE'; size: number }
     | { type: 'CONNECTION_STATUS'; status: ConnectionStatus; error?: string }
     | { type: 'SYNC_STATUS'; phase: 'idle' | 'replaying' | 'live'; messagesReplayed: number; totalMessages?: number; snapshotLoaded?: boolean }
@@ -122,7 +122,14 @@ type WorkerOutMessage =
     | { type: 'WORKSPACE_REGISTRY'; event: { type: string; workspaceId: string; [key: string]: unknown } }
     | { type: 'HEARTBEAT' }
     | { type: 'RESET_RELOAD' }
-    | { type: 'VIEW_STALENESS'; viewName: string; stale: boolean };
+    | { type: 'VIEW_STALENESS'; viewName: string; stale: boolean }
+    | {
+        type: 'SERVER_REWOUND';
+        wsKey: string;
+        reason: 'stream-recreated' | 'last-seq-regressed' | 'history-aged-out';
+        previous: { created: string; maxAckedSeq: number };
+        current: { created: string; firstSeq: number; lastSeq: number };
+    };
 
 type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
     | TopicSubscribeMessage | TopicPublishMessage | TopicLeaveMessage | TopicUnsubscribeMessage;
@@ -191,6 +198,21 @@ type ChannelNamespace<TChannels extends readonly ChannelConfig[]> = {
     readonly [C in ChannelNames<TChannels>]: ChannelHandle<string, C>;
 };
 
+/**
+ * Fired when the authoritative JetStream log has regressed relative to
+ * the client's OPFS cursor — the stream was recreated, rolled back, or
+ * aged past our ack mark. The framework truncates local state and
+ * rebuilds from seq 0 automatically; apps can observe this signal to
+ * render a "syncing" banner or collect telemetry. See
+ * `docs/superpowers/specs/2026-04-17-stream-regression-rebase.md`.
+ */
+export interface ServerRewoundEvent {
+    readonly wsKey: string;
+    readonly reason: 'stream-recreated' | 'last-seq-regressed' | 'history-aged-out';
+    readonly previous: { readonly created: string; readonly maxAckedSeq: number };
+    readonly current: { readonly created: string; readonly firstSeq: number; readonly lastSeq: number };
+}
+
 /** Value returned from `db.use({...})`. The `views` shape is driven by the
  *  caller's argument: each key maps to the view's record array. */
 export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> {
@@ -209,6 +231,9 @@ export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> 
     };
     readonly staleViews: ReadonlySet<string>;
     readonly workerHealth: 'alive' | 'dead';
+    /** Populated while the client is reconciling after server-side regression.
+     *  Null during normal operation. */
+    readonly serverRewound: ServerRewoundEvent | null;
     workspace: WorkspaceInfo;
     workspaces: readonly string[];
     setWorkspace: (wsKey: string) => void;
@@ -276,6 +301,10 @@ export interface Store<
     readonly workerHealth: 'alive' | 'dead';
 
     readonly connectionError?: string;
+
+    /** Populated while the client is reconciling after server-side regression.
+     *  Null during normal operation. See {@link ServerRewoundEvent}. */
+    readonly serverRewound: ServerRewoundEvent | null;
 
     /** Per-table typed imperative namespace. */
     readonly tables: TableNamespace<TTables>;
@@ -510,6 +539,13 @@ export function store<
     let syncStatus: SyncStatus = { phase: 'idle', messagesReplayed: 0, snapshotLoaded: false };
     const syncStatusSubscribers = new Set<() => void>();
 
+    // Populated when the worker detects that the authoritative JetStream
+    // log has regressed relative to the OPFS cursor (stream recreated,
+    // rolled back, or aged past our ack). Cleared once the client has
+    // caught up to 'live' on the rebuilt stream.
+    let serverRewound: ServerRewoundEvent | null = null;
+    const serverRewoundSubscribers = new Set<() => void>();
+
     let workspaceStatus: WorkspaceInfo = {
         wsKey: runtimeWorkspaceId ?? 'default',
         status: 'live',
@@ -743,18 +779,50 @@ export function store<
                         // applied on the initial READY — handled by the
                         // seedsApplied gate inside applySeeds()).
                         if (prevPhase !== 'live') applySeeds();
+                        // A regression rebuild finishes once we're back
+                        // live on the new stream. Clear the flag so the
+                        // UI can drop any syncing banner.
+                        if (serverRewound) {
+                            serverRewound = null;
+                            serverRewoundSubscribers.forEach((fn) => fn());
+                        }
                     }
+                    break;
+                }
+
+                case 'SERVER_REWOUND': {
+                    serverRewound = {
+                        wsKey: msg.wsKey,
+                        reason: msg.reason,
+                        previous: msg.previous,
+                        current: msg.current,
+                    };
+                    serverRewoundSubscribers.forEach((fn) => fn());
                     break;
                 }
 
                 case 'FULL_SYNC':
                     if (Object.keys(msg.snapshots).length === 0) {
-                        // Empty FULL_SYNC from replay finalize: the worker is
-                        // about to send VIEW_UPDATEs with the rebuilt data.
-                        // DEFER the clear until the first VIEW_UPDATE arrives
-                        // so React never sees empty views (they'd arrive in
-                        // separate macrotasks → flash of empty content).
-                        pendingViewClear = true;
+                        // Two sources of empty FULL_SYNC:
+                        //
+                        //   1. Replay finalize — DBSP is about to emit
+                        //      VIEW_UPDATEs with the rebuilt data. Defer the
+                        //      clear to the first arriving update so React
+                        //      sees (old → new), never (old → empty → new).
+                        //
+                        //   2. Server reset (`msg.reset === true`) — DBSP is
+                        //      empty; no VIEW_UPDATEs are coming. Clear
+                        //      immediately so the UI reflects the wipe.
+                        if (msg.reset) {
+                            for (const viewId of viewSnapshots.keys()) {
+                                viewSnapshots.set(viewId, []);
+                                notifyView(viewId);
+                            }
+                            viewMaps.clear();
+                            pendingViewClear = false;
+                        } else {
+                            pendingViewClear = true;
+                        }
                         conflictLog = [];
                         conflictSubscribers.forEach((fn) => fn());
                         seedsApplied = false;
@@ -1046,6 +1114,12 @@ export function store<
         }, []);
         const stale = useSyncExternalStore(subStaleness, () => staleViews);
 
+        const subRewound = useCallback((onChange: () => void) => {
+            serverRewoundSubscribers.add(onChange);
+            return () => { serverRewoundSubscribers.delete(onChange); };
+        }, []);
+        const rewound = useSyncExternalStore(subRewound, () => serverRewound);
+
         const undoObj = useMemo(
             () => ({ size: undoCount, run: undoRun }),
             [undoCount],
@@ -1070,6 +1144,7 @@ export function store<
             setWorkspace,
             workerHealth: health,
             staleViews: stale,
+            serverRewound: rewound,
         };
     }
 
@@ -1177,6 +1252,7 @@ export function store<
         get workerHealth() { return workerHealth; },
         get connectionError() { return connectionError; },
         get staleViews() { return staleViews; },
+        get serverRewound() { return serverRewound; },
         get workspace() { return workspaceStatus; },
         get workspaces() { return knownWorkspaces; },
         setWorkspace,

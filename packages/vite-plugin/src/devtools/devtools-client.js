@@ -89,6 +89,8 @@
     var viewDefs = [];        // Array<{ name, sourceTable }>
     var schemaInfo = { version: 0, fingerprint: '' };
     var viewRowCounts = {};   // { [viewName]: number }
+    var localTableCounts = {}; // { [tableName]: number } — OPFS COUNT(*)
+    var streamCursor = null;  // { created, maxAckedSeq } — persisted client cursor
     var offlineQueue = 0;
     var offlineEntries = [];  // [{ table, id }]
     var prevViewCounts = '';  // JSON snapshot for change detection
@@ -290,6 +292,10 @@
         drawerEl.classList.remove(CLS.hidden);
         renderPill();
         showTab(activeTab);
+        // Populate streamInfo on first open so the Data tab's drift banner
+        // has something to compare against without waiting for the user
+        // to visit the Timeline tab. Cheap — one fetch, no polling.
+        if (!streamInfo) fetchStreamMessages();
     }
 
     function closeDrawer() {
@@ -350,6 +356,37 @@
         return panel;
     }
 
+    /**
+     * Surface client↔server drift in the Data tab sidebar. Returns null when
+     * nothing's wrong; otherwise returns `{ label }` with a short
+     * human-readable message.
+     *
+     * Compared signals:
+     *   - `streamCursor.created` (OPFS) vs. `streamInfo.created` (live NATS):
+     *     mismatch means the stream was deleted + recreated since the
+     *     client last acked. Regression rebuild fires on next subscribe.
+     *   - `streamCursor.maxAckedSeq` vs. `streamInfo.lastSeq`: if the
+     *     cursor is ahead, client acked events that no longer exist on
+     *     the server (snapshot restore, admin trim, or --fresh).
+     *
+     * We don't flag `cursor < lastSeq` (normal catch-up) here.
+     */
+    function detectDrift() {
+        if (!streamCursor || !streamInfo) return null;
+        if (streamCursor.created && streamInfo.name && streamCursor.created !== streamInfo.created) {
+            return { label: 'Stream recreated — local will rebuild on reconnect' };
+        }
+        if (typeof streamCursor.maxAckedSeq === 'number' &&
+            typeof streamInfo.lastSeq === 'number' &&
+            streamCursor.maxAckedSeq > streamInfo.lastSeq) {
+            return {
+                label: 'Client ahead of server (cursor ' + streamCursor.maxAckedSeq +
+                       ', stream at ' + streamInfo.lastSeq + ')',
+            };
+        }
+        return null;
+    }
+
     function renderDataSidebar() {
         if (!dataSidebarEl) return;
         clearChildren(dataSidebarEl);
@@ -360,19 +397,42 @@
         }
 
         if (tables.length > 0) {
+            // Header shows the drift banner between the "Tables" group label and
+            // the items. Cheap + out of the way when everything is in sync.
             dataSidebarEl.appendChild(el('div', CLS.dataSidebarGroup, 'Tables'));
+            var drift = detectDrift();
+            if (drift) {
+                var banner = el('div', CLS.dataSidebarItem);
+                banner.style.cssText = 'display:flex;gap:0.4rem;padding:6px 8px;background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.25);border-radius:4px;margin:4px 0;font-size:0.7rem;color:var(--dt-yellow);cursor:default;';
+                banner.appendChild(el('span', null, '\u26A0'));
+                banner.appendChild(el('span', null, drift.label));
+                dataSidebarEl.appendChild(banner);
+            }
+
             tables.forEach(function (t) {
                 var item = el('div', CLS.dataSidebarItem + (selectedTable === t.name ? ' active' : ''));
                 var dot = el('span', CLS.syncDot + ' green');
                 item.appendChild(dot);
                 item.appendChild(el('span', null, t.name));
-                // Show pending offline count from devtools-status offlineEntries
+
+                // Row-count chip. Visible by default; signals drift visually when
+                // the client-side count is non-zero but the stream cursor is at 0
+                // (fresh server vs. stale OPFS) or when pending > 0.
+                var localCount = localTableCounts[t.name];
+                if (typeof localCount === 'number') {
+                    var countLbl = el('span', CLS.syncLabel);
+                    countLbl.textContent = localCount + ' row' + (localCount === 1 ? '' : 's');
+                    item.appendChild(countLbl);
+                }
+
+                // Pending offline writes — existing affordance, kept for parity.
                 var pendingForTable = offlineEntries.filter(function (e) { return e.table === t.name; }).length;
                 if (pendingForTable > 0) {
                     var lbl = el('span', CLS.syncLabel, pendingForTable + ' pending');
                     lbl.style.color = 'var(--dt-yellow)';
                     item.appendChild(lbl);
                 }
+
                 item.addEventListener('click', function () {
                     selectedTable = t.name;
                     renderDataSidebar();
@@ -913,6 +973,9 @@
             if (data.schema) schemaInfo = data.schema;
             if (Array.isArray(data.tables)) tables = data.tables;
             if (Array.isArray(data.viewDefs)) viewDefs = data.viewDefs;
+            // Local counts + stream cursor drive the sidebar drift badges.
+            if (data.localTableCounts) localTableCounts = data.localTableCounts;
+            if (data.streamCursor !== undefined) streamCursor = data.streamCursor;
             // Conflicts
             if (Array.isArray(data.conflicts)) {
                 conflicts = data.conflicts;

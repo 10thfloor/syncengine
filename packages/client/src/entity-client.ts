@@ -67,6 +67,16 @@ import {
 // the store when setWorkspace() is called.
 let currentWorkspaceId: string = runtimeWorkspaceId;
 
+/** Read-only accessor for the current workspace id (used by useHeartbeat). */
+export function getEntityClientWorkspace(): string {
+    return currentWorkspaceId;
+}
+
+/** Read-only accessor for the auth token (used by useHeartbeat's workflow POST). */
+export function getEntityClientAuthToken(): string | null {
+    return runtimeAuthToken ?? null;
+}
+
 /** Called by the store when the workspace changes. */
 export function setEntityClientWorkspace(wsKey: string): void {
     if (wsKey === currentWorkspaceId) return;
@@ -445,7 +455,7 @@ function notify(sub: EntitySubscription): void {
  * serializes to `[]`. Bearer token is attached if the runtime config
  * provided one (future: workspace token).
  */
-async function invokeHandler(
+export async function invokeHandler(
     entity: AnyEntity,
     key: string,
     handlerName: string,

@@ -53,6 +53,10 @@ export class WorkspaceBridge {
         this.subscribeCoreSubject(`ws.${wsId}.authority.>`, this.onAuthorityMessage.bind(this));
         this.subscribeCoreSubject(`ws.${wsId}.topic.>`, this.onTopicMessage.bind(this));
         this.subscribeCoreSubject(`ws.${wsId}.gc`, this.onGCMessage.bind(this));
+        // sys.reset is the "Reset Workspace" broadcast: every connected
+        // session must drop its local OPFS / DBSP state in sync with the
+        // server-side stream wipe. Fan out to all gateway sessions.
+        this.subscribeCoreSubject(`ws.${wsId}.sys.reset`, this.onSysResetMessage.bind(this));
 
         this.peerAckTimer = setInterval(() => this.reportPeerAck(), PEER_ACK_INTERVAL_MS);
     }
@@ -263,6 +267,26 @@ export class WorkspaceBridge {
     private onGCMessage(data: Record<string, unknown>): void {
         for (const session of this.sessions) {
             session.send({ type: 'gc', payload: data });
+        }
+    }
+
+    private onSysResetMessage(data: Record<string, unknown>): void {
+        // Convert the sys.reset broadcast into a normal channel delta
+        // for every subscribed channel on every session. This piggybacks
+        // on the well-tested delta pipeline — every client's channel
+        // consumer already handles `{type: 'RESET'}` payloads (truncate
+        // + reactive FULL_SYNC). Avoids bespoke client-side handling
+        // that browser worker caches made unreliable.
+        const nonce = typeof data._nonce === 'string' ? data._nonce : undefined;
+        for (const session of this.sessions) {
+            for (const channelName of session.channels) {
+                session.send({
+                    type: 'delta',
+                    channel: channelName,
+                    seq: -1,
+                    payload: { type: 'RESET', ...(nonce ? { _nonce: nonce } : {}) },
+                });
+            }
         }
     }
 

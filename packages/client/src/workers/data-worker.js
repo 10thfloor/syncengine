@@ -1,6 +1,7 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { DbspEngine } from '@syncengine/dbsp';
 import { connectToGateway } from '../gateway-connection.js';
+import { compareStreamCursor } from './stream-cursor.js';
 
 // Cache the SQLite WASM module — initialization downloads and compiles the
 // binary. Subsequent calls return the cached instance immediately.
@@ -254,8 +255,9 @@ function handleBroadcastMessage(event) {
     if (msg._nonce && dedup(msg._nonce)) return;
 
     if (msg.type === 'RESET') {
-        dbsp.reset();
-        self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
+        // Another tab on this origin triggered a reset. Wipe local
+        // state in lockstep so every tab converges on empty.
+        applyLocalReactiveReset('cross-tab-broadcast');
         return;
     }
     if (msg.type === 'DELTAS' && msg.viewUpdates) {
@@ -283,6 +285,10 @@ const nats = {
     routing: null,         // ChannelRouting: { subjects, tableToSubject }
     outboundQueues: {},    // subject → pending messages (per-channel offline queue)
     peerAckTimer: null,
+    // JetStream stream `created` timestamp for the active workspace, captured
+    // when we (re)subscribe. Used to refresh the stream cursor on each
+    // high-water-mark persist so the next boot can detect regression.
+    streamCreatedAt: '',
 };
 
 /**
@@ -460,6 +466,27 @@ function handleDevtoolsQuery(msg) {
     }
 }
 
+/**
+ * Count rows per workspace table directly from OPFS. Runs on each
+ * devtools status broadcast; SQLite's indexed COUNT(*) is cheap enough
+ * at the row counts a browser-side replica holds. Surfacing this in
+ * the devtools sidebar lets developers spot client↔server drift
+ * (local count vs. stream cursor vs. server tail) at a glance.
+ */
+function computeLocalTableCounts() {
+    if (!db) return {};
+    const counts = {};
+    for (const t of schemaTables) {
+        try {
+            const rows = db.exec(`SELECT COUNT(*) AS n FROM "${t.name.replace(/"/g, '""')}"`, { rowMode: 'object' });
+            counts[t.name] = Number(rows[0]?.n ?? 0);
+        } catch {
+            counts[t.name] = 0;
+        }
+    }
+    return counts;
+}
+
 function broadcastDevtoolsStatus() {
     if (!devtoolsChannel || Date.now() - devtoolsLastPing >= DEVTOOLS_PING_TTL_MS) return;
     try {
@@ -493,7 +520,13 @@ function broadcastDevtoolsStatus() {
                 sourceTable: v.source_table,
             })),
             channels,
-            views: Object.assign({}, viewRowCounts),
+            views: { ...viewRowCounts },
+            // Per-table local row counts from OPFS. Paired with `streamCursor`
+            // and the server-side stream tail (fetched separately by the
+            // devtools plugin's /metrics endpoint) so drift is visible
+            // in the sidebar without extra round-trips.
+            localTableCounts: computeLocalTableCounts(),
+            streamCursor: loadStreamCursor(),
             offlineEntries: causalQueue.map(m => ({
                 table: m._table || m.table || '',
                 id: m._id || m.id || '',
@@ -543,6 +576,12 @@ function persistLastProcessedSeqs() {
             "INSERT OR REPLACE INTO _dbsp_meta (key, value) VALUES ('last_processed_seqs', ?)",
             { bind: [JSON.stringify(sync.lastProcessedSeqs)] },
         );
+        // Keep the stream cursor in sync with the per-subject marks so
+        // the next boot's regression detector has a fresh comparison
+        // anchor (`created` + highest seq we've acked).
+        if (nats.streamCreatedAt) {
+            persistStreamCursor(nats.streamCreatedAt, maxProcessedSeq());
+        }
     } catch (e) {
         console.warn('[sync] failed to persist lastProcessedSeqs:', e.message || e);
     }
@@ -566,6 +605,153 @@ function loadLastProcessedSeqs() {
     } catch (e) {
         console.warn('[sync] failed to load lastProcessedSeqs:', e.message || e);
     }
+}
+
+// ── Stream cursor (regression detection) ────────────────────────────────────
+//
+// The per-subject `lastProcessedSeqs` above tracks how far we've incrementally
+// caught up. The stream cursor adds two more dimensions per workspace:
+//
+//   - `created`       — the JetStream stream's creation timestamp. Changes
+//                       only when the stream is deleted and recreated.
+//   - `maxAckedSeq`   — the highest sequence number we've processed in this
+//                       stream across any subject.
+//
+// Together they let us detect three regression signals on (re)subscribe:
+//   A. `created` differs         → stream was recreated
+//   B. `last_seq < maxAckedSeq`  → stream was trimmed / snapshot-restored
+//   C. `first_seq > maxAcked+1`  → messages we needed have aged out
+//
+// All three collapse to the same recovery: truncate local + rebuild.
+//
+// See docs/superpowers/specs/2026-04-17-stream-regression-rebase.md.
+
+function persistStreamCursor(streamCreated, maxSeq) {
+    if (!db) return;
+    try {
+        db.exec(
+            "INSERT OR REPLACE INTO _dbsp_meta (key, value) VALUES ('stream_cursor', ?)",
+            { bind: [JSON.stringify({ created: streamCreated, maxAckedSeq: maxSeq })] },
+        );
+    } catch (e) {
+        console.warn('[sync] failed to persist stream cursor:', e.message || e);
+    }
+}
+
+function loadStreamCursor() {
+    if (!db) return null;
+    try {
+        const rows = db.exec(
+            "SELECT value FROM _dbsp_meta WHERE key = 'stream_cursor'",
+            { rowMode: 'object' },
+        );
+        if (rows.length > 0 && rows[0].value) {
+            const parsed = JSON.parse(rows[0].value);
+            if (
+                parsed &&
+                typeof parsed === 'object' &&
+                typeof parsed.created === 'string' &&
+                typeof parsed.maxAckedSeq === 'number'
+            ) {
+                return parsed;
+            }
+        }
+    } catch (e) {
+        console.warn('[sync] failed to load stream cursor:', e.message || e);
+    }
+    return null;
+}
+
+/**
+ * Effectful wrapper: loads the persisted cursor from OPFS and compares
+ * via the pure helper (separately unit-tested in stream-cursor.test.ts).
+ */
+function detectStreamRegression(streamInfo) {
+    return compareStreamCursor(loadStreamCursor(), streamInfo);
+}
+
+/**
+ * Reactive local reset. Used by every code path that needs to drop
+ * local state in response to a server-side wipe — the JetStream
+ * RESET delta, the plain `sys.reset` NATS message, and the stream
+ * regression detector. All three converge here so the user-visible
+ * behavior is identical: instant, reactive UI update with no page
+ * reload.
+ *
+ * What runs:
+ *   1. Atomically DELETE every workspace table in OPFS.
+ *   2. Clear persisted stream bookkeeping so the next subscribe
+ *      starts at seq 0.
+ *   3. Reset DBSP materialization.
+ *   4. Drop the undo stack.
+ *   5. Post FULL_SYNC(empty) + UNDO_SIZE(0) to the main thread — the
+ *      React tree sees zero rows and re-renders immediately.
+ *   6. (Optional) broadcast a cross-tab reset notification.
+ *
+ * Does NOT:
+ *   - Close the SQLite connection.
+ *   - Wipe OPFS at the file level.
+ *   - Trigger a page reload.
+ */
+function applyLocalReactiveReset(reason, nonce) {
+    if (!db) return;
+    try {
+        db.exec('BEGIN');
+        for (const t of schemaTables) db.exec(`DELETE FROM ${t.name}`);
+        db.exec("DELETE FROM _dbsp_meta WHERE key = 'stream_cursor'");
+        db.exec("DELETE FROM _dbsp_meta WHERE key = 'last_processed_seqs'");
+        db.exec('COMMIT');
+    } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+        console.error(`[sync] reactive reset (${reason}) failed to truncate:`, e.message || e);
+        return;
+    }
+
+    // Wipe every scrap of workspace-scoped state. Each bucket below is
+    // a separate in-memory mirror that'd otherwise re-surface stale data
+    // after the DB truncate.
+    sync.lastProcessedSeqs = {};
+    sync.isReplaying = false;
+    sync.localMutationQueue = [];
+    undoStack.length = 0;
+    causalQueue.length = 0;
+    for (const s of Object.keys(nats.outboundQueues)) nats.outboundQueues[s] = [];
+    for (const k of Object.keys(viewRowCache)) viewRowCache[k] = {};
+    for (const k of Object.keys(viewRowCounts)) viewRowCounts[k] = 0;
+    try { dbsp.reset(); } catch { /* best effort */ }
+
+    try {
+        self.postMessage({ type: 'UNDO_SIZE', size: 0 });
+        // `reset: true` tells the main thread to clear view snapshots
+        // synchronously — no VIEW_UPDATEs are coming to flush a deferred
+        // clear, because DBSP is now empty.
+        self.postMessage({ type: 'FULL_SYNC', snapshots: {}, reset: true });
+    } catch { /* main gone */ }
+    broadcastDevtoolsStatus();
+    if (nonce) {
+        try { broadcastReset(nonce); } catch { /* best effort */ }
+    }
+
+    console.log(`[sync] reactive reset applied (${reason})`);
+}
+
+/**
+ * Regression recovery — notify the app via SERVER_REWOUND for
+ * telemetry / banners, then delegate to the reactive reset. Tab stays
+ * responsive; new consumer will re-populate views from seq 0 as the
+ * rebuilt stream streams events.
+ */
+function rebuildAfterRegression(detection) {
+    if (!db) return;
+    try {
+        self.postMessage({
+            type: 'SERVER_REWOUND',
+            wsKey: nats.config?.workspaceId ?? '',
+            ...detection,
+        });
+    } catch { /* main may be gone — best effort */ }
+
+    applyLocalReactiveReset(`regression:${detection.reason}`);
 }
 
 // ── Status helpers ──────────────────────────────────────────────────────────
@@ -819,7 +1005,10 @@ async function processConsumer(codec, source) {
                 if (!isReplay) {
                     undoStack.length = 0;
                     self.postMessage({ type: 'UNDO_SIZE', size: 0 });
-                    self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
+                    // `reset: true` — no VIEW_UPDATEs are coming post-reset;
+                    // main thread must clear view snapshots synchronously,
+                    // not defer to a never-arriving delta.
+                    self.postMessage({ type: 'FULL_SYNC', snapshots: {}, reset: true });
                     broadcastReset(msg._nonce);
                 }
             }
@@ -891,6 +1080,32 @@ async function connectNats() {
         // separate "subscribe live" step.
         const js = nats.conn.jetstream();
         const streamName = `WS_${nats.config.workspaceId.replace(/-/g, '_')}`;
+
+        // ── Stream regression check ────────────────────────────────────
+        // Before wiring up any consumer, verify the stream looks the way
+        // we remember it. If it doesn't (recreated / rolled back / aged
+        // past our cursor), truncate local OPFS and continue as if this
+        // were a fresh first-boot. See spec: stream-regression-rebase.
+        nats.streamCreatedAt = '';
+        try {
+            const jsm = await nats.conn.jetstreamManager();
+            const streamInfo = await jsm.streams.info(streamName);
+            nats.streamCreatedAt = String(streamInfo?.created ?? '');
+            const regression = detectStreamRegression(streamInfo);
+            if (regression) {
+                rebuildAfterRegression(regression);
+            } else if (!loadStreamCursor() && nats.streamCreatedAt) {
+                // First successful subscribe for this stream — seed the
+                // cursor so the next session has something to compare.
+                persistStreamCursor(nats.streamCreatedAt, maxProcessedSeq());
+            }
+        } catch (e) {
+            // Stream may not exist yet (brand-new workspace) or JSM
+            // may be unreachable. Either way, skip the check and let the
+            // normal consumer path handle provisioning.
+            console.warn(`[sync] stream info lookup failed for ${streamName}:`, e?.message || e);
+        }
+
         const sources = [];
         for (const s of channelSubjects) {
             const lastSeq = sync.lastProcessedSeqs[s] || 0;
@@ -977,7 +1192,12 @@ function processIncomingDelta(payload, seq) {
     } else if (payload.type === 'DELETE' && payload.table) {
         handleDelete({ ...payload, _fromNats: true, _isReplay: isReplay });
     } else if (payload.type === 'RESET') {
-        handleReset();
+        // Received-from-network RESET: apply reactively only. Do NOT call
+        // the local `handleReset()` — that function re-publishes a fresh
+        // RESET nonce back to NATS, which every peer would receive and
+        // repeat, looping forever. Truncate + FULL_SYNC(reset:true) is
+        // sufficient; the original publisher already broadcast once.
+        applyLocalReactiveReset('delta:RESET', payload._nonce);
     }
     // SCHEMA_MIGRATION handled elsewhere — skip for now
 }
@@ -1150,6 +1370,7 @@ function handleGatewayMessage(msg) {
             });
             break;
         }
+
     }
 }
 
@@ -1181,28 +1402,26 @@ function subscribeGC(codec) {
 // ── System reset subscription ────────────────────────────────────────────────
 
 /**
- * Subscribe to ws.<wsKey>.sys.reset. When the server resets the workspace
- * it publishes this message so every connected client — any tab, any
- * device — clears its local SQLite/OPFS and reloads.
+ * Subscribe to `ws.<wsKey>.sys.reset`. When the server resets the
+ * workspace it publishes this message so every connected client —
+ * any tab, any device — drops its local state.
+ *
+ * Delegates to `applyLocalReactiveReset`: tables are truncated in
+ * place, DBSP resets, and a FULL_SYNC(empty) fans out to React.
+ * No OPFS wipe, no page reload — the UI flips to empty instantly
+ * like any other delta.
  */
 function subscribeSysReset() {
     const subject = `ws.${nats.config.workspaceId}.sys.reset`;
     const sub = nats.conn.subscribe(subject);
     (async () => {
         for await (const raw of sub) {
-            console.log('[sys] received workspace reset — clearing local data');
-            // Close DB, wipe OPFS, then tell the main thread to reload.
-            try { if (db) { db.close(); db = null; } } catch { /* */ }
+            let nonce;
             try {
-                if (typeof navigator !== 'undefined' && navigator.storage) {
-                    const root = await navigator.storage.getDirectory();
-                    for await (const [name] of root.entries()) {
-                        await root.removeEntry(name, { recursive: true }).catch(() => {});
-                    }
-                }
-            } catch { /* */ }
-            console.log('[sys] OPFS cleared, requesting reload');
-            self.postMessage({ type: 'RESET_RELOAD' });
+                const payload = raw.json?.();
+                nonce = payload?._nonce;
+            } catch { /* non-JSON, fine */ }
+            applyLocalReactiveReset('sys.reset', nonce);
         }
     })();
 }
@@ -1966,24 +2185,12 @@ function handleUndo() {
 }
 
 function handleReset() {
+    // Local-initiated reset (actions.reset from the app). Do the same
+    // reactive wipe every network-triggered path does, then broadcast
+    // the RESET delta so other clients converge.
     const nonce = makeNonce();
     const hlc = hlcTick();
-    for (const t of schemaTables) db.exec(`DELETE FROM ${t.name}`);
-    dbsp.reset();
-    undoStack.length = 0;
-    causalQueue.length = 0;
-    for (const s of Object.keys(nats.outboundQueues)) nats.outboundQueues[s] = [];
-    for (const k of Object.keys(viewRowCache)) viewRowCache[k] = {};
-    for (const k of Object.keys(viewRowCounts)) viewRowCounts[k] = 0;
-
-    // Break out of replay if stuck — discard any queued local mutations
-    sync.isReplaying = false;
-    sync.localMutationQueue = [];
-
-    self.postMessage({ type: 'UNDO_SIZE', size: 0 });
-    broadcastDevtoolsStatus();
-    self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
-    broadcastReset(nonce);
+    applyLocalReactiveReset('local-action', nonce);
     natsPublish({ type: 'RESET', _nonce: nonce, _hlc: hlc });
 }
 

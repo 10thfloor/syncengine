@@ -31,6 +31,7 @@ import { hashWorkspaceId } from '@syncengine/core/http';
 import {
     resolveWorkspaceId,
     resolveWorkflowTarget,
+    resolveHeartbeatTarget,
     resolveEntityTarget,
     isRpcError,
 } from '@syncengine/server/rpc-proxy';
@@ -99,7 +100,13 @@ function discoverActorFiles(srcDir: string): string[] {
             try { st = statSync(full); } catch { continue; }
             if (st.isDirectory()) {
                 queue.push(full);
-            } else if (st.isFile() && name.endsWith('.actor.ts')) {
+            } else if (
+                st.isFile() && (
+                    name.endsWith('.actor.ts') ||
+                    name.endsWith('.workflow.ts') ||
+                    name.endsWith('.heartbeat.ts')
+                )
+            ) {
                 out.push(full);
             }
         }
@@ -146,212 +153,9 @@ export function stripServerCalls(source: string): string {
     // server. Keeping the originals enables true latency compensation:
     // the client runs the handler locally for an instant optimistic
     // update, then POSTs to Restate for the authoritative result.
-    //
-    // The old transform replaced every handler with `(s) => s`, making
-    // optimistic updates no-ops. Now that handlers are preserved, the
-    // UI shows the expected new state immediately — zero flicker.
-    //
-    // The scan infrastructure below is retained (commented out) for a
-    // future selective-strip phase that may remove emit() side-effects
-    // or other server-only code from the client bundle.
     return source;
-
-    /* eslint-disable no-unreachable */
-    let out = source;
-    let cursor = 0;
-    while (true) {
-        // Match both `entity(` and the legacy `defineEntity(` call forms.
-        const idxEntity = out.indexOf('entity(', cursor);
-        const idxDefine = out.indexOf('defineEntity(', cursor);
-        const idx = idxEntity === -1 ? idxDefine
-            : idxDefine === -1 ? idxEntity
-            : Math.min(idxEntity, idxDefine);
-        if (idx === -1) break;
-
-        const matchLen = out.startsWith('defineEntity(', idx) ? 'defineEntity('.length : 'entity('.length;
-
-        // Word-boundary check so we don't match `myEntity(` or `myDefineEntity(`.
-        const prev = idx === 0 ? '' : out[idx - 1]!;
-        if (/[A-Za-z0-9_$]/.test(prev)) { cursor = idx + 1; continue; }
-
-        const openParen = idx + matchLen - 1;
-        const callEnd = findBalancedClose(out, openParen, '(', ')');
-        if (callEnd === -1) { cursor = idx + 1; continue; }
-
-        // Find the config object literal — it's either the second
-        // positional arg (after a name+comma) or the first, depending
-        // on the API shape. Walk forward looking for an `{` at the
-        // top level of this call.
-        const callBody = out.slice(openParen + 1, callEnd);
-        const relConfigStart = findTopLevelBrace(callBody);
-        if (relConfigStart === -1) { cursor = callEnd + 1; continue; }
-        const configStart = openParen + 1 + relConfigStart;
-        const configEnd = findBalancedClose(out, configStart, '{', '}');
-        if (configEnd === -1) { cursor = callEnd + 1; continue; }
-
-        // Find the `handlers:` property inside the config literal.
-        const configBody = out.slice(configStart + 1, configEnd);
-        const handlersRel = findHandlersProperty(configBody);
-        if (!handlersRel) { cursor = callEnd + 1; continue; }
-
-        // `handlersRel.valueStart` is the index (inside configBody) of
-        // the first non-whitespace character after `handlers:`. The
-        // value must be an object literal `{...}`; any other form
-        // (e.g., an external variable) can't be statically stripped
-        // and is passed through unchanged.
-        const braceStart = configStart + 1 + handlersRel!.valueStart;
-        if (out[braceStart] !== '{') { cursor = callEnd + 1; continue; }
-        const braceEnd = findBalancedClose(out, braceStart, '{', '}');
-        if (braceEnd === -1) { cursor = callEnd + 1; continue; }
-
-        const body = out.slice(braceStart + 1, braceEnd);
-        const handlerNames = extractHandlerNames(body);
-        if (handlerNames.length === 0) {
-            cursor = callEnd + 1;
-            continue;
-        }
-
-        // Build the stub and splice it in place of just the braced
-        // handler literal.
-        const stub = buildStubLiteral(handlerNames);
-        out = out.slice(0, braceStart) + stub + out.slice(braceEnd + 1);
-        // Advance past the replacement. `callEnd` has shifted; recompute
-        // the scanning cursor conservatively.
-        cursor = braceStart + stub.length;
-    }
-    return out;
 }
 
-/**
- * Find the index of the first top-level `{` inside a call body (i.e.,
- * at depth 0 with respect to parens/brackets, skipping strings and
- * comments). Returns -1 if not found.
- */
-function findTopLevelBrace(src: string): number {
-    let i = 0;
-    while (i < src.length) {
-        const c = src[i]!;
-        if (c === '/' && src[i + 1] === '/') {
-            const nl = src.indexOf('\n', i);
-            if (nl === -1) return -1;
-            i = nl + 1;
-            continue;
-        }
-        if (c === '/' && src[i + 1] === '*') {
-            const end = src.indexOf('*/', i + 2);
-            if (end === -1) return -1;
-            i = end + 2;
-            continue;
-        }
-        if (c === '"' || c === "'" || c === '`') {
-            const end = skipString(src, i, c);
-            if (end === -1) return -1;
-            i = end;
-            continue;
-        }
-        if (c === '(' || c === '[') {
-            const pairClose = c === '(' ? ')' : ']';
-            const end = findBalancedClose(src, i, c, pairClose);
-            if (end === -1) return -1;
-            i = end + 1;
-            continue;
-        }
-        if (c === '{') return i;
-        i++;
-    }
-    return -1;
-}
-
-/**
- * Scan a top-level object-literal body for a `handlers` property and
- * return the index where its value starts (skipping the colon and any
- * whitespace). Returns `null` if no such property is found.
- */
-function findHandlersProperty(body: string): { valueStart: number } | null {
-    let i = 0;
-    while (i < body.length) {
-        // Skip whitespace/commas/comments
-        while (i < body.length && /[\s,]/.test(body[i]!)) i++;
-        if (i < body.length && body[i] === '/' && body[i + 1] === '/') {
-            const nl = body.indexOf('\n', i);
-            if (nl === -1) return null;
-            i = nl + 1;
-            continue;
-        }
-        if (i < body.length && body[i] === '/' && body[i + 1] === '*') {
-            const end = body.indexOf('*/', i + 2);
-            if (end === -1) return null;
-            i = end + 2;
-            continue;
-        }
-        if (i >= body.length) return null;
-
-        // Parse a property name (identifier or string literal)
-        let name: string | null = null;
-        const nameStart = i;
-        if (body[i] === '"' || body[i] === "'") {
-            const quote = body[i]!;
-            const end = body.indexOf(quote, i + 1);
-            if (end === -1) return null;
-            name = body.slice(i + 1, end);
-            i = end + 1;
-        } else {
-            const match = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(body.slice(i));
-            if (match) {
-                name = match[0];
-                i += name.length;
-            }
-        }
-        if (!name) { i++; continue; }
-
-        while (i < body.length && /\s/.test(body[i]!)) i++;
-
-        if (body[i] === ':' && name === 'handlers') {
-            i++;
-            while (i < body.length && /\s/.test(body[i]!)) i++;
-            return { valueStart: i };
-        }
-
-        // Otherwise skip this property's value and continue
-        if (body[i] === ':') {
-            i++;
-            // Skip to the next top-level comma
-            while (i < body.length) {
-                const c = body[i]!;
-                if (c === ',') break;
-                if (c === '(' || c === '{' || c === '[') {
-                    const pairClose = c === '{' ? '}' : c === '(' ? ')' : ']';
-                    const end = findBalancedClose(body, i, c, pairClose);
-                    if (end === -1) return null;
-                    i = end + 1;
-                    continue;
-                }
-                if (c === '"' || c === "'" || c === '`') {
-                    const end = skipString(body, i, c);
-                    if (end === -1) return null;
-                    i = end;
-                    continue;
-                }
-                i++;
-            }
-        } else if (body[i] === '(') {
-            // Shorthand method — skip params and body
-            const parenEnd = findBalancedClose(body, i, '(', ')');
-            if (parenEnd === -1) return null;
-            i = parenEnd + 1;
-            while (i < body.length && /\s/.test(body[i]!)) i++;
-            if (body[i] === '{') {
-                const end = findBalancedClose(body, i, '{', '}');
-                if (end === -1) return null;
-                i = end + 1;
-            }
-        } else {
-            // Unknown shape — advance past the name to avoid infinite loop
-            i = Math.max(i + 1, nameStart + 1);
-        }
-    }
-    return null;
-}
 
 /**
  * Find the index of the character that closes the bracket at `openIdx`
@@ -430,121 +234,6 @@ function skipString(src: string, startIdx: number, quote: string): number {
     return -1;
 }
 
-/**
- * Extract top-level method/property names from the braced body of a
- * `server({...})` argument. Handles shorthand methods, async shorthand,
- * keyed arrows, and function expressions.
- */
-function extractHandlerNames(body: string): string[] {
-    const names = new Set<string>();
-    let i = 0;
-    while (i < body.length) {
-        // Skip whitespace, commas, and comments
-        while (i < body.length && /[\s,]/.test(body[i]!)) i++;
-        if (i < body.length && body[i] === '/' && body[i + 1] === '/') {
-            const nl = body.indexOf('\n', i);
-            if (nl === -1) break;
-            i = nl + 1;
-            continue;
-        }
-        if (i < body.length && body[i] === '/' && body[i + 1] === '*') {
-            const end = body.indexOf('*/', i + 2);
-            if (end === -1) break;
-            i = end + 2;
-            continue;
-        }
-        if (i >= body.length) break;
-
-        // Skip `async ` modifier
-        if (body.slice(i, i + 6) === 'async ') i += 6;
-        while (i < body.length && /\s/.test(body[i]!)) i++;
-
-        // Parse an identifier or string-literal key
-        let name: string | null = null;
-        if (body[i] === '"' || body[i] === "'") {
-            const quote = body[i]!;
-            const end = body.indexOf(quote, i + 1);
-            if (end === -1) break;
-            name = body.slice(i + 1, end);
-            i = end + 1;
-        } else {
-            const match = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(body.slice(i));
-            if (match) {
-                name = match[0];
-                i += name.length;
-            }
-        }
-        if (!name) { i++; continue; }
-
-        while (i < body.length && /\s/.test(body[i]!)) i++;
-
-        const sep = body[i];
-        if (sep !== '(' && sep !== ':') { continue; }
-        names.add(name);
-
-        if (sep === '(') {
-            // method shorthand: skip params then body
-            const parenEnd = findBalancedClose(body, i, '(', ')');
-            if (parenEnd === -1) break;
-            i = parenEnd + 1;
-            while (i < body.length && /\s/.test(body[i]!)) i++;
-            if (body[i] === '{') {
-                const end = findBalancedClose(body, i, '{', '}');
-                if (end === -1) break;
-                i = end + 1;
-            }
-        } else {
-            // `name:` — skip the value by advancing to the next top-level
-            // comma, stepping over any nested brackets/strings.
-            i++;
-            let j = i;
-            while (j < body.length) {
-                const c = body[j]!;
-                if (c === ',') break;
-                if (c === '(' || c === '{' || c === '[') {
-                    const pairClose = c === '{' ? '}' : c === '(' ? ')' : ']';
-                    const end = findBalancedClose(body, j, c, pairClose);
-                    if (end === -1) { j = body.length; break; }
-                    j = end + 1;
-                    continue;
-                }
-                if (c === '"' || c === "'" || c === '`') {
-                    const end = skipString(body, j, c);
-                    if (end === -1) { j = body.length; break; }
-                    j = end;
-                    continue;
-                }
-                j++;
-            }
-            i = j;
-        }
-    }
-    return Array.from(names);
-}
-
-function buildStubLiteral(handlerNames: readonly string[]): string {
-    // The stub is a no-op: each handler returns its input state unchanged.
-    // This keeps the client-side latency-compensation path (see
-    // packages/client/src/entity-client.ts) working — it runs the handler
-    // locally, gets the same state back, treats that as the "optimistic"
-    // layer (no change), then POSTs to the RPC middleware for the
-    // authoritative server-side result. When the POST resolves the UI
-    // reflects the real new state.
-    //
-    // The emitted literal is PLAIN JAVASCRIPT — no TypeScript annotations.
-    // This transform runs inside Vite's pipeline AFTER esbuild has already
-    // stripped TypeScript from the source, so injecting `(s: T) => ...`
-    // syntax back in breaks the downstream JS parser. See:
-    // https://vite.dev/guide/api-plugin.html#transformers-and-plugins
-    //
-    // A future phase may expose a client-safe subset of handlers (pure
-    // functions that can actually run in the browser for true latency
-    // compensation), in which case the stub would import them directly.
-    const entries = handlerNames
-        .map((n) => `    ${JSON.stringify(n)}: (s) => s`)
-        .join(',\n');
-    return `{\n${entries}\n  }`;
-}
 
 // ── Workflow stub ──────────────────────────────────────────────────────────
 
@@ -573,6 +262,105 @@ function stubWorkflowModule(source: string): string {
         );
     }
     return lines.join('\n') + '\n';
+}
+
+// ── Heartbeat stub ─────────────────────────────────────────────────────────
+
+/**
+ * Replace a `.heartbeat.ts` module with a client-safe stub. Extracts
+ * `heartbeat('name', { ...config })` calls and emits a module that exports
+ * `{ $tag, $name, $scope, $trigger, $maxRuns, $runAtStart }` for each —
+ * enough metadata for the client's `useHeartbeat()` hook to wire the
+ * right RPC routes without pulling in `@syncengine/server`.
+ *
+ * The handler and interval grammar stay server-side; the client never
+ * evaluates them.
+ */
+function stubHeartbeatModule(source: string, id: string): string {
+    const exports: Array<{
+        exportName: string;
+        name: string;
+        scope: string;
+        trigger: string;
+        maxRuns: number;
+        runAtStart: boolean;
+    }> = [];
+
+    const callRe = /export\s+const\s+(\w+)\s*=\s*heartbeat\(\s*['"]([^'"]+)['"]\s*,\s*\{/g;
+    for (const m of source.matchAll(callRe)) {
+        const exportName = m[1]!;
+        const name = m[2]!;
+        const matchIndex = m.index ?? 0;
+        const openBraceIdx = matchIndex + m[0].length - 1;
+        const closeIdx = findBalancedClose(source, openBraceIdx, '{', '}');
+        if (closeIdx === -1) continue;
+        const body = source.slice(openBraceIdx + 1, closeIdx);
+
+        exports.push({
+            exportName,
+            name,
+            scope: extractStringField(body, 'scope') ?? 'workspace',
+            trigger: extractStringField(body, 'trigger') ?? 'boot',
+            maxRuns: extractNumberField(body, 'maxRuns') ?? 0,
+            runAtStart: extractBoolField(body, 'runAtStart') ?? false,
+        });
+    }
+
+    if (exports.length === 0) {
+        // If the source clearly calls heartbeat() but our extractor
+        // found nothing, the user likely passed a variable instead of
+        // an inline config literal. Silently emitting an empty stub
+        // would leave their `useHeartbeat(def)` import resolving to
+        // undefined at runtime — a trap worse than a build error.
+        if (/\bheartbeat\s*\(/.test(source)) {
+            throw new Error(
+                `[syncengine:vite-plugin] ${id}: found heartbeat() call but could not ` +
+                `extract a config literal. Pass the config inline:\n\n` +
+                `    export const myHeartbeat = heartbeat('myHeartbeat', {\n` +
+                `        every: '30s',\n` +
+                `        run: async (ctx) => { ... },\n` +
+                `    });\n\n` +
+                `The client bundle statically extracts $name, $scope, $trigger, ` +
+                `$maxRuns, and $runAtStart from the config object literal; configs ` +
+                `stored in a separate variable can't be analyzed.`,
+            );
+        }
+        return '// heartbeat stub: no heartbeat() calls found\n';
+    }
+    const lines = ['// Generated client stub — server code stripped by @syncengine/vite-plugin'];
+    for (const e of exports) {
+        lines.push(
+            `export const ${e.exportName} = {`,
+            `    $tag: 'heartbeat',`,
+            `    $name: ${JSON.stringify(e.name)},`,
+            `    $scope: ${JSON.stringify(e.scope)},`,
+            `    $trigger: ${JSON.stringify(e.trigger)},`,
+            `    $maxRuns: ${e.maxRuns},`,
+            `    $runAtStart: ${e.runAtStart},`,
+            `};`,
+        );
+    }
+    return lines.join('\n') + '\n';
+}
+
+function extractStringField(body: string, field: string): string | null {
+    const re = new RegExp(`(^|[,{\\s])${field}\\s*:\\s*['"]([^'"]+)['"]`);
+    const m = body.match(re);
+    return m ? m[2]! : null;
+}
+
+function extractNumberField(body: string, field: string): number | null {
+    const re = new RegExp(`(^|[,{\\s])${field}\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`);
+    const m = body.match(re);
+    if (!m) return null;
+    const n = Number(m[2]);
+    return Number.isFinite(n) ? n : null;
+}
+
+function extractBoolField(body: string, field: string): boolean | null {
+    const re = new RegExp(`(^|[,{\\s])${field}\\s*:\\s*(true|false)`);
+    const m = body.match(re);
+    return m ? m[2] === 'true' : null;
 }
 
 // ── Dev middleware: /__syncengine/rpc/<entity>/<key>/<handler> ─────────────
@@ -604,6 +392,7 @@ export function buildRpcMiddleware(
 
         const pathname = req.url.split('?')[0]!;
         const isWorkflow = pathname.startsWith('/__syncengine/rpc/workflow/');
+        const isHeartbeat = pathname.startsWith('/__syncengine/rpc/heartbeat/');
 
         // Resolve workspace (shared validation)
         const wsResult = resolveWorkspaceId(
@@ -617,9 +406,11 @@ export function buildRpcMiddleware(
         }
 
         // Resolve target URL (shared validation + URL construction)
-        const target = isWorkflow
-            ? resolveWorkflowTarget(pathname, wsResult, restateUrlFn())
-            : resolveEntityTarget(pathname, wsResult, restateUrlFn());
+        const target = isHeartbeat
+            ? resolveHeartbeatTarget(pathname, wsResult, restateUrlFn())
+            : isWorkflow
+                ? resolveWorkflowTarget(pathname, wsResult, restateUrlFn())
+                : resolveEntityTarget(pathname, wsResult, restateUrlFn());
         if (isRpcError(target)) {
             res.statusCode = target.status;
             res.end(target.message);
@@ -629,7 +420,7 @@ export function buildRpcMiddleware(
         // Read body (Connect-specific)
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(chunk as Buffer);
-        const body = Buffer.concat(chunks).toString('utf8') || (isWorkflow ? '{}' : '[]');
+        const body = Buffer.concat(chunks).toString('utf8') || ((isWorkflow || isHeartbeat) ? '{}' : '[]');
 
         // Proxy to Restate
         try {
@@ -700,6 +491,15 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
             // preserves the export names and their $name values.
             if (id.endsWith('.workflow.ts')) {
                 return { code: stubWorkflowModule(code), map: null };
+            }
+
+            // ── .heartbeat.ts: replace with a client-safe stub ─────────
+            // Heartbeat files import @syncengine/server (which pulls in
+            // node-only deps). Client only needs the metadata fields to
+            // wire useHeartbeat(def); handler + interval parser stay
+            // server-side.
+            if (id.endsWith('.heartbeat.ts')) {
+                return { code: stubHeartbeatModule(code, id), map: null };
             }
 
             if (!id.endsWith('.actor.ts')) return null;

@@ -179,7 +179,7 @@ function generateServerEntry(
         `import { startRestateEndpoint } from '@syncengine/server';`,
         `import { startHttpServer } from '@syncengine/server/serve';`,
         `import { isEntity } from '@syncengine/core';`,
-        `import { isWorkflow } from '@syncengine/server';`,
+        `import { isWorkflow, isHeartbeat } from '@syncengine/server';`,
         ``,
     ];
 
@@ -202,18 +202,21 @@ function generateServerEntry(
     }
     lines.push('');
 
-    // Collect entities
+    // Collect entities, workflows, and heartbeats from the loaded modules.
+    // The manifest lists every `.actor.ts` / `.workflow.ts` / `.heartbeat.ts`
+    // file discovered by the vite plugin; we filter by tag at runtime.
     lines.push(
         `const _allModules = [${manifest.actors.map((_, i) => `_actor_${i}`).join(', ')}];`,
         `const entities = _allModules.flatMap(m => Object.values(m).filter(isEntity));`,
         `const workflows = _allModules.flatMap(m => Object.values(m).filter(isWorkflow));`,
+        `const heartbeats = _allModules.flatMap(m => Object.values(m).filter(isHeartbeat));`,
         ``,
     );
 
     // Start Restate endpoint
     lines.push(
         `const PORT = parseInt(process.env.PORT ?? '9080', 10);`,
-        `await startRestateEndpoint(entities, workflows, PORT);`,
+        `await startRestateEndpoint(entities, workflows, PORT, heartbeats);`,
         ``,
     );
 

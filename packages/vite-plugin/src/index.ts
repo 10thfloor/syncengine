@@ -23,7 +23,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import type { Plugin, ViteDevServer } from 'vite';
 import wasm from 'vite-plugin-wasm';
@@ -90,10 +90,72 @@ export default function syncengine(opts: SyncenginePluginOptions = {}) {
         wasm(),
         topLevelAwait(),
         runtimeConfigPlugin(opts),
+        schemaReloadPlugin(),
         actorsPlugin(opts.actors ?? {}),
         workspacesPlugin(opts.workspaces ?? {}),
         devtoolsPlugin(),
     ];
+}
+
+// ── Schema-reload plugin ──────────────────────────────────────────────────
+//
+// The data worker (`@syncengine/client`'s SQLite-WASM sidecar) is booted
+// once on page load with a snapshot of the schema baked into its INIT
+// message. Adding or changing a `table(...)` in the user's source must
+// therefore restart the worker — HMR alone just updates the React
+// modules, leaves the worker's `tablesMeta` stale, and silently drops
+// inserts to unknown tables with a `[worker] Unknown table: …` warning.
+//
+// This plugin watches for edits to schema-defining files and escalates
+// them from HMR to a full page reload so the worker reboots and sees
+// the new shape.
+function schemaReloadPlugin(): Plugin {
+    return {
+        name: 'syncengine:schema-reload',
+
+        async handleHotUpdate({ file, server, read }) {
+            if (file.includes('node_modules')) return;
+            if (!/\.(ts|tsx)$/.test(file)) return;
+            // Entities, workflows, and topics have their own lifecycle —
+            // they don't contribute to the worker's table schema.
+            if (/\.(actor|workflow|topic)\.(ts|tsx)$/.test(file)) return;
+
+            // Path convention first (cheap).
+            const base = basename(file);
+            const dir = dirname(file);
+            const isSchemaByPath =
+                base === 'schema.ts' ||
+                base === 'schema.tsx' ||
+                dir.endsWith('/schema') ||
+                dir.endsWith('/schemas') ||
+                dir.includes('/schema/') ||
+                dir.includes('/schemas/');
+
+            // Content fallback: any file that imports `table` from
+            // @syncengine/core and actually calls it defines part of the
+            // schema surface, wherever it lives on disk.
+            let isSchemaByContent = false;
+            if (!isSchemaByPath) {
+                try {
+                    const source = await read();
+                    isSchemaByContent =
+                        /from\s+['"]@syncengine\/core['"]/.test(source) &&
+                        /\btable\s*\(/.test(source);
+                } catch {
+                    return;
+                }
+            }
+
+            if (!isSchemaByPath && !isSchemaByContent) return;
+
+            server.config.logger.info(
+                `[syncengine] schema change in ${base} — full page reload (worker must reboot)`,
+                { timestamp: true },
+            );
+            server.ws.send({ type: 'full-reload' });
+            return [];
+        },
+    };
 }
 
 /**

@@ -158,6 +158,12 @@ export interface AnyWorkflowDef {
 export { topic, isTopic } from './topic';
 export type { TopicDef, AnyTopic, TopicRecord } from './topic';
 
+// ── Heartbeat framework status entity ──────────────────────────────────────
+// Framework-owned; users interact through `useHeartbeat(def)` on the client
+// or `heartbeat()` on the server. Exported here so both sides can reference
+// the same entity definition without pulling in each other's deps.
+export { heartbeatStatus, HEARTBEAT_STATUS_ENTITY_NAME, heartbeatStatusKey } from './heartbeat-status';
+
 // ── HLC ─────────────────────────────────────────────────────────────────────
 export { hlcTick, hlcMerge, hlcPack, hlcCompare } from './hlc';
 export type { HLCState } from './hlc';
