@@ -4,7 +4,7 @@ import { store, useStore } from "@syncengine/client";
 // ── Schema: tables, views, channels ─────────────────────────────
 // Tables are CRDT-replicated rows synced via JetStream. Views are
 // incremental projections computed by the DBSP engine in the worker.
-import { clicks, totalsView, channels } from "./schema";
+import { clicks, totalsView, notes, notesList, channels } from "./schema";
 
 // ── Entities: durable single-writer actors (Restate) ────────────
 // Each entity is a virtual object with serialized handler execution.
@@ -22,8 +22,8 @@ import { CursorLayer, type CursorPos } from "./CursorLayer";
 
 // ── Store ────────────────────────────────────────────────────────
 export const db = store({
-  tables: [clicks] as const,
-  views: [totalsView],
+  tables: [clicks, notes] as const,
+  views: [totalsView, notesList],
   channels,
 });
 
@@ -45,7 +45,7 @@ export default function App() {
   const s = useStore<DB>();
 
   // ── Tables + Views: CRDT rows with incremental projections ────
-  const { views, ready } = s.useView({ totalsView });
+  const { views, ready } = s.useView({ totalsView, notesList });
   const total = views.totalsView[0]?.total ?? 0;
   const numClicks = views.totalsView[0]?.numClicks ?? 0;
 
@@ -59,6 +59,7 @@ export default function App() {
   );
   const { state: acctState, actions: acctActions } = s.useEntity(account, userId);
   const [acctError, setAcctError] = useState<string | null>(null);
+  const [noteText, setNoteText] = useState("");
 
   // ── Topics: ephemeral peer state via NATS core ────────────────
   const { peers: cursorPeers, publish: publishCursor, leave: leaveCursor } =
@@ -281,6 +282,61 @@ export default function App() {
               Unfreeze
             </button>
           </div>
+        </section>
+
+        <section style={{ marginTop: "2rem" }}>
+          <h2>Notes (separate channel)</h2>
+          <p style={{ color: "#737373", fontSize: "0.85rem", marginBottom: "0.5rem" }}>
+            Syncs on its own JetStream subject, independent of clicks.
+          </p>
+          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+            <input
+              type="text"
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && noteText.trim()) {
+                  s.tables.notes.insert({ author: userId, body: noteText.trim() });
+                  setNoteText("");
+                }
+              }}
+              placeholder="Type a note and press Enter..."
+              style={{
+                flex: 1,
+                padding: "0.4rem 0.6rem",
+                background: "#1a1a1a",
+                border: "1px solid #333",
+                borderRadius: "4px",
+                color: "#e5e5e5",
+              }}
+            />
+          </div>
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {views.notesList.map((n) => (
+              <li
+                key={String(n.id)}
+                style={{
+                  padding: "0.3rem 0",
+                  borderBottom: "1px solid #1a1a1a",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <span>
+                  <strong style={{ color: "#6366f1" }}>{String(n.author)}</strong>{" "}
+                  {String(n.body)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => s.tables.notes.remove(n.id)}
+                  style={{ fontSize: "0.75rem", opacity: 0.5 }}
+                >
+                  remove
+                </button>
+              </li>
+            ))}
+          </ul>
         </section>
 
         <footer

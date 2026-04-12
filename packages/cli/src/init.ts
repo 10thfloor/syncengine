@@ -148,10 +148,13 @@ createRoot(document.getElementById('root')!).render(
 
     // ── src/App.tsx ───────────────────────────────────────────────────
     write(target, 'src/App.tsx', `\
-import { store, table, id, integer, text, view, sum, count, useStore, useEntity } from '@syncengine/client';
+import { useState } from 'react';
+import { store, table, id, integer, text, view, sum, count, useStore } from '@syncengine/client';
 import { counter } from './entities/counter.actor';
 
 // ── Schema ───────────────────────────────────────────────────────
+
+// Channel: main
 const clicks = table('clicks', {
   id: id(),
   label: text(),
@@ -163,14 +166,25 @@ const totalsView = view(clicks).aggregate([], {
   numClicks: count(),
 });
 
+// Channel: notes
+const notes = table('notes', {
+  id: id(),
+  author: text(),
+  body: text(),
+});
+
+const notesList = view(notes).distinct();
+
+// Channels — each syncs on its own JetStream subject
 const channels = [
-  { name: 'main', tables: [clicks] },
+  { name: 'main',  tables: [clicks] },
+  { name: 'notes', tables: [notes] },
 ] as const;
 
 // ── Store ────────────────────────────────────────────────────────
 export const db = store({
-  tables: [clicks] as const,
-  views: [totalsView],
+  tables: [clicks, notes] as const,
+  views: [totalsView, notesList],
   channels,
 });
 
@@ -179,11 +193,12 @@ type DB = typeof db;
 // ── App ──────────────────────────────────────────────────────────
 export default function App() {
   const s = useStore<DB>();
-  const { views, ready } = s.use({ totalsView });
+  const { views, ready } = s.useView({ totalsView, notesList });
   const total = views.totalsView[0]?.total ?? 0;
   const numClicks = views.totalsView[0]?.numClicks ?? 0;
+  const [noteText, setNoteText] = useState('');
 
-  const { state, actions } = useEntity(counter, 'global');
+  const { state, actions } = s.useEntity(counter, 'global');
 
   if (!ready) return <div style={{ padding: '2rem' }}>Connecting...</div>;
 
@@ -209,6 +224,33 @@ export default function App() {
           +10
         </button>
       </section>
+
+      <section style={{ marginTop: '2rem' }}>
+        <h2>Notes (separate channel)</h2>
+        <p style={{ color: '#737373', fontSize: '0.85rem' }}>
+          Syncs on its own JetStream subject, independent of clicks.
+        </p>
+        <input
+          type="text"
+          value={noteText}
+          onChange={(e) => setNoteText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && noteText.trim()) {
+              s.tables.notes.insert({ author: 'me', body: noteText.trim() });
+              setNoteText('');
+            }
+          }}
+          placeholder="Type a note and press Enter..."
+          style={{ width: '100%', padding: '0.4rem', marginTop: '0.5rem' }}
+        />
+        <ul style={{ listStyle: 'none', padding: 0, marginTop: '0.5rem' }}>
+          {views.notesList.map((n) => (
+            <li key={String(n.id)} style={{ padding: '0.3rem 0' }}>
+              <strong>{String(n.author)}</strong> {String(n.body)}
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
   );
 }
@@ -216,9 +258,9 @@ export default function App() {
 
     // ── src/entities/counter.actor.ts ─────────────────────────────────
     write(target, 'src/entities/counter.actor.ts', `\
-import { defineEntity, integer } from '@syncengine/core';
+import { entity, integer } from '@syncengine/core';
 
-export const counter = defineEntity('counter', {
+export const counter = entity('counter', {
   state: {
     value: integer(),
   },
