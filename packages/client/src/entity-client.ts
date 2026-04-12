@@ -59,6 +59,19 @@ import {
     gatewayUrl as runtimeGatewayUrl,
     // eslint-disable-next-line import/no-unresolved
 } from 'virtual:syncengine/runtime-config';
+
+// Current workspace — defaults to the compile-time value, updated by
+// the store when setWorkspace() is called.
+let currentWorkspaceId: string = runtimeWorkspaceId;
+
+/** Called by the store when the workspace changes. */
+export function setEntityClientWorkspace(wsKey: string): void {
+    currentWorkspaceId = wsKey;
+    // Close existing connections — they're bound to the old workspace.
+    // Next entity subscription will reconnect with the new workspace.
+    natsConnPromise = null;
+    gwPromise = null;
+}
 import { connectToGateway } from './gateway-connection';
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -128,7 +141,7 @@ interface EntitySubscription {
  * load-bearing for both this map and the NATS subject construction
  * below. If a future phase allows a single tab to hold multiple
  * workspaces (e.g. an admin view showing data from two users at
- * once), this key and every `ws.${runtimeWorkspaceId}.*` subject
+ * once), this key and every `ws.${currentWorkspaceId}.*` subject
  * need a workspace-id prefix, and the lazy NATS connection below
  * needs one instance per workspace.
  */
@@ -181,7 +194,7 @@ function getGateway(): Promise<WebSocket> {
     if (!gwPromise) {
         gwPromise = connectToGateway({
             url: runtimeGatewayUrl,
-            workspaceId: runtimeWorkspaceId,
+            workspaceId: currentWorkspaceId,
             channels: [],  // entity-client doesn't need channel consumers
             clientId: `entity-${crypto.randomUUID().slice(0, 8)}`,
             authToken: runtimeAuthToken || undefined,
@@ -296,7 +309,7 @@ function getOrCreateSubscription(
         (async () => {
             try {
                 const { nc } = await getNats();
-                const subject = `ws.${runtimeWorkspaceId}.entity.${entity.$name}.${key}.state`;
+                const subject = `ws.${currentWorkspaceId}.entity.${entity.$name}.${key}.state`;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 natsSub = nc.subscribe(subject) as any;
                 (async () => {
@@ -434,7 +447,7 @@ async function invokeHandler(
 
     const headers: Record<string, string> = {
         'content-type': 'application/json',
-        'x-syncengine-workspace': runtimeWorkspaceId,
+        'x-syncengine-workspace': currentWorkspaceId,
     };
     if (runtimeAuthToken) headers.authorization = `Bearer ${runtimeAuthToken}`;
 

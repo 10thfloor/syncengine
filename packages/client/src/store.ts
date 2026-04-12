@@ -49,7 +49,7 @@ import {
     type WorkspaceInfo,
     type WorkspaceStatus,
 } from '@syncengine/core';
-import { useEntity as useEntityImpl, type UseEntityResult } from './entity-client';
+import { useEntity as useEntityImpl, setEntityClientWorkspace, type UseEntityResult } from './entity-client';
 import type { SyncConfig } from '@syncengine/core/internal';
 // Runtime-config virtual module — populated at bundle time by
 // @syncengine/vite-plugin from .syncengine/dev/runtime.json (dev) or
@@ -476,6 +476,7 @@ export function store<
         lastWsRequestId = requestId;
         workspaceStatus = { wsKey, status: 'switching' };
         workspaceSubscribers.forEach((fn) => fn());
+        setEntityClientWorkspace(wsKey);
 
         for (const viewId of viewSnapshots.keys()) {
             viewSnapshots.set(viewId, []);
@@ -1031,8 +1032,9 @@ export function store<
             const invocationId = crypto.randomUUID();
             const url = `/__syncengine/rpc/workflow/${workflow.$name}/${invocationId}`;
             const headers: Record<string, string> = { 'content-type': 'application/json' };
-            if (runtimeWorkspaceId) {
-                headers['x-syncengine-workspace'] = runtimeWorkspaceId;
+            const wsId = workspaceStatus.wsKey || runtimeWorkspaceId;
+            if (wsId) {
+                headers['x-syncengine-workspace'] = wsId;
             }
             const res = await fetch(url, {
                 method: 'POST',

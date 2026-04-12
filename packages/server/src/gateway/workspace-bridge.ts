@@ -3,37 +3,11 @@ import { connect, type NatsConnection, type Subscription } from '@nats-io/transp
 import { jetstream, DeliverPolicy, type JetStreamClient } from '@nats-io/jetstream';
 import { RingBuffer } from './ring-buffer.js';
 import { ClientSession } from './client-session.js';
+import { streamName } from '../workspace/workspace.js';
 
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;
 const ENTITY_WRITES_CONSUMER_KEY = '__entity-writes__';
-/** Retry an async operation when the error is a JetStream 404 (stream not found).
- *  Retries with exponential backoff up to 30s total — enough for the workspace
- *  to be provisioned on first page load during dev boot. */
-function isStreamNotFoundError(err: any): boolean {
-    return err?.api_error?.err_code === 10059
-        || err?.constructor?.name === 'StreamNotFoundError'
-        || (typeof err?.message === 'string' && err.message.includes('stream not found'));
-}
-
-async function withStreamRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
-    const MAX_ATTEMPTS = 15;
-    let delay = 500;
-    for (let i = 0; i < MAX_ATTEMPTS; i++) {
-        try {
-            return await fn();
-        } catch (err: any) {
-            if (isStreamNotFoundError(err)) {
-                console.log(`[gateway] ${label}: stream not found, retrying in ${delay}ms... (${i + 1}/${MAX_ATTEMPTS})`);
-                await new Promise((r) => setTimeout(r, delay));
-                delay = Math.min(delay * 1.5, 5_000);
-                continue;
-            }
-            throw err;
-        }
-    }
-    return fn();
-}
 
 export interface BridgeConfig {
     natsUrl: string;
@@ -65,6 +39,11 @@ export class WorkspaceBridge {
     }
 
     async start(): Promise<void> {
+        // Provision the workspace — creates the NATS JetStream stream if
+        // it doesn't exist. Required for client-initiated workspace switches
+        // where the new workspace hasn't been seen by this dev session.
+        await this.provision();
+
         this.nc = await connect({ servers: this.natsUrl });
         this.js = jetstream(this.nc);
         const wsId = this.workspaceId;
@@ -108,70 +87,41 @@ export class WorkspaceBridge {
     get sessionCount(): number { return this.sessions.size; }
 
     async ensureChannelConsumer(channelName: string): Promise<void> {
-        if (this.channelConsumers.has(channelName)) return;
-        if (!this.js || !this.nc || this.closed) return;
-
         const subject = `ws.${this.workspaceId}.ch.${channelName}.deltas`;
-        const streamName = `WS_${this.workspaceId.replace(/-/g, '_')}`;
-        const ring = new RingBuffer();
-        this.channelRings.set(channelName, ring);
-
-        try {
-            const consumer = await withStreamRetry(
-                () => this.js!.consumers.get(streamName, {
-                    filter_subjects: [subject],
-                    deliver_policy: DeliverPolicy.New,
-                }),
-                `channel ${channelName}`,
-            );
-            const messages = await consumer.consume();
-            const tracker = { stopped: false, stop() { this.stopped = true; messages.stop(); } };
-            this.channelConsumers.set(channelName, tracker);
-
-            (async () => {
-                for await (const raw of messages) {
-                    if (tracker.stopped) break;
-                    try {
-                        const payload = raw.json<Record<string, unknown>>();
-                        const seq = raw.seq;
-                        const msgClientId = (payload._clientId as string) ?? '';
-                        ring.push(seq, payload, msgClientId);
-                        for (const session of this.sessions) {
-                            if (!session.channels.has(channelName)) continue;
-                            if (session.replayingChannels.has(channelName)) continue;
-                            if (msgClientId === session.clientId) continue;
-                            session.send({ type: 'delta', channel: channelName, seq, payload });
-                            session.channelSeqs.set(channelName, seq);
-                        }
-                    } catch { /* decode error */ }
-                    raw.ack();
-                }
-            })().catch((err) => {
-                if (!tracker.stopped) console.error(`[gateway] channel consumer ${channelName}:`, err);
-            });
-        } catch (err) {
-            console.warn(`[gateway] failed to create consumer for channel ${channelName}:`, err);
-        }
+        await this.startConsumer(channelName, subject, (session, seq, payload, msgClientId) => {
+            if (!session.channels.has(channelName)) return;
+            if (session.replayingChannels.has(channelName)) return;
+            if (msgClientId === session.clientId) return;
+            session.send({ type: 'delta', channel: channelName, seq, payload });
+            session.channelSeqs.set(channelName, seq);
+        });
     }
 
     async ensureEntityWritesConsumer(): Promise<void> {
-        const key = ENTITY_WRITES_CONSUMER_KEY;
+        const subject = `ws.${this.workspaceId}.entity-writes`;
+        await this.startConsumer(ENTITY_WRITES_CONSUMER_KEY, subject, (session, seq, payload, msgClientId) => {
+            if (msgClientId === session.clientId) return;
+            session.send({ type: 'entity-write', seq, payload });
+        });
+    }
+
+    private async startConsumer(
+        key: string,
+        subject: string,
+        dispatch: (session: ClientSession, seq: number, payload: Record<string, unknown>, msgClientId: string) => void,
+    ): Promise<void> {
         if (this.channelConsumers.has(key)) return;
         if (!this.js || !this.nc || this.closed) return;
 
-        const subject = `ws.${this.workspaceId}.entity-writes`;
-        const streamName = `WS_${this.workspaceId.replace(/-/g, '_')}`;
+        const stream = streamName(this.workspaceId);
         const ring = new RingBuffer();
         this.channelRings.set(key, ring);
 
         try {
-            const consumer = await withStreamRetry(
-                () => this.js!.consumers.get(streamName, {
-                    filter_subjects: [subject],
-                    deliver_policy: DeliverPolicy.New,
-                }),
-                'entity-writes',
-            );
+            const consumer = await this.js.consumers.get(stream, {
+                filter_subjects: [subject],
+                deliver_policy: DeliverPolicy.New,
+            });
             const messages = await consumer.consume();
             const tracker = { stopped: false, stop() { this.stopped = true; messages.stop(); } };
             this.channelConsumers.set(key, tracker);
@@ -185,17 +135,16 @@ export class WorkspaceBridge {
                         const msgClientId = (payload._clientId as string) ?? '';
                         ring.push(seq, payload, msgClientId);
                         for (const session of this.sessions) {
-                            if (msgClientId === session.clientId) continue;
-                            session.send({ type: 'entity-write', seq, payload });
+                            dispatch(session, seq, payload, msgClientId);
                         }
-                    } catch { /* skip */ }
+                    } catch { /* decode error */ }
                     raw.ack();
                 }
             })().catch((err) => {
-                if (!tracker.stopped) console.error(`[gateway] entity-writes consumer:`, err);
+                if (!tracker.stopped) console.error(`[gateway] consumer ${key}:`, err);
             });
         } catch (err) {
-            console.warn(`[gateway] failed to create entity-writes consumer:`, err);
+            console.warn(`[gateway] failed to create consumer for ${key}:`, err);
         }
     }
 
@@ -313,6 +262,19 @@ export class WorkspaceBridge {
     private onGCMessage(data: Record<string, unknown>): void {
         for (const session of this.sessions) {
             session.send({ type: 'gc', payload: data });
+        }
+    }
+
+    private async provision(): Promise<void> {
+        const url = `${this.restateUrl}/workspace/${encodeURIComponent(this.workspaceId)}/provision`;
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ tenantId: 'default' }),
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => '<no body>');
+            console.warn(`[gateway] workspace.provision(${this.workspaceId}) failed: HTTP ${res.status}: ${text}`);
         }
     }
 
