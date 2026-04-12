@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { store, useStore } from "@syncengine/client";
 /** Browser-compatible workspace ID hash (mirrors core's hashWorkspaceId). */
 async function hashWorkspaceId(id: string): Promise<string> {
@@ -64,30 +64,8 @@ const STATUS_COLORS: Record<string, string> = {
 
 function WorkspaceSwitcher() {
   const s = useStore<DB>();
-  const { workspace, setWorkspace } = s.use({ totalSales });
+  const { workspace, workspaces, setWorkspace } = s.use({ totalSales });
   const [input, setInput] = useState("");
-  const [knownWorkspaces, setKnownWorkspaces] = useState<string[]>([]);
-
-  // Poll for available workspaces from the devtools metrics endpoint
-  useEffect(() => {
-    let active = true;
-    const poll = async () => {
-      try {
-        const res = await fetch("/__syncengine/devtools/metrics");
-        if (!res.ok) return;
-        const data = await res.json();
-        const streams: Array<{ name: string }> = data?.nats?.streams ?? [];
-        const wsKeys = streams
-          .map((s: { name: string }) => s.name)
-          .filter((n: string) => n.startsWith("WS_"))
-          .map((n: string) => n.slice(3).replace(/_/g, "-"));
-        if (active) setKnownWorkspaces(wsKeys);
-      } catch { /* ignore */ }
-    };
-    poll();
-    const timer = setInterval(poll, 5000);
-    return () => { active = false; clearInterval(timer); };
-  }, []);
 
   const handleSwitch = useCallback(async () => {
     if (!input.trim()) return;
@@ -95,10 +73,6 @@ function WorkspaceSwitcher() {
     setWorkspace(wsKey);
     setInput("");
   }, [input, setWorkspace]);
-
-  const switchTo = useCallback((wsKey: string) => {
-    setWorkspace(wsKey);
-  }, [setWorkspace]);
 
   const pill = {
     background: STATUS_COLORS[workspace.status] ?? "#71717a",
@@ -126,10 +100,10 @@ function WorkspaceSwitcher() {
       </span>
 
       {/* Known workspaces as quick-switch buttons */}
-      {knownWorkspaces.map((wsKey) => (
+      {workspaces.map((wsKey) => (
         <button
           key={wsKey}
-          onClick={() => switchTo(wsKey)}
+          onClick={() => setWorkspace(wsKey)}
           disabled={wsKey === workspace.wsKey}
           style={{
             ...btnStyle,

@@ -209,6 +209,11 @@ export interface ServerReplayEndMessage {
   channel: string;
 }
 
+export interface ServerWorkspaceRegistryMessage {
+  type: 'workspace-registry';
+  [key: string]: unknown;
+}
+
 /**
  * Union of all gateway->client message types
  */
@@ -221,4 +226,5 @@ export type ServerMsg =
   | ServerAuthorityMessage
   | ServerTopicMessage
   | ServerGcMessage
-  | ServerReplayEndMessage;
+  | ServerReplayEndMessage
+  | ServerWorkspaceRegistryMessage;

@@ -1069,6 +1069,12 @@ function handleGatewayMessage(msg) {
             break;
         }
 
+        case 'workspace-registry': {
+            // Forward to main thread — system-level event, not workspace-scoped
+            self.postMessage({ type: 'WORKSPACE_REGISTRY', event: msg });
+            break;
+        }
+
         case 'gc': {
             const payload = msg.payload;
             if (payload.type === 'GC_COMPLETE' && payload.gcWatermark && nats.routing) {

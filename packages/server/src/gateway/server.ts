@@ -1,6 +1,7 @@
 // packages/server/src/gateway/server.ts
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
 import { WorkspaceBridge } from './workspace-bridge.js';
 import { ClientSession } from './client-session.js';
 import type { ClientMsg, ClientInitMessage } from './protocol.js';
@@ -15,11 +16,33 @@ export class GatewayServer {
     private readonly bridges = new Map<string, WorkspaceBridge>();
     private readonly bridgeCreating = new Map<string, Promise<WorkspaceBridge>>();
     private readonly wss: WebSocketServer;
+    private readonly allSessions = new Set<ClientSession>();
+    private systemNc: NatsConnection | null = null;
+    private systemSub: Subscription | null = null;
 
     constructor(config: GatewayConfig) {
         this.config = config;
         this.wss = new WebSocketServer({ noServer: true });
         this.wss.on('connection', (ws) => this.onConnection(ws));
+        this.subscribeWorkspaceRegistry().catch((err) => {
+            console.warn('[gateway] workspace registry subscription failed:', err);
+        });
+    }
+
+    /** Subscribe to system-level workspace lifecycle events and forward to all clients. */
+    private async subscribeWorkspaceRegistry(): Promise<void> {
+        this.systemNc = await connect({ servers: this.config.natsUrl });
+        this.systemSub = this.systemNc.subscribe('syncengine.workspaces');
+        (async () => {
+            for await (const msg of this.systemSub!) {
+                try {
+                    const data = msg.json<Record<string, unknown>>();
+                    for (const session of this.allSessions) {
+                        session.send({ type: 'workspace-registry', ...data });
+                    }
+                } catch { /* decode error */ }
+            }
+        })().catch(() => { /* sub closed */ });
     }
 
     /** Handle an HTTP upgrade request. Call from server.on('upgrade'). */
@@ -56,10 +79,13 @@ export class GatewayServer {
     }
 
     async shutdown(): Promise<void> {
+        if (this.systemSub) this.systemSub.unsubscribe();
+        if (this.systemNc && !this.systemNc.isClosed()) await this.systemNc.drain();
         for (const [, bridge] of this.bridges) {
             await bridge.stop();
         }
         this.bridges.clear();
+        this.allSessions.clear();
         this.wss.close();
     }
 
@@ -93,6 +119,7 @@ export class GatewayServer {
                     await bridge.ensureChannelConsumer(ch);
                 }
 
+                this.allSessions.add(session);
                 ws.send(JSON.stringify({ type: 'ready' }));
                 return;
             }
@@ -148,10 +175,12 @@ export class GatewayServer {
         });
 
         ws.on('close', () => {
+            if (session) this.allSessions.delete(session);
             if (session && bridge) bridge.removeSession(session);
         });
 
         ws.on('error', () => {
+            if (session) this.allSessions.delete(session);
             if (session && bridge) bridge.removeSession(session);
         });
     }

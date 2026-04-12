@@ -1,6 +1,8 @@
 import * as restate from "@restatedev/restate-sdk";
 import { getJetStreamManager } from "./nats-client.js";
 import { RetentionPolicy, StorageType } from "@nats-io/jetstream";
+import { ENTITY_OBJECT_PREFIX } from "../entity-keys.js";
+import { WORKFLOW_OBJECT_PREFIX } from "../workflow.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -44,15 +46,41 @@ const Keys = {
 
 const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
 const PEER_STALE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const DEFAULT_MAX_AGE_SECS = 7 * 24 * 60 * 60;
 
 // ── Stream naming convention ───────────────────────────────────────────────
 
-function streamName(workspaceId: string): string {
+export function streamName(workspaceId: string): string {
   return `WS_${workspaceId.replace(/-/g, "_")}`;
 }
 
 function subjectPrefix(workspaceId: string): string {
   return `ws.${workspaceId}`;
+}
+
+// ── Stream helpers ────────────────────────────────────────────────────────
+
+function streamConfig(stream: string, subjects: string, maxAgeSecs = DEFAULT_MAX_AGE_SECS) {
+  return {
+    name: stream,
+    subjects: [subjects],
+    retention: RetentionPolicy.Limits,
+    storage: StorageType.File,
+    max_age: maxAgeSecs * 1_000_000_000,
+    max_bytes: 100 * 1024 * 1024,
+    max_msgs: 100_000,
+    discard: "old" as any,
+    num_replicas: 1,
+  };
+}
+
+async function deleteStreamIfExists(name: string): Promise<void> {
+  const jsm = await getJetStreamManager();
+  try {
+    await jsm.streams.delete(name);
+  } catch (e: any) {
+    if (!e.message?.includes("not found")) throw e;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -120,17 +148,7 @@ export const workspace = restate.object({
 
       await ctx.run("create-stream", async () => {
         const jsm = await getJetStreamManager();
-        await jsm.streams.add({
-          name: stream,
-          subjects: [subjects],
-          retention: RetentionPolicy.Limits,
-          storage: StorageType.File,
-          max_age: (req.maxAge ?? 7 * 24 * 60 * 60) * 1_000_000_000,
-          max_bytes: 100 * 1024 * 1024,
-          max_msgs: 100_000,
-          discard: "old" as any,
-          num_replicas: 1,
-        });
+        await jsm.streams.add(streamConfig(stream, subjects, req.maxAge));
         console.log(`[nats] created stream ${stream} for subjects ${subjects}`);
       });
 
@@ -140,6 +158,13 @@ export const workspace = restate.object({
       if (req.creatorUserId) {
         ctx.set(Keys.MEMBERS, [{ userId: req.creatorUserId, role: 'owner', addedAt: new Date().toISOString() }]);
       }
+
+      await publishToNats(ctx, "broadcast-workspace-provisioned", "syncengine.workspaces", {
+        type: "WORKSPACE_PROVISIONED",
+        workspaceId,
+        tenantId: req.tenantId,
+        createdAt: state.createdAt,
+      });
 
       ctx.console.log(`Workspace ${workspaceId} provisioned`);
       return state;
@@ -377,20 +402,88 @@ export const workspace = restate.object({
       state.status = "teardown";
       ctx.set(Keys.STATE, state);
 
-      await ctx.run("delete-stream", async () => {
-        const jsm = await getJetStreamManager();
-        try {
-          await jsm.streams.delete(state.streamName);
-          console.log(`[nats] deleted stream ${state.streamName}`);
-        } catch (e: any) {
-          if (!e.message?.includes("not found")) throw e;
-        }
-      });
+      await ctx.run("delete-stream", () => deleteStreamIfExists(state.streamName));
 
       state.status = "deleted";
       ctx.set(Keys.STATE, state);
+
+      await publishToNats(ctx, "broadcast-workspace-deleted", "syncengine.workspaces", {
+        type: "WORKSPACE_DELETED",
+        workspaceId: ctx.key,
+      });
+
       ctx.console.log(`Workspace ${ctx.key} deleted`);
       return { deleted: true };
+    },
+
+    // ── Dev reset (single call replaces 4 sequential devtools steps) ─────
+
+    async reset(
+      ctx: restate.ObjectContext,
+      req: { tenantId?: string },
+    ): Promise<{ ok: boolean; message: string }> {
+      if (process.env.NODE_ENV === "production") {
+        throw new restate.TerminalError("reset is disabled in production");
+      }
+
+      const workspaceId = ctx.key;
+      const adminUrl = process.env.RESTATE_ADMIN_URL ?? "http://127.0.0.1:9070";
+
+      await ctx.run("reset-delete-stream", () => deleteStreamIfExists(streamName(workspaceId)));
+
+      // Bulk-clear entity + workflow state: one SQL query for all keys,
+      // then parallel state clears. Errors propagate so Restate retries.
+      await ctx.run("reset-clear-entity-state", async () => {
+        const qRes = await fetch(`${adminUrl}/query`, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({
+            query: `SELECT service_name, service_key FROM state WHERE service_name LIKE '${ENTITY_OBJECT_PREFIX}%' OR service_name LIKE '${WORKFLOW_OBJECT_PREFIX}%'`,
+          }),
+        });
+        if (!qRes.ok) {
+          throw new Error(`Restate admin query failed: HTTP ${qRes.status}`);
+        }
+
+        const qData = (await qRes.json()) as {
+          rows?: Array<{ service_name: string; service_key: string }>;
+        };
+        const rows = qData.rows ?? [];
+        if (rows.length === 0) return;
+
+        await Promise.all(
+          rows.map((r) =>
+            fetch(`${adminUrl}/services/${r.service_name}/state`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ object_key: r.service_key, new_state: {} }),
+            }),
+          ),
+        );
+        console.log(`[reset] cleared ${rows.length} entity/workflow state entries`);
+      });
+
+      ctx.clearAll();
+
+      const stream = streamName(workspaceId);
+      const subjects = `${subjectPrefix(workspaceId)}.>`;
+      await ctx.run("reset-create-stream", async () => {
+        const jsm = await getJetStreamManager();
+        await jsm.streams.add(streamConfig(stream, subjects));
+      });
+
+      const state: WorkspaceState = {
+        workspaceId,
+        tenantId: req.tenantId ?? "default",
+        schemaVersion: 1,
+        streamName: stream,
+        createdAt: new Date().toISOString(),
+        status: "active",
+      };
+      ctx.set(Keys.STATE, state);
+
+      ctx.console.log(`Workspace ${workspaceId} reset complete`);
+      return { ok: true, message: `reset workspace ${workspaceId}` };
     },
   },
 });

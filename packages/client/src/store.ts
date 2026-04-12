@@ -114,7 +114,8 @@ type WorkerOutMessage =
     | { type: 'MIGRATION_STATUS'; fromVersion: number; toVersion: number; status: 'running' | 'complete' | 'failed'; stepsApplied: number; error?: string; failedAtVersion?: number }
     | { type: 'CONFLICTS'; conflicts: Array<{ table: string; recordId: string; field: string; winner: unknown; loser: unknown; winnerHlc: number; loserHlc: number; strategy: string }> }
     | { type: 'TOPIC_UPDATE'; name: string; key: string; peerId: string; data: Record<string, unknown>; ts: number; leave: boolean }
-    | { type: 'WORKSPACE_STATUS'; wsKey: string; status: string; requestId: string; error?: string };
+    | { type: 'WORKSPACE_STATUS'; wsKey: string; status: string; requestId: string; error?: string }
+    | { type: 'WORKSPACE_REGISTRY'; event: { type: string; workspaceId: string; [key: string]: unknown } };
 
 type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
     | TopicSubscribeMessage | TopicPublishMessage | TopicLeaveMessage | TopicUnsubscribeMessage;
@@ -199,6 +200,7 @@ export interface UseResult<TViews extends Record<string, ViewBuilder<unknown>>> 
         dismissConflict: (index: number) => void;
     };
     workspace: WorkspaceInfo;
+    workspaces: readonly string[];
     setWorkspace: (wsKey: string) => void;
 }
 
@@ -254,6 +256,7 @@ export interface Store<
 
     /** Current workspace lifecycle state. */
     readonly workspace: WorkspaceInfo;
+    readonly workspaces: readonly string[];
 
     /** Switch to a different workspace by key. */
     setWorkspace(wsKey: string): void;
@@ -469,6 +472,10 @@ export function store<
     };
     let lastWsRequestId: string | null = null;
     const workspaceSubscribers = new Set<() => void>();
+
+    // Workspace registry — reactive list of all provisioned workspaces
+    let knownWorkspaces: readonly string[] = Object.freeze([runtimeWorkspaceId ?? 'default']);
+    const registrySubscribers = new Set<() => void>();
 
     function setWorkspace(wsKey: string): void {
         if (wsKey === workspaceStatus.wsKey && workspaceStatus.status === 'live') return;
@@ -751,6 +758,22 @@ export function store<
                     break;
                 }
 
+                case 'WORKSPACE_REGISTRY': {
+                    const evt = msg.event;
+                    if (evt.type === 'WORKSPACE_PROVISIONED') {
+                        const wsId = evt.workspaceId as string;
+                        if (!knownWorkspaces.includes(wsId)) {
+                            knownWorkspaces = Object.freeze([...knownWorkspaces, wsId]);
+                            registrySubscribers.forEach((fn) => fn());
+                        }
+                    } else if (evt.type === 'WORKSPACE_DELETED') {
+                        const wsId = evt.workspaceId as string;
+                        knownWorkspaces = Object.freeze(knownWorkspaces.filter((w) => w !== wsId));
+                        registrySubscribers.forEach((fn) => fn());
+                    }
+                    break;
+                }
+
             }
         };
 
@@ -898,6 +921,12 @@ export function store<
         }, []);
         const workspace = useSyncExternalStore(subWorkspace, () => workspaceStatus);
 
+        const subRegistry = useCallback((onChange: () => void) => {
+            registrySubscribers.add(onChange);
+            return () => { registrySubscribers.delete(onChange); };
+        }, []);
+        const workspaces = useSyncExternalStore(subRegistry, () => knownWorkspaces);
+
         const undoObj = useMemo(
             () => ({ size: undoCount, run: undoRun }),
             [undoCount],
@@ -917,6 +946,7 @@ export function store<
             undo: undoObj,
             actions,
             workspace,
+            workspaces,
             setWorkspace,
         };
     }
@@ -1023,6 +1053,7 @@ export function store<
 
     const storeHandle: Store<TTables, TChannels> = {
         get workspace() { return workspaceStatus; },
+        get workspaces() { return knownWorkspaces; },
         setWorkspace,
         useView: useHook,
         use: useHook,
@@ -1061,6 +1092,7 @@ export function store<
             conflictSubscribers.clear();
             undoSubscribers.clear();
             workspaceSubscribers.clear();
+            registrySubscribers.clear();
             for (const timer of topicTimers.values()) clearInterval(timer);
             topicTimers.clear();
             topicPeers.clear();
