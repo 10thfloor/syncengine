@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { store, useStore } from "@syncengine/client";
 /** Browser-compatible workspace ID hash (mirrors core's hashWorkspaceId). */
 async function hashWorkspaceId(id: string): Promise<string> {
@@ -66,6 +66,28 @@ function WorkspaceSwitcher() {
   const s = useStore<DB>();
   const { workspace, setWorkspace } = s.use({ totalSales });
   const [input, setInput] = useState("");
+  const [knownWorkspaces, setKnownWorkspaces] = useState<string[]>([]);
+
+  // Poll for available workspaces from the devtools metrics endpoint
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await fetch("/__syncengine/devtools/metrics");
+        if (!res.ok) return;
+        const data = await res.json();
+        const streams: Array<{ name: string }> = data?.nats?.streams ?? [];
+        const wsKeys = streams
+          .map((s: { name: string }) => s.name)
+          .filter((n: string) => n.startsWith("WS_"))
+          .map((n: string) => n.slice(3).replace(/_/g, "-"));
+        if (active) setKnownWorkspaces(wsKeys);
+      } catch { /* ignore */ }
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
 
   const handleSwitch = useCallback(async () => {
     if (!input.trim()) return;
@@ -74,43 +96,69 @@ function WorkspaceSwitcher() {
     setInput("");
   }, [input, setWorkspace]);
 
+  const switchTo = useCallback((wsKey: string) => {
+    setWorkspace(wsKey);
+  }, [setWorkspace]);
+
+  const pill = {
+    background: STATUS_COLORS[workspace.status] ?? "#71717a",
+    color: "white",
+    padding: "2px 8px",
+    borderRadius: "4px",
+    fontFamily: "monospace",
+    fontSize: "0.75rem",
+  } as const;
+
+  const btnStyle = {
+    background: "#3f3f46",
+    border: "none",
+    borderRadius: "4px",
+    color: "#e4e4e7",
+    padding: "2px 8px",
+    cursor: "pointer" as const,
+    fontSize: "0.75rem",
+  };
+
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-      <span style={{
-        background: STATUS_COLORS[workspace.status] ?? "#71717a",
-        color: "white",
-        padding: "2px 8px",
-        borderRadius: "4px",
-        fontFamily: "monospace",
-        fontSize: "0.75rem",
-      }}>
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+      <span style={pill}>
         {workspace.wsKey.slice(0, 8)}{"\u2026"} {workspace.status}
       </span>
+
+      {/* Known workspaces as quick-switch buttons */}
+      {knownWorkspaces.map((wsKey) => (
+        <button
+          key={wsKey}
+          onClick={() => switchTo(wsKey)}
+          disabled={wsKey === workspace.wsKey}
+          style={{
+            ...btnStyle,
+            background: wsKey === workspace.wsKey ? "#22c55e" : "#3f3f46",
+            opacity: wsKey === workspace.wsKey ? 0.7 : 1,
+          }}
+        >
+          {wsKey.slice(0, 8)}{"\u2026"}
+        </button>
+      ))}
+
+      {/* Create new workspace */}
       <input
         type="text"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && handleSwitch()}
-        placeholder="workspace id"
+        placeholder="new workspace\u2026"
         style={{
           background: "#27272a",
           border: "1px solid #3f3f46",
           borderRadius: "4px",
           color: "#e4e4e7",
           padding: "2px 8px",
-          width: "120px",
+          width: "110px",
           fontSize: "0.75rem",
         }}
       />
-      <button onClick={handleSwitch} style={{
-        background: "#3f3f46",
-        border: "none",
-        borderRadius: "4px",
-        color: "#e4e4e7",
-        padding: "2px 8px",
-        cursor: "pointer",
-        fontSize: "0.75rem",
-      }}>Switch</button>
+      <button onClick={handleSwitch} style={btnStyle}>+</button>
     </div>
   );
 }
