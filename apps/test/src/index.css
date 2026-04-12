@@ -2,33 +2,93 @@
 
 :root {
   color-scheme: dark;
-  --bg: #0a0a0a;
-  --fg: #e5e5e5;
-  --muted: #737373;
+  --bg: #09090b;
+  --bg-card: #18181b;
+  --border: #27272a;
+  --fg: #fafafa;
+  --muted: #71717a;
   --accent: #6366f1;
+  --accent-dim: #4f46e5;
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #eab308;
+  --purple: #a855f7;
+  --blue: #3b82f6;
+  --radius: 8px;
+  --mono: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
 }
 
 body {
   background: var(--bg);
   color: var(--fg);
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
   line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
 }
 
-button {
-  background: var(--accent);
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  margin-right: 0.5rem;
-}
+.app-shell { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }
 
-button:hover { opacity: 0.9; }
-button:active { transform: scale(0.98); }
+.app-header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 2rem; }
+.app-header h1 { font-size: 1.25rem; font-weight: 600; letter-spacing: -0.02em; }
+.app-header .user-tag { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
 
-h1 { font-size: 1.5rem; margin-bottom: 1.5rem; }
-h2 { font-size: 1.1rem; color: var(--muted); margin-bottom: 0.5rem; }
-section { margin-bottom: 2rem; }
+.tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }
+.tab-bar button { background: none; border: none; padding: 0.6rem 1rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
+.tab-bar button:hover { color: var(--fg); }
+.tab-bar button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; }
+
+.stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 1rem; }
+.stat-card .label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.25rem; }
+.stat-card .value { font-size: 1.5rem; font-weight: 600; font-family: var(--mono); letter-spacing: -0.02em; }
+
+.btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.75rem; font-size: 0.8rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--fg); cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.btn:hover { border-color: var(--muted); }
+.btn:active { transform: scale(0.98); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: white; }
+.btn-primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+.btn-sm { padding: 0.25rem 0.5rem; font-size: 0.75rem; }
+
+.pattern-badge { display: inline-block; font-family: var(--mono); font-size: 0.65rem; padding: 1px 6px; border-radius: 4px; vertical-align: middle; margin-left: 0.5rem; }
+.pattern-badge.invariant { background: #1e1b4b; color: #818cf8; }
+.pattern-badge.emit { background: #1c1917; color: #eab308; }
+.pattern-badge.state-machine { background: #052e16; color: #4ade80; }
+.pattern-badge.saga { background: #1c1917; color: #f87171; }
+.pattern-badge.lease { background: #1e1b4b; color: #a78bfa; }
+
+.status-badge { display: inline-block; font-family: var(--mono); font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; }
+
+.section-heading { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem; display: flex; align-items: center; }
+
+.product-card { display: flex; flex-direction: column; gap: 0.5rem; }
+.product-card .emoji { font-size: 1.75rem; line-height: 1; }
+.product-card .name { font-weight: 500; font-size: 0.85rem; }
+.product-card .price { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); }
+.product-card .stock { font-size: 0.75rem; color: var(--muted); }
+.product-card .stock strong { color: var(--fg); }
+
+.order-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.order-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0.75rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); }
+.order-row .order-info { flex: 1; display: flex; align-items: center; gap: 0.5rem; }
+.order-row .order-product { font-size: 0.85rem; font-weight: 500; }
+.order-row .order-price { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+.order-row .order-user { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); }
+
+.checkout-flow { display: flex; flex-direction: column; gap: 1rem; }
+.timer { font-family: var(--mono); font-size: 1.25rem; color: var(--yellow); }
+.timer.expired { color: var(--red); }
+.error-flash { font-size: 0.8rem; color: var(--red); padding: 0.5rem 0.75rem; background: #1c1917; border: 1px solid #7f1d1d; border-radius: var(--radius); }
+
+.activity-feed { display: flex; flex-direction: column; gap: 0.25rem; }
+.activity-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.4rem 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+.activity-row .activity-time { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); min-width: 5rem; }
+.activity-row .activity-user { font-family: var(--mono); color: var(--accent); }
+
+.app-footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); font-size: 0.75rem; color: var(--muted); }
+.app-footer code { font-family: var(--mono); background: var(--bg-card); padding: 1px 4px; border-radius: 3px; }
+
+.select { appearance: none; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 2rem 0.4rem 0.6rem; font-size: 0.8rem; color: var(--fg); cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2371717a' d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.5rem center; }
