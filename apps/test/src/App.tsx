@@ -1,6 +1,14 @@
 import { useState, useMemo, useCallback } from "react";
 import { store, useStore } from "@syncengine/client";
-import { hashWorkspaceId } from "@syncengine/core/http";
+/** Browser-compatible workspace ID hash (mirrors core's hashWorkspaceId). */
+async function hashWorkspaceId(id: string): Promise<string> {
+  const data = new TextEncoder().encode(id);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  const hex = Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return hex.slice(0, 16);
+}
 
 import {
   products,
@@ -59,9 +67,10 @@ function WorkspaceSwitcher() {
   const { workspace, setWorkspace } = s.use({ totalSales });
   const [input, setInput] = useState("");
 
-  const handleSwitch = useCallback(() => {
+  const handleSwitch = useCallback(async () => {
     if (!input.trim()) return;
-    setWorkspace(hashWorkspaceId(input.trim()));
+    const wsKey = await hashWorkspaceId(input.trim());
+    setWorkspace(wsKey);
     setInput("");
   }, [input, setWorkspace]);
 
