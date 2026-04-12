@@ -13,6 +13,7 @@ import { ClientSession } from './client-session.js';
 
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;
+const ENTITY_WRITES_CONSUMER_KEY = '__entity-writes__';
 
 export interface BridgeConfig {
     natsUrl: string;
@@ -132,7 +133,7 @@ export class WorkspaceBridge {
     }
 
     async ensureEntityWritesConsumer(): Promise<void> {
-        const key = '__entity-writes__';
+        const key = ENTITY_WRITES_CONSUMER_KEY;
         if (this.channelConsumers.has(key)) return;
         if (!this.js || !this.nc || this.closed) return;
 
@@ -267,7 +268,10 @@ export class WorkspaceBridge {
         // Skip messages from local sessions — they were already delivered
         // via publishTopicLocal's local echo path.
         const msgClientId = (data._clientId as string) ?? '';
-        const isLocal = [...this.sessions].some(s => s.clientId === msgClientId);
+        let isLocal = false;
+        for (const s of this.sessions) {
+            if (s.clientId === msgClientId) { isLocal = true; break; }
+        }
         if (isLocal) return;
 
         for (const session of this.sessions) {

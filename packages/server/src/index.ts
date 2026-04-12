@@ -44,53 +44,37 @@ function walkSourceFiles(srcDir: string): string[] {
 }
 
 /**
- * Load entity definitions from `.actor.ts` files under the given app
- * directory. Each file is dynamic-imported and any export that passes
- * `isEntity()` is collected.
+ * Walk the app's source tree once and collect all entity + workflow
+ * definitions by dynamic-importing each `.actor.ts` / `.workflow.ts` file.
  */
-export async function loadEntities(appDir: string): Promise<AnyEntity[]> {
+export async function loadDefinitions(appDir: string): Promise<{
+    entities: AnyEntity[];
+    workflows: WorkflowDef[];
+}> {
     const srcDir = resolve(appDir, "src");
-    const files = walkSourceFiles(srcDir).filter(f => f.endsWith('.actor.ts'));
-    if (files.length === 0) {
-        console.warn(
-            `[workspace-service] appDir=${appDir} but no .actor.ts files found under src/`,
-        );
-        return [];
-    }
-
+    const allFiles = walkSourceFiles(srcDir);
     const entities: AnyEntity[] = [];
-    for (const file of files) {
+    const workflows: WorkflowDef[] = [];
+
+    for (const file of allFiles) {
         try {
             const mod = (await import(file)) as Record<string, unknown>;
             for (const value of Object.values(mod)) {
                 if (isEntity(value)) entities.push(value);
+                else if (isWorkflow(value)) workflows.push(value);
             }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            console.error(
-                `[workspace-service] failed to load actor file ${file}: ${msg}`,
-            );
+            console.error(`[workspace-service] failed to load ${file}: ${msg}`);
         }
     }
-    return entities;
-}
 
-export async function loadWorkflows(appDir: string): Promise<WorkflowDef[]> {
-    const srcDir = resolve(appDir, "src");
-    const files = walkSourceFiles(srcDir).filter(f => f.endsWith('.workflow.ts'));
-    const workflows: WorkflowDef[] = [];
-    for (const file of files) {
-        try {
-            const mod = (await import(file)) as Record<string, unknown>;
-            for (const value of Object.values(mod)) {
-                if (isWorkflow(value)) workflows.push(value);
-            }
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error(`[workspace-service] failed to load workflow file ${file}: ${msg}`);
-        }
+    if (entities.length === 0) {
+        console.warn(
+            `[workspace-service] appDir=${appDir} but no .actor.ts files found under src/`,
+        );
     }
-    return workflows;
+    return { entities, workflows };
 }
 
 /**
@@ -132,8 +116,7 @@ export async function startRestateEndpoint(
 const appDir = process.env.SYNCENGINE_APP_DIR;
 if (appDir) {
     const PORT = parseInt(process.env.PORT ?? "9080", 10);
-    const entities = await loadEntities(appDir);
-    const workflows = await loadWorkflows(appDir);
+    const { entities, workflows } = await loadDefinitions(appDir);
     await startRestateEndpoint(entities, workflows, PORT);
 }
 

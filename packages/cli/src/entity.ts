@@ -6,6 +6,7 @@
  */
 
 import { findRepoRoot, stateDirFor, readPortsOrDefaults } from './state';
+import { hashWorkspaceId } from '@syncengine/core/http';
 
 export async function entityCommand(args: string[]): Promise<void> {
     const verb = args[0];
@@ -28,9 +29,7 @@ export async function entityCommand(args: string[]): Promise<void> {
     if (wsIdx !== -1 && args[wsIdx + 1]) {
         workspaceId = args[wsIdx + 1];
     } else {
-        // Use the default workspace key (same hash as serve.ts uses)
-        const { createHash } = await import('node:crypto');
-        workspaceId = createHash('sha256').update('default').digest('hex').slice(0, 16);
+        workspaceId = hashWorkspaceId('default');
     }
 
     const repoRoot = await findRepoRoot();

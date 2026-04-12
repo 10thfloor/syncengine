@@ -45,6 +45,7 @@ import {
     type EntityState,
     type EntityHandlerMap,
     type SourceState,
+    type AnyWorkflowDef,
 } from '@syncengine/core';
 import { useEntity as useEntityImpl, type UseEntityResult } from './entity-client';
 import type { SyncConfig } from '@syncengine/core/internal';
@@ -63,11 +64,6 @@ import {
 // Re-export connection/status types for React components
 export type { ConnectionStatus, SyncStatus, ConflictRecord };
 
-/** Minimal shape of a WorkflowDef — avoids importing @syncengine/server in the client. */
-interface AnyWorkflowDef {
-    readonly $tag: 'workflow';
-    readonly $name: string;
-}
 
 // ── Worker message types (internal, unchanged from the pre-2.5 protocol) ─
 

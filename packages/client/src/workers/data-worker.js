@@ -679,9 +679,7 @@ async function connectGateway() {
 
         // Subscribe to channels with lastSeq for replay
         for (const chName of channelNames) {
-            const subject = nats.routing.channelNameToSubject
-                ? nats.routing.channelNameToSubject[chName]
-                : nats.routing.subjects[0];
+            const subject = nats.routing.channelNameToSubject[chName];
             const lastSeq = sync.lastProcessedSeqs[subject] || 0;
             ws.send(JSON.stringify({
                 type: 'subscribe',
@@ -730,10 +728,7 @@ async function connectGateway() {
 function handleGatewayMessage(msg) {
     switch (msg.type) {
         case 'delta': {
-            // Resolve channel name back to subject for seq tracking
-            const subject = nats.routing?.channelNameToSubject
-                ? nats.routing.channelNameToSubject[msg.channel]
-                : null;
+            const subject = nats.routing.channelNameToSubject[msg.channel];
             if (!subject) break;
             const payload = msg.payload;
 
@@ -755,7 +750,7 @@ function handleGatewayMessage(msg) {
             const payload = msg.payload;
             if (payload._nonce && dedup(payload._nonce)) break;
             if (payload._hlc) hlcMerge(payload._hlc);
-            const ewSubject = `ws.${nats.config.workspaceId}.entity-writes`;
+            const ewSubject = nats.routing.entityWritesSubject;
             if (msg.seq) sync.lastProcessedSeqs[ewSubject] = msg.seq;
             processIncomingDelta(payload, msg.seq);
             break;
@@ -1349,6 +1344,7 @@ async function handleInit(data) {
         }
         nats.routing.channelNames = channelNames;
         nats.routing.channelNameToSubject = channelNameToSubject;
+        nats.routing.entityWritesSubject = `ws.${data.sync.workspaceId}.entity-writes`;
 
         if (data.sync.gatewayUrl) {
             connectGateway();

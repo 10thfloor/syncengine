@@ -104,6 +104,14 @@ export type {
     RebaseResult,
 } from './entity';
 
+// ── Workflow tag (minimal type for client-side references) ──────────────────
+/** Minimal structural type for workflow definitions. Used by the client
+ *  store's `runWorkflow()` without importing `@syncengine/server`. */
+export interface AnyWorkflowDef {
+    readonly $tag: 'workflow';
+    readonly $name: string;
+}
+
 // ── Topic DSL (ephemeral pub/sub over NATS core) ────────────────────────────
 export { topic, isTopic } from './topic';
 export type { TopicDef, AnyTopic, TopicRecord } from './topic';

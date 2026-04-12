@@ -172,6 +172,7 @@ function generateServerEntry(
         `import { startRestateEndpoint } from '@syncengine/server';`,
         `import { startHttpServer } from '@syncengine/server/serve';`,
         `import { isEntity } from '@syncengine/core';`,
+        `import { isWorkflow } from '@syncengine/server';`,
         ``,
     ];
 
@@ -198,13 +199,14 @@ function generateServerEntry(
     lines.push(
         `const _allModules = [${manifest.actors.map((_, i) => `_actor_${i}`).join(', ')}];`,
         `const entities = _allModules.flatMap(m => Object.values(m).filter(isEntity));`,
+        `const workflows = _allModules.flatMap(m => Object.values(m).filter(isWorkflow));`,
         ``,
     );
 
     // Start Restate endpoint
     lines.push(
         `const PORT = parseInt(process.env.PORT ?? '9080', 10);`,
-        `await startRestateEndpoint(entities, PORT);`,
+        `await startRestateEndpoint(entities, workflows, PORT);`,
         ``,
     );
 
