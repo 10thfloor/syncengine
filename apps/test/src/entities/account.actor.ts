@@ -21,19 +21,23 @@ export const account = entity('account', {
         txnCount: sourceCount(clicks, clicks.label),
     },
     handlers: {
-        deposit: (state, amount: number) => emit(
-            state,
-            { table: 'clicks', record: { label: '$key', amount } },
-        ),
+        deposit: (state, amount: number) => {
+            const s = state as Record<string, unknown>;
+            return emit(
+                { ...state, balance: (s.balance as number ?? 0) + amount, txnCount: (s.txnCount as number ?? 0) + 1 },
+                { table: 'clicks', record: { label: '$key', amount } },
+            );
+        },
         withdraw: (state, amount: number) => {
-            if ((state as Record<string, unknown>).frozen) {
+            const s = state as Record<string, unknown>;
+            if (s.frozen) {
                 throw new Error('account is frozen');
             }
-            if (((state as Record<string, unknown>).balance as number) < amount) {
+            if ((s.balance as number) < amount) {
                 throw new Error('insufficient funds');
             }
             return emit(
-                state,
+                { ...state, balance: (s.balance as number) - amount, txnCount: (s.txnCount as number ?? 0) + 1 },
                 { table: 'clicks', record: { label: '$key', amount: -amount } },
             );
         },

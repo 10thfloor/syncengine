@@ -136,6 +136,21 @@ function discoverActorFiles(srcDir: string): string[] {
  * compiles. Recommended form is always a literal.
  */
 export function stripServerCalls(source: string): string {
+    // Handler bodies are pure functions — they run on both client and
+    // server. Keeping the originals enables true latency compensation:
+    // the client runs the handler locally for an instant optimistic
+    // update, then POSTs to Restate for the authoritative result.
+    //
+    // The old transform replaced every handler with `(s) => s`, making
+    // optimistic updates no-ops. Now that handlers are preserved, the
+    // UI shows the expected new state immediately — zero flicker.
+    //
+    // The scan infrastructure below is retained (commented out) for a
+    // future selective-strip phase that may remove emit() side-effects
+    // or other server-only code from the client bundle.
+    return source;
+
+    /* eslint-disable no-unreachable */
     let out = source;
     let cursor = 0;
     while (true) {

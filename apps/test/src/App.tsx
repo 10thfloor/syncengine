@@ -57,13 +57,20 @@ export default function App() {
     counter,
     "global",
   );
-  const { state: acctState, actions: acctActions } = s.useEntity(account, userId);
+  const { state: acctState, actions: acctActions } = s.useEntity(
+    account,
+    userId,
+  );
   const [acctError, setAcctError] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
 
   // ── Topics: ephemeral peer state via NATS core ────────────────
-  const { peers: cursorPeers, publish: publishCursor, leave: leaveCursor } =
-    s.useTopic(cursorTopic, "global");
+  const {
+    peers: cursorPeers,
+    publish: publishCursor,
+    leave: leaveCursor,
+  } = s.useTopic(cursorTopic, "global");
+
   const publishRef = useRef(publishCursor);
   publishRef.current = publishCursor;
   const leaveRef = useRef(leaveCursor);
@@ -286,17 +293,28 @@ export default function App() {
 
         <section style={{ marginTop: "2rem" }}>
           <h2>Notes (separate channel)</h2>
-          <p style={{ color: "#737373", fontSize: "0.85rem", marginBottom: "0.5rem" }}>
+          <p
+            style={{
+              color: "#737373",
+              fontSize: "0.85rem",
+              marginBottom: "0.5rem",
+            }}
+          >
             Syncs on its own JetStream subject, independent of clicks.
           </p>
-          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+          <div
+            style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}
+          >
             <input
               type="text"
               value={noteText}
               onChange={(e) => setNoteText(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && noteText.trim()) {
-                  s.tables.notes.insert({ author: userId, body: noteText.trim() });
+                  s.tables.notes.insert({
+                    author: userId,
+                    body: noteText.trim(),
+                  });
                   setNoteText("");
                 }
               }}
@@ -324,7 +342,9 @@ export default function App() {
                 }}
               >
                 <span>
-                  <strong style={{ color: "#6366f1" }}>{String(n.author)}</strong>{" "}
+                  <strong style={{ color: "#6366f1" }}>
+                    {String(n.author)}
+                  </strong>{" "}
                   {String(n.body)}
                 </span>
                 <button
@@ -342,9 +362,9 @@ export default function App() {
         <footer
           style={{ marginTop: "3rem", color: "#525252", fontSize: "0.8rem" }}
         >
-          Open two tabs: <code>?user=alice</code> and{" "}
-          <code>?user=bob</code> to see live cursors and shared state.
-          Add <code>&amp;ws=room1</code> to switch workspaces.
+          Open two tabs: <code>?user=alice</code> and <code>?user=bob</code> to
+          see live cursors and shared state. Add <code>&amp;ws=room1</code> to
+          switch workspaces.
         </footer>
       </div>
     </>
