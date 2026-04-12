@@ -87,6 +87,8 @@ export const CliCode = Object.freeze({
     UNSUPPORTED_ARCHIVE: 'UNSUPPORTED_ARCHIVE',
     BINARY_NOT_FOUND: 'BINARY_NOT_FOUND',
     PROVIDER_MISSING: 'PROVIDER_MISSING',
+    RESOLVE_FAILED: 'RESOLVE_FAILED',
+    RESOLVE_TIMEOUT: 'RESOLVE_TIMEOUT',
 } as const);
 
 export type CliCodeValue = typeof CliCode[keyof typeof CliCode];

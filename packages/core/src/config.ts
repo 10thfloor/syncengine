@@ -57,8 +57,26 @@ export interface WorkspacesConfig {
     ) => string | Promise<string>;
 }
 
+export interface AuthVerifyContext {
+    readonly request: Request;
+}
+
+export interface AuthConfig {
+    /**
+     * Runs on every HTML request before `workspaces.resolve`. The
+     * returned user becomes `resolve()`'s `user` argument. Two ways to
+     * say "not authenticated": return null/undefined or throw — both
+     * are equivalent and degrade the request to anonymous (user.id =
+     * 'anonymous'). Not a redirect hook.
+     */
+    readonly verify: (
+        ctx: AuthVerifyContext,
+    ) => SyncengineUser | null | undefined | Promise<SyncengineUser | null | undefined>;
+}
+
 export interface SyncengineConfig {
     readonly workspaces: WorkspacesConfig;
+    readonly auth?: AuthConfig;
 }
 
 /**

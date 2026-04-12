@@ -116,6 +116,8 @@ export type {
     SyncengineUser,
     WorkspacesConfig,
     WorkspaceResolveContext,
+    AuthConfig,
+    AuthVerifyContext,
 } from './config';
 export type {
     EmitInsert,
