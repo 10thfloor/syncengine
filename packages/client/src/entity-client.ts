@@ -59,6 +59,7 @@ import {
     gatewayUrl as runtimeGatewayUrl,
     // eslint-disable-next-line import/no-unresolved
 } from 'virtual:syncengine/runtime-config';
+import { connectToGateway } from './gateway-connection';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -183,31 +184,21 @@ const gwEntityHandlers = new Map<string, (data: Record<string, unknown>) => void
 
 function getGateway(): Promise<WebSocket> {
     if (!gwPromise) {
-        gwPromise = new Promise<WebSocket>((resolve, reject) => {
-            const ws = new WebSocket(runtimeGatewayUrl);
-            ws.onopen = () => {
-                ws.send(JSON.stringify({
-                    type: 'init',
-                    workspaceId: runtimeWorkspaceId,
-                    channels: [],  // entity-client doesn't need channel consumers
-                    clientId: `entity-${crypto.randomUUID().slice(0, 8)}`,
-                    authToken: runtimeAuthToken || undefined,
-                }));
-            };
-            ws.onmessage = (event: MessageEvent) => {
-                const msg = JSON.parse(event.data as string) as { type?: string; message?: string; entity?: string; key?: string; payload?: Record<string, unknown> };
-                if (msg.type === 'ready') {
-                    resolve(ws);
-                } else if (msg.type === 'error') {
-                    gwPromise = null;
-                    reject(new Error(msg.message));
-                } else if (msg.type === 'entity-state') {
-                    const key = `${msg.entity}:${msg.key}`;
-                    gwEntityHandlers.get(key)?.(msg.payload ?? {});
+        gwPromise = connectToGateway({
+            url: runtimeGatewayUrl,
+            workspaceId: runtimeWorkspaceId,
+            channels: [],  // entity-client doesn't need channel consumers
+            clientId: `entity-${crypto.randomUUID().slice(0, 8)}`,
+            authToken: runtimeAuthToken || undefined,
+            onMessage: (msg) => {
+                if (msg['type'] === 'entity-state') {
+                    const matchKey = `${msg['entity']}:${msg['key']}`;
+                    gwEntityHandlers.get(matchKey)?.(
+                        (msg['payload'] as Record<string, unknown>) ?? {},
+                    );
                 }
-            };
-            ws.onerror = () => { gwPromise = null; reject(new Error('Gateway connection failed')); };
-            ws.onclose = () => {
+            },
+            onClose: () => {
                 gwPromise = null;
                 // Re-subscribe all entity interests on next reconnect.
                 // getGateway() will be called again by the next entity
@@ -232,8 +223,9 @@ function getGateway(): Promise<WebSocket> {
                         // reconnect will retry
                     }
                 }, 1000);
-            };
+            },
         });
+        gwPromise.catch(() => { gwPromise = null; });
     }
     return gwPromise;
 }

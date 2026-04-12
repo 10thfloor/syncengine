@@ -1,5 +1,6 @@
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { DbspEngine } from '@syncengine/dbsp';
+import { connectToGateway } from '../gateway-connection.js';
 
 // ── Shared lib imports (eliminates duplication) ─────────────────────────────
 // HLC and migration logic live in @syncengine/core and are the single source
@@ -619,56 +620,30 @@ function processIncomingDelta(payload, seq) {
 }
 
 async function connectGateway() {
-    if (!nats.config) return;
-    if (!nats.routing) {
-        console.warn('[gateway] cannot connect: channel routing not initialized');
-        return;
-    }
-
+    if (!nats.config || !nats.routing) return;
     const gatewayUrl = nats.config.gatewayUrl;
     setConnectionStatus('connecting');
 
     try {
-        const ws = new WebSocket(gatewayUrl);
-        nats.gwWs = ws;
-
-        await new Promise((resolve, reject) => {
-            ws.onopen = resolve;
-            ws.onerror = reject;
-        });
-
-        console.log(`[gateway] connected to ${gatewayUrl}`);
-
-        // Init handshake
-        ws.send(JSON.stringify({
-            type: 'init',
+        const ws = await connectToGateway({
+            url: gatewayUrl,
             workspaceId: nats.config.workspaceId,
             channels: nats.routing.channelNames || [],
             clientId: CLIENT_ID,
             authToken: nats.config.authToken || undefined,
-        }));
-
-        // Wait for ready
-        await new Promise((resolve, reject) => {
-            const handler = (event) => {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'ready') {
-                    ws.removeEventListener('message', handler);
-                    resolve();
-                } else if (msg.type === 'error') {
-                    ws.removeEventListener('message', handler);
-                    reject(new Error(msg.message));
-                }
-            };
-            ws.addEventListener('message', handler);
+            onMessage: handleGatewayMessage,
+            onClose: () => {
+                console.log('[gateway] connection closed');
+                setConnectionStatus('disconnected');
+                nats.gwWs = null;
+                topicState.subs.clear();
+                if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
+                setTimeout(() => connectGateway(), NATS_RECONNECT_DELAY_MS);
+            },
         });
 
-        // Set message handler BEFORE sending subscribes so no frames are
-        // dropped between ready and the first subscribe response.
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            handleGatewayMessage(msg);
-        };
+        nats.gwWs = ws;
+        console.log(`[gateway] connected to ${gatewayUrl}`);
 
         // Initialize replay coordination
         sync.isReplaying = true;
@@ -696,19 +671,6 @@ async function connectGateway() {
             const key = subKey.slice(sep + 1);
             ws.send(JSON.stringify({ type: 'subscribe', kind: 'topic', name, key }));
         }
-
-        ws.onclose = () => {
-            console.log('[gateway] connection closed');
-            setConnectionStatus('disconnected');
-            nats.gwWs = null;
-            topicState.subs.clear();
-            if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
-            setTimeout(() => connectGateway(), NATS_RECONNECT_DELAY_MS);
-        };
-
-        ws.onerror = () => {
-            // onclose will fire after onerror
-        };
 
         setConnectionStatus('connected');
 
