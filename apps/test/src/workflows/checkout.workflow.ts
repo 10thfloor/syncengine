@@ -7,6 +7,7 @@ interface CheckoutInput {
     orderId: string;
     productSlug: string;
     price: number;
+    timestamp: number;  // passed from client — workflow body must be deterministic
 }
 
 export const checkout = defineWorkflow('checkout', async (ctx, input: CheckoutInput) => {
@@ -14,11 +15,11 @@ export const checkout = defineWorkflow('checkout', async (ctx, input: CheckoutIn
     const ord = entityRef(ctx, order, input.orderId);
 
     // Durable step 1: sell (consumes reservation, emits transaction)
-    await inv.sell(input.userId, input.orderId, input.price, Date.now());
+    await inv.sell(input.userId, input.orderId, input.price, input.timestamp);
 
     // Durable step 2: place order (with compensation on failure)
     try {
-        await ord.place(input.userId, input.productSlug, input.price, Date.now());
+        await ord.place(input.userId, input.productSlug, input.price, input.timestamp);
     } catch (err) {
         // Compensation: release the reservation
         await inv.releaseReservation(input.userId);

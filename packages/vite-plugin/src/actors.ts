@@ -613,6 +613,12 @@ export function buildRpcMiddleware(
                 res.end('Invalid workflow name');
                 return;
             }
+            // eslint-disable-next-line no-control-regex
+            if (invocationId.length === 0 || invocationId.length > 512 || /[\x00-\x1f]/.test(invocationId)) {
+                res.statusCode = 400;
+                res.end('Invalid invocationId');
+                return;
+            }
 
             const chunks: Buffer[] = [];
             for await (const chunk of req) chunks.push(chunk as Buffer);

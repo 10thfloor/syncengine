@@ -108,7 +108,7 @@ const CheckoutFlow = memo(function CheckoutFlow({
     setBuying(true);
     const orderId = crypto.randomUUID();
     try {
-      await s.runWorkflow(checkout, { userId, orderId, productSlug: slug, price });
+      await s.runWorkflow(checkout, { userId, orderId, productSlug: slug, price, timestamp: Date.now() });
       setReservedAt(null);
     } catch (e: unknown) {
       setError((e as Error).message);

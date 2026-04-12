@@ -44,13 +44,13 @@ describe('entityRef', () => {
         );
     });
 
-    it('forwards handler args wrapped in array', async () => {
+    it('forwards handler args as positional parameters', async () => {
         const { ctx, callLog } = mockCtx('ws123/mykey');
         const ref = entityRef(ctx as any, counter, 'mykey');
         await ref.add(42);
         expect(callLog).toHaveLength(1);
         expect(callLog[0].method).toBe('add');
-        expect(callLog[0].args).toEqual([[42]]);
+        expect(callLog[0].args).toEqual([42]);
     });
 
     it('extracts workspace ID from ctx.key', async () => {

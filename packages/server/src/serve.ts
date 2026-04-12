@@ -342,6 +342,11 @@ export function startHttpServer(config: ProductionServerConfig): void {
                 res.writeHead(400).end('Invalid workflow name');
                 return;
             }
+            // eslint-disable-next-line no-control-regex
+            if (invocationId.length === 0 || invocationId.length > 512 || /[\x00-\x1f]/.test(invocationId)) {
+                res.writeHead(400).end('Invalid invocationId');
+                return;
+            }
 
             const body = await readBody(req);
 
