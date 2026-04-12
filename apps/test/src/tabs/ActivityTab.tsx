@@ -69,7 +69,7 @@ export const ActivityTab = memo(function ActivityTab() {
               {recent.map((txn) => {
                 const time = new Date(Number(txn.timestamp)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 return (
-                  <div key={String(txn.id)} className="activity-row">
+                  <div key={`${txn.userId}-${txn.productSlug}-${txn.timestamp}`} className="activity-row">
                     <span className="activity-time">{time}</span>
                     <span className="activity-user">{String(txn.userId)}</span>
                     <span>{String(txn.type)}</span>

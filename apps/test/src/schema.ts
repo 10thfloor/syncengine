@@ -49,18 +49,32 @@ export const orderIndex = table('orderIndex', {
 
 // ── Views ─────────────────────────────────────────────────────────
 
+// All transaction views dedup by content columns to handle Restate replays.
+// Replayed emits produce identical (productSlug, userId, amount, type, timestamp)
+// rows — grouping by those columns collapses duplicates.
+
 export const salesByProduct = view(transactions)
   .filter(transactions.type, 'eq', 'sale')
+  .aggregate([transactions.productSlug, transactions.userId, transactions.amount, transactions.timestamp], {
+    _n: count(),
+  })
   .aggregate([transactions.productSlug], {
     total: sum(transactions.amount),
     count: count(),
   });
 
 export const recentActivity = view(transactions)
+  .aggregate(
+    [transactions.productSlug, transactions.userId, transactions.type, transactions.amount, transactions.timestamp],
+    { _n: count() },
+  )
   .topN(transactions.timestamp, 10, 'desc');
 
 export const totalSales = view(transactions)
   .filter(transactions.type, 'eq', 'sale')
+  .aggregate([transactions.productSlug, transactions.userId, transactions.amount, transactions.timestamp], {
+    _n: count(),
+  })
   .aggregate([], {
     revenue: sum(transactions.amount),
     count: count(),
