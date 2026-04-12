@@ -589,6 +589,74 @@ export function buildRpcMiddleware(
             return;
         }
 
+        // Workflow RPC: /__syncengine/rpc/workflow/<name>/<invocationId>
+        if (req.url.startsWith('/__syncengine/rpc/workflow/')) {
+            const wfParts = req.url.slice('/__syncengine/rpc/workflow/'.length).split('?')[0]!.split('/');
+            if (wfParts.length !== 2) {
+                res.statusCode = 400;
+                res.end('Expected /__syncengine/rpc/workflow/<name>/<invocationId>');
+                return;
+            }
+            const [wfNameRaw, invocationIdRaw] = wfParts as [string, string];
+            let wfName: string;
+            let invocationId: string;
+            try {
+                wfName = decodeURIComponent(wfNameRaw);
+                invocationId = decodeURIComponent(invocationIdRaw);
+            } catch {
+                res.statusCode = 400;
+                res.end('Malformed URL-encoded path component');
+                return;
+            }
+            if (!NAME_REGEX.test(wfName)) {
+                res.statusCode = 400;
+                res.end('Invalid workflow name');
+                return;
+            }
+
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) chunks.push(chunk as Buffer);
+            const body = Buffer.concat(chunks).toString('utf8') || '{}';
+
+            const headerWs = req.headers['x-syncengine-workspace'];
+            const headerWsValue = Array.isArray(headerWs) ? headerWs[0] : headerWs;
+            let workspaceId: string;
+            if (typeof headerWsValue === 'string' && headerWsValue.length > 0) {
+                if (!WORKSPACE_HEADER_REGEX.test(headerWsValue)) {
+                    res.statusCode = 400;
+                    res.end('Invalid x-syncengine-workspace header');
+                    return;
+                }
+                workspaceId = headerWsValue;
+            } else {
+                workspaceId = workspaceIdFallbackFn();
+            }
+
+            const restateUrl = restateUrlFn().replace(/\/+$/, '');
+            const targetUrl =
+                `${restateUrl}/workflow_${wfName}` +
+                `/${encodeURIComponent(`${workspaceId}/${invocationId}`)}/run`;
+
+            try {
+                const upstream = await fetch(targetUrl, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body,
+                });
+                const text = await upstream.text();
+                res.statusCode = upstream.status;
+                res.setHeader('content-type', upstream.headers.get('content-type') || 'application/json');
+                res.end(text);
+            } catch (err) {
+                res.statusCode = 502;
+                res.setHeader('content-type', 'application/json');
+                res.end(JSON.stringify({
+                    message: `[syncengine] failed to reach Restate at ${targetUrl}: ${(err as Error).message}`,
+                }));
+            }
+            return;
+        }
+
         // URL: /__syncengine/rpc/<entityName>/<entityKey>/<handlerName>
         const pathParts = req.url.slice('/__syncengine/rpc/'.length).split('?')[0]!.split('/');
         if (pathParts.length !== 3) {
