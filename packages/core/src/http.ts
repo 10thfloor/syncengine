@@ -47,7 +47,7 @@ const META_MARKER = 'name="syncengine-workspace-id"';
  */
 export function injectMetaTags(
     html: string,
-    values: { workspaceId: string; natsUrl: string; restateUrl: string },
+    values: { workspaceId: string; natsUrl: string; restateUrl: string; gatewayUrl?: string },
 ): string {
     if (html.includes(META_MARKER)) return html;
 
@@ -55,6 +55,7 @@ export function injectMetaTags(
         `<meta name="syncengine-workspace-id" content="${escapeAttr(values.workspaceId)}">`,
         `<meta name="syncengine-nats-url" content="${escapeAttr(values.natsUrl)}">`,
         `<meta name="syncengine-restate-url" content="${escapeAttr(values.restateUrl)}">`,
+        ...(values.gatewayUrl ? [`<meta name="syncengine-gateway-url" content="${escapeAttr(values.gatewayUrl)}">`] : []),
     ].join('\n    ');
 
     if (html.includes('</head>')) {

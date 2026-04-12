@@ -11,6 +11,7 @@
 declare module 'virtual:syncengine/runtime-config' {
     export const workspaceId: string;
     export const natsUrl: string;
+    export const gatewayUrl: string;
     export const restateUrl: string;
     export const authToken: string | null;
 }

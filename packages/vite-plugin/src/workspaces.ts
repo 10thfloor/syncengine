@@ -167,6 +167,7 @@ async function loadConfig(
 
 interface DevRuntimeJson {
     natsUrl?: string;
+    gatewayUrl?: string;
     restateUrl?: string;
     authToken?: string | null;
 }
@@ -265,6 +266,7 @@ export function buildRequest(req: Connect.IncomingMessage): Request {
 interface ResolvedWorkspace {
     wsKey: string;
     natsUrl: string;
+    gatewayUrl?: string;
     restateUrl: string;
 }
 
@@ -427,6 +429,7 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
                 // running yet (file missing or unparseable).
                 const runtime = readDevRuntime(viteRoot ?? server.config.root);
                 const natsUrl = runtime.natsUrl ?? 'ws://localhost:9222';
+                const gatewayUrl = runtime.gatewayUrl;
                 const restateUrl = runtime.restateUrl ?? 'http://localhost:8080';
                 const restateForProvision = opts.restateUrl ?? restateUrl;
 
@@ -448,7 +451,7 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
                 // Vite's HTML renderer, which calls transformIndexHtml)
                 // inside our async context so the hook can read the
                 // resolved values without a second call to resolve().
-                const ctx: ResolvedWorkspace = { wsKey, natsUrl, restateUrl };
+                const ctx: ResolvedWorkspace = { wsKey, natsUrl, gatewayUrl, restateUrl };
                 als.run(ctx, () => next());
             });
         },
@@ -470,6 +473,7 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
                 workspaceId: ctx.wsKey,
                 natsUrl: ctx.natsUrl,
                 restateUrl: ctx.restateUrl,
+                gatewayUrl: ctx.gatewayUrl,
             });
         },
     };

@@ -48,6 +48,7 @@ const RESOLVED_ID = '\0' + VIRTUAL_ID;
 export interface RuntimeConfig {
     workspaceId: string;
     natsUrl: string;
+    gatewayUrl?: string;
     restateUrl: string;
     authToken: string | null;
 }
@@ -235,6 +236,7 @@ function normalizeConfig(raw: Partial<RuntimeConfig>): RuntimeConfig {
     return {
         workspaceId: typeof raw.workspaceId === 'string' ? raw.workspaceId : fallback.workspaceId,
         natsUrl: typeof raw.natsUrl === 'string' ? raw.natsUrl : fallback.natsUrl,
+        gatewayUrl: typeof raw.gatewayUrl === 'string' ? raw.gatewayUrl : fallback.gatewayUrl,
         restateUrl: typeof raw.restateUrl === 'string' ? raw.restateUrl : fallback.restateUrl,
         authToken: typeof raw.authToken === 'string' ? raw.authToken : null,
     };
@@ -263,6 +265,7 @@ function renderRuntimeConfigModule(config: RuntimeConfig): string {
     // JSON.stringify escapes for us — safe for both strings and null.
     const fallbackWorkspaceId = JSON.stringify(config.workspaceId);
     const fallbackNatsUrl = JSON.stringify(config.natsUrl);
+    const fallbackGatewayUrl = JSON.stringify(config.gatewayUrl ?? '');
     const fallbackRestateUrl = JSON.stringify(config.restateUrl);
     const fallbackAuthToken = JSON.stringify(config.authToken);
 
@@ -278,6 +281,7 @@ function renderRuntimeConfigModule(config: RuntimeConfig): string {
         ``,
         `export const workspaceId = readMeta('workspace-id', ${fallbackWorkspaceId});`,
         `export const natsUrl = readMeta('nats-url', ${fallbackNatsUrl});`,
+        `export const gatewayUrl = readMeta('gateway-url', ${fallbackGatewayUrl});`,
         `export const restateUrl = readMeta('restate-url', ${fallbackRestateUrl});`,
         `const _authTokenMeta = readMeta('auth-token', '');`,
         `export const authToken = _authTokenMeta || ${fallbackAuthToken};`,

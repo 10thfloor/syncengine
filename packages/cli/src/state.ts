@@ -27,6 +27,7 @@ export interface Ports {
     restateIngress: number;
     restateAdmin: number;
     restateNode: number;
+    gateway: number;
     workspace: number;
     vite: number;
 }
@@ -38,6 +39,7 @@ export const DEFAULT_PORTS: Ports = {
     restateIngress: 8080,
     restateAdmin: 9070,
     restateNode: 5122,
+    gateway: 9333,
     workspace: 9080,
     vite: 5173,
 };
@@ -74,6 +76,8 @@ export interface RuntimeConfig {
     workspaceId?: string;
     /** WebSocket URL the browser connects to for NATS + JetStream. */
     natsUrl: string;
+    /** HTTP URL of the syncengine gateway (Phase 10). */
+    gatewayUrl?: string;
     /** Restate ingress HTTP URL for authority / workspace RPC. */
     restateUrl: string;
     /** Optional JWT for authenticated dev sessions (null in open dev). */
