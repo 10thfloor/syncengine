@@ -26,6 +26,12 @@ import {
     hashWorkspaceId,
     injectMetaTags,
 } from '@syncengine/core/http';
+import {
+    resolveWorkspaceId,
+    resolveWorkflowTarget,
+    resolveEntityTarget,
+    isRpcError,
+} from './rpc-proxy.js';
 import { GatewayServer } from './gateway/server.js';
 import type {
     SyncengineConfig,
@@ -76,11 +82,6 @@ const MIME_TYPES: Record<string, string> = {
 function mimeType(filePath: string): string {
     return MIME_TYPES[extname(filePath).toLowerCase()] ?? 'application/octet-stream';
 }
-
-// ── RPC validation (matches vite-plugin/actors.ts) ─────────────────────────
-
-const NAME_REGEX = /^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$/;
-const WORKSPACE_HEADER_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
 
 // ── User extraction ────────────────────────────────────────────────────────
 
@@ -320,125 +321,33 @@ export function startHttpServer(config: ProductionServerConfig): void {
         restateIngressUrl: string,
     ): Promise<void> {
         const pathname = (req.url ?? '').split('?')[0]!;
+        const isWorkflow = pathname.startsWith('/__syncengine/rpc/workflow/');
 
-        // Workflow RPC: /__syncengine/rpc/workflow/<name>/<invocationId>
-        if (pathname.startsWith('/__syncengine/rpc/workflow/')) {
-            const wfParts = pathname.slice('/__syncengine/rpc/workflow/'.length).split('/');
-            if (wfParts.length !== 2) {
-                res.writeHead(400).end('Expected /__syncengine/rpc/workflow/<name>/<invocationId>');
-                return;
-            }
-            const [wfNameRaw, invocationIdRaw] = wfParts as [string, string];
-            let wfName: string;
-            let invocationId: string;
-            try {
-                wfName = decodeURIComponent(wfNameRaw);
-                invocationId = decodeURIComponent(invocationIdRaw);
-            } catch {
-                res.writeHead(400).end('Malformed URL-encoded path component');
-                return;
-            }
-            if (!NAME_REGEX.test(wfName)) {
-                res.writeHead(400).end('Invalid workflow name');
-                return;
-            }
-            // eslint-disable-next-line no-control-regex
-            if (invocationId.length === 0 || invocationId.length > 512 || /[\x00-\x1f]/.test(invocationId)) {
-                res.writeHead(400).end('Invalid invocationId');
-                return;
-            }
-
-            const body = await readBody(req);
-
-            const headerWs = req.headers['x-syncengine-workspace'];
-            const headerWsValue = Array.isArray(headerWs) ? headerWs[0] : headerWs;
-            let workspaceId: string;
-            if (typeof headerWsValue === 'string' && headerWsValue.length > 0) {
-                if (!WORKSPACE_HEADER_REGEX.test(headerWsValue)) {
-                    res.writeHead(400).end('Invalid x-syncengine-workspace header');
-                    return;
-                }
-                workspaceId = headerWsValue;
-            } else {
-                workspaceId = hashWorkspaceId('default');
-            }
-
-            const targetUrl =
-                `${restateIngressUrl.replace(/\/+$/, '')}/workflow_${wfName}` +
-                `/${encodeURIComponent(`${workspaceId}/${invocationId}`)}/run`;
-
-            try {
-                const upstream = await fetch(targetUrl, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body,
-                });
-                const text = await upstream.text();
-                res.writeHead(upstream.status, {
-                    'content-type': upstream.headers.get('content-type') || 'application/json',
-                }).end(text);
-            } catch (err) {
-                res.writeHead(502, { 'content-type': 'application/json' }).end(
-                    JSON.stringify({
-                        message: `[syncengine] failed to reach Restate at ${targetUrl}: ${(err as Error).message}`,
-                    }),
-                );
-            }
+        // Resolve workspace (shared validation)
+        const wsResult = resolveWorkspaceId(
+            req.headers['x-syncengine-workspace'],
+            () => hashWorkspaceId('default'),
+        );
+        if (isRpcError(wsResult)) {
+            res.writeHead(wsResult.status).end(wsResult.message);
             return;
         }
 
-        const pathParts = pathname.slice('/__syncengine/rpc/'.length).split('/');
-        if (pathParts.length !== 3) {
-            res.writeHead(400).end(`Expected /__syncengine/rpc/<entity>/<key>/<handler>`);
-            return;
-        }
-        const [entityNameRaw, entityKeyRaw, handlerNameRaw] = pathParts as [string, string, string];
-
-        let entityName: string;
-        let entityKey: string;
-        let handlerName: string;
-        try {
-            entityName = decodeURIComponent(entityNameRaw);
-            entityKey = decodeURIComponent(entityKeyRaw);
-            handlerName = decodeURIComponent(handlerNameRaw);
-        } catch {
-            res.writeHead(400).end('Malformed URL-encoded path component');
+        // Resolve target URL (shared validation + URL construction)
+        const target = isWorkflow
+            ? resolveWorkflowTarget(pathname, wsResult, restateIngressUrl)
+            : resolveEntityTarget(pathname, wsResult, restateIngressUrl);
+        if (isRpcError(target)) {
+            res.writeHead(target.status).end(target.message);
             return;
         }
 
-        if (!NAME_REGEX.test(entityName) || !NAME_REGEX.test(handlerName)) {
-            res.writeHead(400).end('Invalid entity or handler name');
-            return;
-        }
-        // eslint-disable-next-line no-control-regex
-        if (entityKey.length === 0 || entityKey.length > 512 || /[\/\\\x00-\x1f]/.test(entityKey)) {
-            res.writeHead(400).end('Invalid entity key');
-            return;
-        }
-
+        // Read body (raw http)
         const body = await readBody(req);
 
-        // Read workspace from header (sent by the client)
-        const headerWs = req.headers['x-syncengine-workspace'];
-        const headerWsValue = Array.isArray(headerWs) ? headerWs[0] : headerWs;
-        let workspaceId: string;
-        if (typeof headerWsValue === 'string' && headerWsValue.length > 0) {
-            if (!WORKSPACE_HEADER_REGEX.test(headerWsValue)) {
-                res.writeHead(400).end('Invalid x-syncengine-workspace header');
-                return;
-            }
-            workspaceId = headerWsValue;
-        } else {
-            workspaceId = hashWorkspaceId('default');
-        }
-
-        const targetUrl =
-            `${restateIngressUrl.replace(/\/+$/, '')}/entity_${entityName}` +
-            `/${encodeURIComponent(`${workspaceId}/${entityKey}`)}` +
-            `/${handlerName}`;
-
+        // Proxy to Restate
         try {
-            const upstream = await fetch(targetUrl, {
+            const upstream = await fetch(target.url, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body,
@@ -450,7 +359,7 @@ export function startHttpServer(config: ProductionServerConfig): void {
         } catch (err) {
             res.writeHead(502, { 'content-type': 'application/json' }).end(
                 JSON.stringify({
-                    message: `[syncengine] failed to reach Restate at ${targetUrl}: ${(err as Error).message}`,
+                    message: `[syncengine] failed to reach Restate at ${target.url}: ${(err as Error).message}`,
                 }),
             );
         }

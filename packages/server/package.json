@@ -8,7 +8,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./workspace": "./src/workspace/workspace.ts",
-    "./serve": "./src/serve.ts"
+    "./serve": "./src/serve.ts",
+    "./rpc-proxy": "./src/rpc-proxy.ts"
   },
   "scripts": {
     "build": "tsc",

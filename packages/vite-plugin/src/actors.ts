@@ -28,6 +28,12 @@ import { join, resolve } from 'node:path';
 import type { Connect, Plugin } from 'vite';
 
 import { hashWorkspaceId } from '@syncengine/core/http';
+import {
+    resolveWorkspaceId,
+    resolveWorkflowTarget,
+    resolveEntityTarget,
+    isRpcError,
+} from '@syncengine/server/rpc-proxy';
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
@@ -543,28 +549,6 @@ function buildStubLiteral(handlerNames: readonly string[]): string {
 // ── Dev middleware: /__syncengine/rpc/<entity>/<key>/<handler> ─────────────
 
 /**
- * Validation regex for entity and handler names. Matches the same
- * constraint enforced by `defineEntity` in core: must start with a
- * letter or underscore followed by at least one alphanumeric (the
- * single-underscore prefix is reserved for framework built-ins like
- * `_read`/`_init`). Unvalidated names forwarded into the Restate URL
- * would allow path traversal attacks (`../admin`) from any browser
- * tab with access to the dev server.
- */
-const NAME_REGEX = /^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$/;
-
-/**
- * Validation regex for incoming `x-syncengine-workspace` headers.
- * In browser traffic the client sends the per-user wsKey that the
- * workspaces sub-plugin injected into the HTML — always a 16-char
- * hex string produced by SHA-256 truncation. The fallback default
- * resolver returns the literal `default` which is also safe. We
- * conservatively allow `[a-zA-Z0-9_-]` up to 64 chars to cover both
- * without opening the door to path traversal or CRLF injection.
- */
-const WORKSPACE_HEADER_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
-
-/**
  * Build a Connect-style middleware that forwards
  * `/__syncengine/rpc/<entity>/<key>/<handler>` POSTs to the framework's
  * Restate entity runtime. The browser posts `[...args]` as the body;
@@ -589,156 +573,38 @@ export function buildRpcMiddleware(
             return;
         }
 
-        // Workflow RPC: /__syncengine/rpc/workflow/<name>/<invocationId>
-        if (req.url.startsWith('/__syncengine/rpc/workflow/')) {
-            const wfParts = req.url.slice('/__syncengine/rpc/workflow/'.length).split('?')[0]!.split('/');
-            if (wfParts.length !== 2) {
-                res.statusCode = 400;
-                res.end('Expected /__syncengine/rpc/workflow/<name>/<invocationId>');
-                return;
-            }
-            const [wfNameRaw, invocationIdRaw] = wfParts as [string, string];
-            let wfName: string;
-            let invocationId: string;
-            try {
-                wfName = decodeURIComponent(wfNameRaw);
-                invocationId = decodeURIComponent(invocationIdRaw);
-            } catch {
-                res.statusCode = 400;
-                res.end('Malformed URL-encoded path component');
-                return;
-            }
-            if (!NAME_REGEX.test(wfName)) {
-                res.statusCode = 400;
-                res.end('Invalid workflow name');
-                return;
-            }
-            // eslint-disable-next-line no-control-regex
-            if (invocationId.length === 0 || invocationId.length > 512 || /[\x00-\x1f]/.test(invocationId)) {
-                res.statusCode = 400;
-                res.end('Invalid invocationId');
-                return;
-            }
+        const pathname = req.url.split('?')[0]!;
+        const isWorkflow = pathname.startsWith('/__syncengine/rpc/workflow/');
 
-            const chunks: Buffer[] = [];
-            for await (const chunk of req) chunks.push(chunk as Buffer);
-            const body = Buffer.concat(chunks).toString('utf8') || '{}';
-
-            const headerWs = req.headers['x-syncengine-workspace'];
-            const headerWsValue = Array.isArray(headerWs) ? headerWs[0] : headerWs;
-            let workspaceId: string;
-            if (typeof headerWsValue === 'string' && headerWsValue.length > 0) {
-                if (!WORKSPACE_HEADER_REGEX.test(headerWsValue)) {
-                    res.statusCode = 400;
-                    res.end('Invalid x-syncengine-workspace header');
-                    return;
-                }
-                workspaceId = headerWsValue;
-            } else {
-                workspaceId = workspaceIdFallbackFn();
-            }
-
-            const restateUrl = restateUrlFn().replace(/\/+$/, '');
-            const targetUrl =
-                `${restateUrl}/workflow_${wfName}` +
-                `/${encodeURIComponent(`${workspaceId}/${invocationId}`)}/run`;
-
-            try {
-                const upstream = await fetch(targetUrl, {
-                    method: 'POST',
-                    headers: { 'content-type': 'application/json' },
-                    body,
-                });
-                const text = await upstream.text();
-                res.statusCode = upstream.status;
-                res.setHeader('content-type', upstream.headers.get('content-type') || 'application/json');
-                res.end(text);
-            } catch (err) {
-                res.statusCode = 502;
-                res.setHeader('content-type', 'application/json');
-                res.end(JSON.stringify({
-                    message: `[syncengine] failed to reach Restate at ${targetUrl}: ${(err as Error).message}`,
-                }));
-            }
+        // Resolve workspace (shared validation)
+        const wsResult = resolveWorkspaceId(
+            req.headers['x-syncengine-workspace'],
+            workspaceIdFallbackFn,
+        );
+        if (isRpcError(wsResult)) {
+            res.statusCode = wsResult.status;
+            res.end(wsResult.message);
             return;
         }
 
-        // URL: /__syncengine/rpc/<entityName>/<entityKey>/<handlerName>
-        const pathParts = req.url.slice('/__syncengine/rpc/'.length).split('?')[0]!.split('/');
-        if (pathParts.length !== 3) {
-            res.statusCode = 400;
-            res.end(`Expected /__syncengine/rpc/<entity>/<key>/<handler>, got ${req.url}`);
-            return;
-        }
-        const [entityNameRaw, entityKeyRaw, handlerNameRaw] = pathParts as [string, string, string];
-
-        // Decode once — the client URL-encodes the key but leaves entity
-        // and handler names alone (they're supposed to be identifiers).
-        let entityName: string;
-        let entityKey: string;
-        let handlerName: string;
-        try {
-            entityName = decodeURIComponent(entityNameRaw);
-            entityKey = decodeURIComponent(entityKeyRaw);
-            handlerName = decodeURIComponent(handlerNameRaw);
-        } catch {
-            res.statusCode = 400;
-            res.end('Malformed URL-encoded path component');
+        // Resolve target URL (shared validation + URL construction)
+        const target = isWorkflow
+            ? resolveWorkflowTarget(pathname, wsResult, restateUrlFn())
+            : resolveEntityTarget(pathname, wsResult, restateUrlFn());
+        if (isRpcError(target)) {
+            res.statusCode = target.status;
+            res.end(target.message);
             return;
         }
 
-        // Harden against path traversal and header injection: entity and
-        // handler names must match the framework's identifier regex
-        // exactly. Entity KEY is user data so it doesn't have to be an
-        // identifier, but we reject slashes and control chars to keep
-        // the composite Restate key well-formed.
-        if (!NAME_REGEX.test(entityName) || !NAME_REGEX.test(handlerName)) {
-            res.statusCode = 400;
-            res.end('Invalid entity or handler name (must match ^([a-zA-Z]|_[a-zA-Z0-9])[a-zA-Z0-9_]*$)');
-            return;
-        }
-        // eslint-disable-next-line no-control-regex
-        if (entityKey.length === 0 || entityKey.length > 512 || /[\/\\\x00-\x1f]/.test(entityKey)) {
-            res.statusCode = 400;
-            res.end('Invalid entity key');
-            return;
-        }
-
-        // Collect body (small — handler args only).
+        // Read body (Connect-specific)
         const chunks: Buffer[] = [];
         for await (const chunk of req) chunks.push(chunk as Buffer);
-        const body = Buffer.concat(chunks).toString('utf8') || '[]';
+        const body = Buffer.concat(chunks).toString('utf8') || (isWorkflow ? '{}' : '[]');
 
-        // Resolve workspace id: prefer the per-request header the
-        // client sends (derived from the injected meta tag), fall
-        // back to the runtime.json / plugin-option default for
-        // legacy clients or raw curl calls during debugging.
-        const headerWs = req.headers['x-syncengine-workspace'];
-        const headerWsValue = Array.isArray(headerWs) ? headerWs[0] : headerWs;
-        let workspaceId: string;
-        if (typeof headerWsValue === 'string' && headerWsValue.length > 0) {
-            if (!WORKSPACE_HEADER_REGEX.test(headerWsValue)) {
-                res.statusCode = 400;
-                res.end('Invalid x-syncengine-workspace header');
-                return;
-            }
-            workspaceId = headerWsValue;
-        } else {
-            workspaceId = workspaceIdFallbackFn();
-        }
-
-        // Forward to Restate. `entityName` and `handlerName` are now
-        // guaranteed identifiers, so the URL interpolation is safe.
-        // The workspaceId+key composite gets encoded because the key
-        // is user data.
-        const restateUrl = restateUrlFn().replace(/\/+$/, '');
-        const targetUrl =
-            `${restateUrl}/entity_${entityName}` +
-            `/${encodeURIComponent(`${workspaceId}/${entityKey}`)}` +
-            `/${handlerName}`;
-
+        // Proxy to Restate
         try {
-            const upstream = await fetch(targetUrl, {
+            const upstream = await fetch(target.url, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body,
@@ -752,7 +618,7 @@ export function buildRpcMiddleware(
             res.setHeader('content-type', 'application/json');
             res.end(
                 JSON.stringify({
-                    message: `[syncengine] failed to reach Restate at ${targetUrl}: ${(err as Error).message}`,
+                    message: `[syncengine] failed to reach Restate at ${target.url}: ${(err as Error).message}`,
                 }),
             );
         }
