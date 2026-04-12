@@ -75,6 +75,9 @@ importers:
       '@syncengine/bin-utils':
         specifier: workspace:*
         version: link:../bin-utils
+      '@syncengine/core':
+        specifier: workspace:^
+        version: link:../core
       '@syncengine/nats-bin':
         specifier: workspace:*
         version: link:../nats-bin

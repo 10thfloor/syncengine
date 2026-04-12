@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@syncengine/bin-utils": "workspace:*",
+    "@syncengine/core": "workspace:^",
     "@syncengine/nats-bin": "workspace:*",
     "@syncengine/restate-bin": "workspace:*",
     "esbuild": "^0.28.0",
