@@ -9,7 +9,9 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@syncengine/bin-utils": "workspace:*",
@@ -21,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "~5.9.3"
+    "typescript": "~5.9.3",
+    "vitest": "^1.0.4"
   }
 }

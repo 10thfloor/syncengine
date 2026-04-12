@@ -17,6 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { banner, note } from './runner';
 import { findAppRoot } from './state';
 import { errors, CliCode } from '@syncengine/core';
+import { planConfigBundle } from './config-bundle';
 
 interface Manifest {
     actors: string[];
@@ -125,8 +126,27 @@ export async function buildCommand(_args: string[]): Promise<void> {
         JSON.stringify({ type: 'module' }, null, 2),
     );
 
+    // 8. Emit dist/server/config.mjs — the isolated user-config bundle
+    //    the serve binary dynamic-imports at startup. Kept separate from
+    //    index.mjs so the HTML server doesn't have to load ~4 MB of
+    //    Restate + NATS runtime just to read a resolve() callback.
+    const configPlan = planConfigBundle({
+        configPath: configPath ? join(appDir, configPath) : null,
+        distDir,
+        appDir,
+    });
+    if (configPlan.kind === 'esbuild') {
+        execFileSync(esbuildBin, configPlan.args as string[], {
+            cwd: appDir,
+            stdio: 'inherit',
+        });
+    } else {
+        writeFileSync(configPlan.outPath, configPlan.content);
+    }
+
     note(`client → ${relative(repoRoot, distDir)}/`);
     note(`server → ${relative(repoRoot, serverOutDir)}/index.mjs`);
+    note(`config → ${relative(repoRoot, serverOutDir)}/config.mjs`);
     banner('build complete');
 }
 
