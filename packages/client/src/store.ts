@@ -53,6 +53,7 @@ import type { SyncConfig } from '@syncengine/core/internal';
 import {
     workspaceId as runtimeWorkspaceId,
     natsUrl as runtimeNatsUrl,
+    gatewayUrl as runtimeGatewayUrl,
     restateUrl as runtimeRestateUrl,
     authToken as runtimeAuthToken,
     // eslint-disable-next-line import/no-unresolved
@@ -356,6 +357,7 @@ export function store<
     const syncConfig: SyncConfig = {
         workspaceId: runtimeWorkspaceId,
         natsUrl: runtimeNatsUrl,
+        gatewayUrl: runtimeGatewayUrl,
         restateUrl: runtimeRestateUrl,
         ...(runtimeAuthToken ? { authToken: runtimeAuthToken } : {}),
         channels: allChannels,

@@ -164,6 +164,7 @@ function broadcastReset(nonce) {
 
 const nats = {
     conn: null,
+    gwWs: null,            // gateway WebSocket (when using gateway transport)
     subs: [],              // one subscription per channel subject
     config: null,          // SyncConfig from store
     routing: null,         // ChannelRouting: { subjects, tableToSubject }
@@ -598,6 +599,219 @@ async function connectNats() {
     }
 }
 
+// ── Gateway transport ─────────────────────────────────────────────────────
+
+/**
+ * Process a single incoming delta (INSERT/DELETE/RESET/SCHEMA_MIGRATION).
+ * Shared between the JetStream consumer path and the gateway message path.
+ */
+function processIncomingDelta(payload, seq) {
+    const isReplay = sync.isReplaying;
+
+    if (payload.type === 'INSERT' && payload.table && payload.record) {
+        handleInsert({ ...payload, _fromNats: true, _isReplay: isReplay });
+    } else if (payload.type === 'DELETE' && payload.table) {
+        handleDelete({ ...payload, _fromNats: true, _isReplay: isReplay });
+    } else if (payload.type === 'RESET') {
+        handleReset();
+    }
+    // SCHEMA_MIGRATION handled elsewhere — skip for now
+}
+
+async function connectGateway() {
+    if (!nats.config) return;
+    if (!nats.routing) {
+        console.warn('[gateway] cannot connect: channel routing not initialized');
+        return;
+    }
+
+    const gatewayUrl = nats.config.gatewayUrl;
+    setConnectionStatus('connecting');
+
+    try {
+        const ws = new WebSocket(gatewayUrl);
+        nats.gwWs = ws;
+
+        await new Promise((resolve, reject) => {
+            ws.onopen = resolve;
+            ws.onerror = reject;
+        });
+
+        console.log(`[gateway] connected to ${gatewayUrl}`);
+
+        // Init handshake
+        ws.send(JSON.stringify({
+            type: 'init',
+            workspaceId: nats.config.workspaceId,
+            channels: nats.routing.channelNames || [],
+            clientId: CLIENT_ID,
+            authToken: nats.config.authToken || undefined,
+        }));
+
+        // Wait for ready
+        await new Promise((resolve, reject) => {
+            const handler = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'ready') {
+                    ws.removeEventListener('message', handler);
+                    resolve();
+                } else if (msg.type === 'error') {
+                    ws.removeEventListener('message', handler);
+                    reject(new Error(msg.message));
+                }
+            };
+            ws.addEventListener('message', handler);
+        });
+
+        // Initialize replay coordination
+        sync.isReplaying = true;
+        const channelNames = nats.routing.channelNames || [];
+        resetReplayCoord(channelNames.length);
+        authority.backoff = 0;
+        authority.backoffUntil = 0;
+
+        // Subscribe to channels with lastSeq for replay
+        for (const chName of channelNames) {
+            const subject = nats.routing.channelNameToSubject
+                ? nats.routing.channelNameToSubject[chName]
+                : nats.routing.subjects[0];
+            const lastSeq = sync.lastProcessedSeqs[subject] || 0;
+            ws.send(JSON.stringify({
+                type: 'subscribe',
+                kind: 'channel',
+                name: chName,
+                lastSeq,
+            }));
+        }
+
+        // Resubscribe topics
+        for (const subKey of topicState.desired) {
+            const sep = subKey.indexOf('/');
+            const name = subKey.slice(0, sep);
+            const key = subKey.slice(sep + 1);
+            ws.send(JSON.stringify({ type: 'subscribe', kind: 'topic', name, key }));
+        }
+
+        // Main message handler
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            handleGatewayMessage(msg);
+        };
+
+        ws.onclose = () => {
+            console.log('[gateway] connection closed');
+            setConnectionStatus('disconnected');
+            nats.gwWs = null;
+            topicState.subs.clear();
+            if (nats.peerAckTimer) { clearInterval(nats.peerAckTimer); nats.peerAckTimer = null; }
+            setTimeout(() => connectGateway(), NATS_RECONNECT_DELAY_MS);
+        };
+
+        ws.onerror = () => {
+            // onclose will fire after onerror
+        };
+
+        setConnectionStatus('connected');
+
+    } catch (e) {
+        const errMsg = e.message || String(e);
+        console.warn('[gateway] connection failed:', errMsg);
+        if (errMsg.includes('authorization') || errMsg.includes('authentication') || errMsg.includes('permission')) {
+            setConnectionStatus('auth_failed');
+        } else {
+            setConnectionStatus('disconnected');
+        }
+        nats.gwWs = null;
+        setTimeout(() => connectGateway(), NATS_RECONNECT_RETRY_MS);
+    }
+}
+
+function handleGatewayMessage(msg) {
+    switch (msg.type) {
+        case 'delta': {
+            // Resolve channel name back to subject for seq tracking
+            const subject = nats.routing?.channelNameToSubject
+                ? nats.routing.channelNameToSubject[msg.channel]
+                : null;
+            if (!subject) break;
+            const payload = msg.payload;
+
+            // Dedup by nonce
+            if (payload._nonce && dedup(payload._nonce)) break;
+
+            // Merge remote HLC
+            if (payload._hlc) hlcMerge(payload._hlc);
+
+            // Track per-subject high-water mark
+            if (msg.seq) sync.lastProcessedSeqs[subject] = msg.seq;
+
+            // Process through DBSP (same path as processConsumer)
+            processIncomingDelta(payload, msg.seq);
+            break;
+        }
+
+        case 'entity-write': {
+            const payload = msg.payload;
+            if (payload._nonce && dedup(payload._nonce)) break;
+            if (payload._hlc) hlcMerge(payload._hlc);
+            const ewSubject = `ws.${nats.config.workspaceId}.entity-writes`;
+            if (msg.seq) sync.lastProcessedSeqs[ewSubject] = msg.seq;
+            processIncomingDelta(payload, msg.seq);
+            break;
+        }
+
+        case 'replay-end': {
+            // Map channel name to subject for the replay coord
+            const subject = nats.routing?.channelNameToSubject
+                ? nats.routing.channelNameToSubject[msg.channel]
+                : msg.channel;
+            markConsumerCaughtUp(subject);
+            break;
+        }
+
+        case 'authority': {
+            const { viewName, payload } = msg;
+            if (payload.type !== 'AUTHORITY_UPDATE') break;
+            const { seq, deltas } = payload;
+            const lastSeq = authority.seqs[viewName] || 0;
+            if (seq <= lastSeq) break;
+            authority.seqs[viewName] = seq;
+            self.postMessage({
+                type: 'VIEW_UPDATE',
+                viewName,
+                deltas: deltas.map(d => ({ record: d.record, weight: d.weight })),
+            });
+            break;
+        }
+
+        case 'gc': {
+            const payload = msg.payload;
+            if (payload.type === 'GC_COMPLETE' && payload.gcWatermark && nats.routing) {
+                for (const s of nats.routing.subjects) {
+                    if ((sync.lastProcessedSeqs[s] || 0) < payload.gcWatermark) {
+                        sync.lastProcessedSeqs[s] = payload.gcWatermark;
+                    }
+                }
+            }
+            break;
+        }
+
+        case 'topic': {
+            const { name, key, payload } = msg;
+            self.postMessage({
+                type: 'TOPIC_UPDATE',
+                name,
+                key,
+                peerId: payload.peerId || payload._clientId,
+                data: payload.data || payload,
+                ts: payload.ts,
+                leave: !!payload.$leave,
+            });
+            break;
+        }
+    }
+}
+
 // ── GC subscription ─────────────────────────────────────────────────────────
 
 function subscribeGC(codec) {
@@ -675,8 +889,21 @@ async function watchDisconnect() {
 
 function sendToAuthority(viewName, deltas) {
     if (!nats.config) return;
-    if (!nats.conn || nats.conn.isClosed()) return;
     if (Date.now() < authority.backoffUntil) return;
+
+    // Gateway path — send authority via gateway
+    if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
+        nats.gwWs.send(JSON.stringify({
+            type: 'publish',
+            kind: 'authority',
+            viewName,
+            deltas,
+        }));
+        return;
+    }
+
+    // Direct path (existing code)
+    if (!nats.conn || nats.conn.isClosed()) return;
 
     const url = `${authority.restateUrl}/workspace/${nats.config.workspaceId}/authority`;
     const headers = { 'Content-Type': 'application/json' };
@@ -757,6 +984,15 @@ function natsPublish(msg) {
         return;
     }
 
+    // Gateway path — publish via gateway WebSocket
+    if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
+        for (const s of subjects) {
+            nats.gwWs.send(JSON.stringify({ type: 'publish', kind: 'delta', subject: s, payload: msg }));
+        }
+        return;
+    }
+
+    // Direct NATS path (existing code)
     if (nats.conn && !nats.conn.isClosed()) {
         import('nats.ws').then(({ JSONCodec }) => {
             const codec = JSONCodec();
@@ -1090,7 +1326,30 @@ async function handleInit(data) {
             if (!nats.outboundQueues[s]) nats.outboundQueues[s] = [];
         }
 
-        connectNats();
+        // Add channel name mappings for gateway transport
+        const channelNames = [];
+        const channelNameToSubject = {};
+        if (data.sync.channels) {
+            for (const ch of data.sync.channels) {
+                const chName = ch.name;
+                const subject = `ws.${data.sync.workspaceId}.ch.${chName}.deltas`;
+                channelNames.push(chName);
+                channelNameToSubject[chName] = subject;
+            }
+        }
+        // Legacy (no channels) — single default subject
+        if (channelNames.length === 0 && nats.routing.subjects.length === 1) {
+            channelNames.push('__default__');
+            channelNameToSubject['__default__'] = nats.routing.subjects[0];
+        }
+        nats.routing.channelNames = channelNames;
+        nats.routing.channelNameToSubject = channelNameToSubject;
+
+        if (data.sync.gatewayUrl) {
+            connectGateway();
+        } else {
+            connectNats();
+        }
     }
 
     // Flush queued messages
@@ -1242,6 +1501,16 @@ async function handleTopicSubscribe({ name, key }) {
     const subKey = `${name}/${key}`;
     topicState.desired.add(subKey);
 
+    // Gateway path — interest registration instead of NATS sub
+    if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
+        if (!topicState.subs.has(subKey)) {
+            nats.gwWs.send(JSON.stringify({ type: 'subscribe', kind: 'topic', name, key }));
+            topicState.subs.set(subKey, { gateway: true });
+        }
+        return;
+    }
+
+    // Direct NATS path (existing code)
     if (!nats.conn || nats.conn.isClosed()) return; // will re-subscribe on reconnect
     if (topicState.subs.has(subKey)) return; // already subscribed
 
@@ -1274,6 +1543,19 @@ async function handleTopicSubscribe({ name, key }) {
 }
 
 async function handleTopicPublish({ name, key, data }) {
+    // Gateway path
+    if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
+        const subject = topicSubject(name, key);
+        nats.gwWs.send(JSON.stringify({
+            type: 'publish',
+            kind: 'topic',
+            subject,
+            payload: { _clientId: CLIENT_ID, peerId: CLIENT_ID, data, ts: Date.now() },
+        }));
+        return;
+    }
+
+    // Direct NATS path (existing code)
     if (!nats.conn || nats.conn.isClosed()) return; // drop silently when offline
     const codec = await ensureTopicCodec();
 
@@ -1288,6 +1570,19 @@ async function handleTopicPublish({ name, key, data }) {
 
 /** Publish a leave signal without tearing down the subscription. */
 async function handleTopicLeave({ name, key }) {
+    // Gateway path
+    if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
+        const subject = topicSubject(name, key);
+        nats.gwWs.send(JSON.stringify({
+            type: 'publish',
+            kind: 'topic',
+            subject,
+            payload: { _clientId: CLIENT_ID, peerId: CLIENT_ID, $leave: true, ts: Date.now() },
+        }));
+        return;
+    }
+
+    // Direct NATS path (existing code)
     if (!nats.conn || nats.conn.isClosed()) return;
     const codec = await ensureTopicCodec();
     const subject = topicSubject(name, key);
@@ -1302,18 +1597,23 @@ async function handleTopicLeave({ name, key }) {
 async function handleTopicUnsubscribe({ name, key }) {
     const subKey = `${name}/${key}`;
 
-    // Publish leave signal before unsubscribing
+    // Publish leave signal
     await handleTopicLeave({ name, key });
 
-    // Tear down the NATS subscription
-    const entry = topicState.subs.get(subKey);
-    if (entry) {
-        entry.natsSub.unsubscribe();
+    // Gateway path — send unsubscribe
+    if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
+        nats.gwWs.send(JSON.stringify({ type: 'unsubscribe', kind: 'topic', name, key }));
         topicState.subs.delete(subKey);
+        topicState.desired.delete(subKey);
+        return;
     }
 
-    // Remove from desired AFTER cleanup so a reconnect during
-    // this window doesn't lose the subscription prematurely.
+    // Direct NATS path (existing code)
+    const entry = topicState.subs.get(subKey);
+    if (entry && entry.natsSub) {
+        entry.natsSub.unsubscribe();
+    }
+    topicState.subs.delete(subKey);
     topicState.desired.delete(subKey);
 }
 

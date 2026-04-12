@@ -16,6 +16,9 @@ export interface SyncConfig {
     workspaceId: string;
     /** default: ws://localhost:9222 */
     natsUrl?: string;
+    /** WebSocket gateway URL (e.g. ws://localhost:4800). When set, the
+     *  data-worker connects via the gateway instead of direct NATS. */
+    gatewayUrl?: string;
     /** default: http://localhost:8080 */
     restateUrl?: string;
     /** JWT for NATS + Restate auth */
