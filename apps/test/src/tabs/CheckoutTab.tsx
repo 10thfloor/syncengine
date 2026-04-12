@@ -49,21 +49,20 @@ const CheckoutFlow = memo(function CheckoutFlow({
   const [buying, setBuying] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const st = state as Record<string, unknown> | null;
-  const stock = (st?.stock as number) ?? 0;
-  const reserved = (st?.reserved as number) ?? 0;
-  const reservedBy = (st?.reservedBy as string) ?? '';
+  const stock = state?.stock ?? 0;
+  const reserved = state?.reserved ?? 0;
+  const reservedBy = state?.reservedBy ?? '';
   const isReservedByMe = reservedBy === userId;
   const available = stock - reserved;
 
   // Sync reservation state from entity
   useEffect(() => {
-    if (isReservedByMe && st?.reservedAt) {
-      setReservedAt(st.reservedAt as number);
+    if (isReservedByMe && state?.reservedAt) {
+      setReservedAt(state.reservedAt);
     } else {
       setReservedAt(null);
     }
-  }, [isReservedByMe, st?.reservedAt]);
+  }, [isReservedByMe, state?.reservedAt]);
 
   // Countdown timer
   useEffect(() => {

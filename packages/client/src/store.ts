@@ -44,6 +44,8 @@ import {
     type EntityStateShape,
     type EntityState,
     type EntityHandlerMap,
+    type SourceProjectionDef,
+    type SourceState,
 } from '@syncengine/core';
 import { useEntity as useEntityImpl, type UseEntityResult } from './entity-client';
 import type { SyncConfig } from '@syncengine/core/internal';
@@ -218,10 +220,15 @@ export interface Store<
 
     /** Subscribe to a durable entity (Restate actor). Returns optimistic
      *  state with latency compensation and typed action proxies. */
-    useEntity<TName extends string, TShape extends EntityStateShape, THandlers extends EntityHandlerMap<EntityState<TShape>>>(
-        entityDef: EntityDef<TName, TShape, THandlers>,
+    useEntity<
+        TName extends string,
+        TShape extends EntityStateShape,
+        TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
+        THandlers extends EntityHandlerMap<EntityState<TShape> & SourceState<TSource>> = EntityHandlerMap<EntityState<TShape> & SourceState<TSource>>,
+    >(
+        entityDef: EntityDef<TName, TShape, THandlers, TSource>,
         key: string,
-    ): UseEntityResult<EntityState<TShape>, THandlers>;
+    ): UseEntityResult<EntityState<TShape> & SourceState<TSource>, THandlers>;
 
     /** Subscribe to an ephemeral topic. Returns a reactive peer map and
      *  a publish function for broadcasting this peer's state. */

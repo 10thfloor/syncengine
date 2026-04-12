@@ -31,9 +31,8 @@ const ProductCard = memo(function ProductCard({
   const [error, setError] = useState<string | null>(null);
   const seededRef = useRef(false);
 
-  const st = state as Record<string, unknown> | null;
-  const stock = (st?.stock as number) ?? 0;
-  const totalSold = (st?.totalSold as number) ?? 0;
+  const stock = state?.stock ?? 0;
+  const totalSold = state?.totalSold ?? 0;
   const initialStock = INITIAL_STOCK[slug];
 
   async function handleRestock(amount: number) {

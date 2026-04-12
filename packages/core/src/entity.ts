@@ -65,6 +65,13 @@ export type EntityHandlerMap<TState> = Record<
   EntityHandler<TState, readonly never[]>
 >;
 
+// ── Source state mapping ───────────────────────────────────────────────────
+
+/** Maps source projection definitions to their runtime type (always number). */
+export type SourceState<
+  TSource extends Record<string, SourceProjectionDef>,
+> = { readonly [K in keyof TSource]: number };
+
 // ── Entity definition ──────────────────────────────────────────────────────
 
 /**
@@ -76,7 +83,9 @@ export type EntityHandlerMap<TState> = Record<
 export interface EntityDef<
   TName extends string,
   TShape extends EntityStateShape,
-  THandlers extends EntityHandlerMap<EntityState<TShape>>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  THandlers extends EntityHandlerMap<any>,
+  TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
 > {
   readonly $tag: "entity";
   readonly $name: TName;
@@ -87,7 +96,7 @@ export interface EntityDef<
   readonly $initialState: EntityState<TShape>;
   /** Source projection definitions (Variation D). Empty if no `source`
    *  was declared on the entity. */
-  readonly $source: SourceProjections;
+  readonly $source: TSource;
   /** Initial projection values (sum/count → 0, min → Infinity, etc.) */
   readonly $sourceInitial: Record<string, number>;
   /** Phantom field carrying the inferred state record type for callers
@@ -95,14 +104,18 @@ export interface EntityDef<
   readonly $record: EntityState<TShape>;
 }
 
-/** Type-level shortcut: extract the state record type from an EntityDef. */
+/** Type-level shortcut: extract the state record type from an EntityDef,
+ *  including source projection fields (always `number`). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type EntityRecord<E> =
-  E extends EntityDef<string, infer TShape, any> ? EntityState<TShape> : never;
+  E extends EntityDef<string, infer TShape, any, infer TSource>
+    ? EntityState<TShape> & SourceState<TSource>
+    : never;
 
 /** Type-level shortcut: extract the handler map from an EntityDef. */
 export type EntityHandlers<E> =
-  E extends EntityDef<string, EntityStateShape, infer THandlers>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  E extends EntityDef<string, EntityStateShape, infer THandlers, any>
     ? THandlers
     : never;
 
@@ -231,15 +244,18 @@ export { entity as defineEntity };
 export function entity<
   const TName extends string,
   TShape extends EntityStateShape,
-  THandlers extends EntityHandlerMap<EntityState<TShape>>,
+  TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
+  THandlers extends EntityHandlerMap<
+    EntityState<TShape> & SourceState<TSource>
+  > = EntityHandlerMap<EntityState<TShape> & SourceState<TSource>>,
 >(
   name: TName,
   config: {
     readonly state: TShape;
-    readonly source?: SourceProjections;
+    readonly source?: TSource;
     readonly handlers: THandlers;
   },
-): EntityDef<TName, TShape, THandlers> {
+): EntityDef<TName, TShape, THandlers, TSource> {
   // Runtime guards: catch the easy mistakes at construction time so the
   // user sees them on import, not on first handler call.
   if (!name || typeof name !== "string") {
@@ -308,7 +324,7 @@ export function entity<
     $state: config.state,
     $handlers: config.handlers,
     $initialState: buildInitialState(config.state),
-    $source: source,
+    $source: source as TSource,
     $sourceInitial: buildSourceInitial(source),
     $record: undefined as never,
   };
@@ -733,10 +749,10 @@ export function rebase(
 
 /** Generic alias used in function signatures that accept any entity, the
  *  same way `AnyTable` is used for tables. We use `any` for the handler-map
- *  parameter because the constraint `EntityHandlerMap<EntityState<TShape>>`
- *  binds two generics together — `unknown` is too narrow to satisfy it,
- *  and there's no other way to express "any handler map" without losing
- *  the binding. Function signatures that accept `AnyEntity` must not
- *  reach into handler argument types — those are erased at this layer. */
+ *  and source parameters because the constraint binds multiple generics
+ *  together — `unknown` is too narrow to satisfy it, and there's no other
+ *  way to express "any handler map / source" without losing the binding.
+ *  Function signatures that accept `AnyEntity` must not reach into handler
+ *  argument types — those are erased at this layer. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AnyEntity = EntityDef<string, EntityStateShape, any>;
+export type AnyEntity = EntityDef<string, EntityStateShape, any, any>;

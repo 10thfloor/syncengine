@@ -1,24 +1,68 @@
+// ── Inventory Actor ─────────────────────────────────────────────────────────
+//
+// Demonstrates three syncengine patterns:
+//
+//   1. Entity as a keyed singleton — each product slug ("headphones",
+//      "keyboard", …) maps to exactly one Restate virtual-object instance.
+//      `useEntity(inventory, slug)` in CatalogTab and CheckoutTab binds a
+//      React component to that instance with optimistic state, latency
+//      compensation, and real-time NATS broadcasts across tabs/users.
+//
+//   2. emit() — side-effect channel from actor to relational pipeline.
+//      `sell()` returns `emit(newState, { table, record })`: the state
+//      update is applied to the Restate object AND the emitted row is
+//      inserted into the `transactions` table, which feeds every DBSP
+//      view in schema.ts (salesByProduct, recentActivity, totalSales).
+//      The UI never issues a separate write — the actor is the single
+//      source of truth and the pipeline reacts automatically.
+//
+//   3. sourceCount() — reverse projection from table back into entity
+//      state. `totalSold` is not stored by the handlers; it is maintained
+//      incrementally by the framework from `count(transactions)` where
+//      `productSlug = entityKey`. The catalog card reads it as a normal
+//      state field to show "N sold" without a separate query.
+//
+// ── How it fits into the demo ───────────────────────────────────────────────
+//
+//   CatalogTab  → useEntity(inventory, slug)  → restock button
+//   CheckoutTab → useEntity(inventory, slug)  → reserve / sell saga
+//     └─ sell() emits a `transactions` row  ──→ DBSP views update live
+//     └─ CheckoutTab then calls order.place() via RPC (saga step 2)
+//   ActivityTab → useView({ salesByProduct, recentActivity, totalSales })
+//     └─ reads the rows emitted by sell(), rendered as a live dashboard
+
 import { entity, integer, text, emit, sourceCount } from '@syncengine/core';
 import { transactions } from '../schema';
 
+// Reservation TTL — if a client disappears, the lock auto-expires so
+// another user can purchase. Matches RESERVATION_TTL_MS in CheckoutTab.
 const STALE_MS = 30_000;
 
 export const inventory = entity('inventory', {
   state: {
     stock: integer(),
     reserved: integer(),
-    reservedBy: text(),
-    reservedAt: integer(),
+    reservedBy: text(),  // userId holding the current reservation (or '')
+    reservedAt: integer(), // epoch-ms when the reservation was acquired
   },
+
+  // Reverse projection: the framework keeps `totalSold` in sync with
+  // count(*) from the `transactions` table where productSlug = this key.
+  // Handlers don't need to manage it — it appears as a read-only state field.
   source: {
     totalSold: sourceCount(transactions, transactions.productSlug),
   },
+
   handlers: {
+    // ── Simple state mutation (CatalogTab "Restock +5" button) ──────
     restock(state, amount: number) {
       if (amount <= 0) throw new Error('restock amount must be positive');
       return { ...state, stock: state.stock + amount };
     },
 
+    // ── Reservation with TTL-based lease (CheckoutTab) ──────────────
+    // Only one user can hold a reservation at a time. If the holder's
+    // TTL expires, the next caller transparently reclaims it.
     reserve(state, userId: string, now: number) {
       let current = state;
       if (current.reservedBy && current.reservedAt > 0 && now - current.reservedAt > STALE_MS) {
@@ -52,6 +96,17 @@ export const inventory = entity('inventory', {
       };
     },
 
+    // ── Sell: the first half of the checkout saga (CheckoutTab) ─────
+    // Consumes the reservation, decrements stock, and emits a row into
+    // the `transactions` table. The emitted row flows through the DBSP
+    // pipeline — salesByProduct, recentActivity, and totalSales views
+    // all update incrementally and push changes to every connected
+    // client via NATS. '$key' is a framework placeholder that resolves
+    // to this entity's key (the product slug) at insert time.
+    //
+    // After sell() succeeds, CheckoutTab fires saga step 2: an RPC to
+    // order.place() which creates the order entity and emits into the
+    // orderIndex table — a two-actor saga coordinated from the client.
     sell(state, userId: string, _orderId: string, price: number, now: number) {
       if (state.reservedBy !== userId) {
         throw new Error('You must hold a reservation to purchase');
@@ -60,7 +115,6 @@ export const inventory = entity('inventory', {
         throw new Error('Reservation has expired');
       }
 
-      const s = state as Record<string, unknown>;
       return emit(
         {
           ...state,
@@ -68,7 +122,7 @@ export const inventory = entity('inventory', {
           reserved: state.reserved - 1,
           reservedBy: '',
           reservedAt: 0,
-          totalSold: ((s.totalSold as number) ?? 0) + 1,
+          totalSold: (state.totalSold ?? 0) + 1,
         },
         {
           table: 'transactions',

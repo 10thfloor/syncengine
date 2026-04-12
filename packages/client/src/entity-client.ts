@@ -50,6 +50,8 @@ import {
     type EntityHandlerMap,
     type EntityHandler,
     type PendingActionLike,
+    type SourceProjectionDef,
+    type SourceState,
 } from '@syncengine/core';
 import {
     workspaceId as runtimeWorkspaceId,
@@ -486,11 +488,12 @@ async function invokeHandler(
 export function useEntity<
     TName extends string,
     TShape extends EntityStateShape,
-    THandlers extends EntityHandlerMap<EntityState<TShape>>,
+    TSource extends Record<string, SourceProjectionDef> = Record<never, SourceProjectionDef>,
+    THandlers extends EntityHandlerMap<EntityState<TShape> & SourceState<TSource>> = EntityHandlerMap<EntityState<TShape> & SourceState<TSource>>,
 >(
-    entity: EntityDef<TName, TShape, THandlers>,
+    entity: EntityDef<TName, TShape, THandlers, TSource>,
     key: string,
-): UseEntityResult<EntityState<TShape>, THandlers> {
+): UseEntityResult<EntityState<TShape> & SourceState<TSource>, THandlers> {
     // Memoize by (entity, key) tuple — a re-render with the same arguments
     // must reuse the same subscription. We track the last (entity, key)
     // pair via a ref and only rebuild when one of them changes.
@@ -556,14 +559,15 @@ export function useEntity<
     // Build the typed action proxy. We rebuild on every render — the
     // closure captures `entity` and `key` so it stays correct under
     // re-renders, and the proxy itself is cheap to construct.
-    const actions = buildActionProxy<EntityState<TShape>, THandlers>(
+    type FullState = EntityState<TShape> & SourceState<TSource>;
+    const actions = buildActionProxy<FullState, THandlers>(
         entity as unknown as AnyEntity,
         key,
         sub,
     );
 
     return {
-        state: stateSnapshot as EntityState<TShape> | null,
+        state: stateSnapshot as FullState | null,
         actions,
         ready: readySnapshot,
         error: errorSnapshot,

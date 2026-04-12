@@ -90,6 +90,7 @@ export type {
     EmitInsert,
     SourceProjectionDef,
     SourceProjections,
+    SourceState,
     EntityDef,
     AnyEntity,
     EntityState,
