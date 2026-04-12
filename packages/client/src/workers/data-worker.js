@@ -263,18 +263,11 @@ function emitSyncStatus(phase, messagesReplayed, extra = {}) {
 async function finalizeReplay() {
     sync.isReplaying = false;
 
-    // Replay may have applied RESET messages that wiped DBSP state
-    // (including join indexes). Rebuild DBSP from SQLite so all views —
-    // especially joins — have correct state before going live.
-    //
-    // Clear the main thread's view snapshots BEFORE re-hydrating. The
-    // initial hydrate (handleInit) and incremental replay steps have been
-    // writing VIEW_UPDATEs into the main thread's snapshots, but those
-    // are now stale — dbsp.reset() wipes the engine, and hydrateFromSQLite
-    // rebuilds from the authoritative SQLite state. Without this clear,
-    // entries deleted during replay survive as ghost rows because the
-    // re-hydration only emits weight=1 (additions), never retractions for
-    // rows that no longer exist.
+    // Rebuild DBSP from the authoritative SQLite state (which now
+    // contains all replayed messages). The empty FULL_SYNC clears ghost
+    // rows on the main thread; hydrateFromSQLite sends VIEW_UPDATEs to
+    // restore the correct data. The store buffers the clear so React
+    // never sees empty views between the two messages.
     self.postMessage({ type: 'FULL_SYNC', snapshots: {} });
     dbsp.reset();
     hydrateFromSQLite(schemaTables);

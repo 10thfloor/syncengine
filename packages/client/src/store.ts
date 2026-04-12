@@ -396,6 +396,7 @@ export function store<
     const viewSnapshots = new Map<string, unknown[]>();
     const viewSubscribers = new Map<string, Set<() => void>>();
     const EMPTY: readonly unknown[] = Object.freeze([]);
+    const EMPTY_TOPIC_PEERS = new Map<string, Record<string, unknown>>();
 
     let undoSize = 0;
     const undoSubscribers = new Set<() => void>();
@@ -410,6 +411,12 @@ export function store<
 
     let conflictLog: ConflictRecord[] = [];
     const conflictSubscribers = new Set<() => void>();
+
+    // When an empty FULL_SYNC arrives (replay finalize), we defer the
+    // view clear until the first VIEW_UPDATE lands. This prevents React
+    // from committing empty views between the clear and the rebuild —
+    // they arrive in separate macrotasks so React would render the gap.
+    let pendingViewClear = false;
 
     // ── Topic state (ephemeral pub/sub) ────────────────────────────────
     const topicPeers = new Map<string, Map<string, Record<string, unknown>>>();
@@ -517,12 +524,22 @@ export function store<
             switch (msg.type) {
                 case 'READY':
                     ready = true;
+                    pendingViewClear = false;
                     readyListeners.forEach((fn) => fn());
                     readyListeners.clear();
                     applySeeds();
                     break;
 
                 case 'VIEW_UPDATE':
+                    if (pendingViewClear) {
+                        // Flush the deferred clear from the empty FULL_SYNC.
+                        // Clear all views, then apply this first delta — React
+                        // sees one transition (old → new), never old → empty → new.
+                        for (const viewId of viewSnapshots.keys()) {
+                            viewSnapshots.set(viewId, []);
+                        }
+                        pendingViewClear = false;
+                    }
                     applyDeltas(msg.viewName, msg.deltas);
                     break;
 
@@ -557,27 +574,30 @@ export function store<
                 }
 
                 case 'FULL_SYNC':
-                    for (const [viewId, records] of Object.entries(msg.snapshots)) {
-                        viewSnapshots.set(viewId, records);
-                        notifyView(viewId);
-                    }
-                    for (const viewId of viewSnapshots.keys()) {
-                        if (!(viewId in msg.snapshots)) {
-                            viewSnapshots.set(viewId, []);
-                            notifyView(viewId);
-                        }
-                    }
                     if (Object.keys(msg.snapshots).length === 0) {
-                        // Empty FULL_SYNC means the worker has wiped all
-                        // snapshots — typically after RESET. Clear the
-                        // conflict log and re-seed immediately, because the
-                        // worker doesn't re-enter the replay→live cycle after
-                        // a reset — phase=live won't fire again to trigger
-                        // the gated re-seed from the SYNC_STATUS branch.
+                        // Empty FULL_SYNC from replay finalize: the worker is
+                        // about to send VIEW_UPDATEs with the rebuilt data.
+                        // DEFER the clear until the first VIEW_UPDATE arrives
+                        // so React never sees empty views (they'd arrive in
+                        // separate macrotasks → flash of empty content).
+                        pendingViewClear = true;
                         conflictLog = [];
                         conflictSubscribers.forEach((fn) => fn());
                         seedsApplied = false;
                         applySeeds();
+                    } else {
+                        // Non-empty FULL_SYNC (e.g., user RESET with snapshot):
+                        // apply immediately.
+                        for (const [viewId, records] of Object.entries(msg.snapshots)) {
+                            viewSnapshots.set(viewId, records);
+                            notifyView(viewId);
+                        }
+                        for (const viewId of viewSnapshots.keys()) {
+                            if (!(viewId in msg.snapshots)) {
+                                viewSnapshots.set(viewId, []);
+                                notifyView(viewId);
+                            }
+                        }
                     }
                     break;
 
@@ -815,11 +835,15 @@ export function store<
                     const peers = topicPeers.get(subKey);
                     if (!peers || peers.size === 0) return;
                     const now = Date.now();
-                    const next = new Map(
-                        [...peers].filter(([, entry]) => now - (entry.$ts as number) <= ttl),
-                    );
-                    if (next.size !== peers.size) {
-                        topicPeers.set(subKey, next);
+                    let changed = false;
+                    for (const [peerId, entry] of peers) {
+                        if (now - (entry.$ts as number) > ttl) {
+                            peers.delete(peerId);
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        topicPeers.set(subKey, new Map(peers));
                         topicSubscribers.get(subKey)?.forEach((fn) => fn());
                     }
                 }, 1000);
@@ -854,10 +878,9 @@ export function store<
             [subKey],
         );
 
-        const EMPTY_MAP = useMemo(() => new Map<string, Record<string, unknown>>(), []);
         const peers = useSyncExternalStore(
             subscribe,
-            () => topicPeers.get(subKey) ?? EMPTY_MAP,
+            () => topicPeers.get(subKey) ?? EMPTY_TOPIC_PEERS,
         );
 
         // Throttled publish.

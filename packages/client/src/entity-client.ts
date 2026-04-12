@@ -39,7 +39,7 @@
 // the same code runs on the client and the server, so the optimistic
 // guess matches the authoritative result modulo concurrent writes.
 
-import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useRef, useSyncExternalStore } from 'react';
 import {
     applyHandler,
     rebase,
@@ -200,7 +200,7 @@ function getOrCreateSubscription(
     //    dispatch during the mount) get rebased on top.
     void invokeHandler(entity, key, '_read', [])
         .then((state) => {
-            setConfirmed(sub, entity, state);
+            setConfirmed(sub, state);
             sub.ready = true;
             notify(sub);
         })
@@ -237,7 +237,7 @@ function getOrCreateSubscription(
                             // (self-echo protection). Only notify React if
                             // something actually changed for the UI.
                             const prevOptimistic = sub.optimistic;
-                            setConfirmed(sub, entity, decoded.state);
+                            setConfirmed(sub, decoded.state);
                             if (sub.optimistic !== prevOptimistic || !wasReady) {
                                 notify(sub);
                             }
@@ -274,29 +274,24 @@ function getOrCreateSubscription(
  *  (they'll be resolved/rejected by their in-flight server response). */
 function setConfirmed(
     sub: EntitySubscription,
-    entity: AnyEntity,
     next: Record<string, unknown>,
 ): void {
     sub.confirmed = next;
 
     // While actions are in flight, skip the rebase. The optimistic state
-    // already reflects the pending actions on top of the OLD confirmed.
-    // The new confirmed (from a NATS broadcast) may already include the
-    // pending action's effect — rebasing would double-apply it, causing
-    // a visible spike (e.g., $200 → $300 → $200). The POST response
-    // will remove the pending action and trigger a clean rebase.
+    // already reflects pending actions on top of the OLD confirmed. The
+    // new confirmed (from a NATS broadcast) may already include the
+    // pending action's effect — rebasing would double-apply it (e.g.,
+    // $200 → $300 → $200). The POST response removes the pending action
+    // and triggers a clean rebase.
     if (sub.pending.length > 0) return;
 
-    const result = rebase(entity, sub.confirmed, sub.pending);
-    // Referential stability: keep the old optimistic reference if values
-    // match. useSyncExternalStore uses Object.is — same ref = no re-render.
-    sub.optimistic = shallowEqual(sub.optimistic, result.state)
+    // No pending actions — optimistic should equal confirmed. Use
+    // referential stability so useSyncExternalStore skips re-renders
+    // when the values haven't changed (e.g., NATS echo of POST result).
+    sub.optimistic = shallowEqual(sub.optimistic, next)
         ? sub.optimistic
-        : result.state;
-    if (result.failedIds.length > 0) {
-        const failedSet = new Set(result.failedIds);
-        sub.pending = sub.pending.filter((a) => !failedSet.has(a.id));
-    }
+        : next;
 }
 
 function shallowEqual(
@@ -475,16 +470,6 @@ export function useEntity<
         sub,
     );
 
-    // Cleanup on unmount: useEffect with empty deps so it fires once per
-    // mount and the cleanup runs on unmount only.
-    useEffect(() => {
-        return () => {
-            // No-op here — the unsubscribe inside `subscribe` already
-            // handles disposal of the underlying subscription. We keep
-            // this effect so future cleanup logic has a hook.
-        };
-    }, []);
-
     return {
         state: stateSnapshot as EntityState<TShape> | null,
         actions,
@@ -566,7 +551,7 @@ function buildActionProxy<TState, THandlers>(
                 const confirmedState = await invokeHandler(entity, key, name, args);
                 const prevOptimistic = sub.optimistic;
                 sub.pending = sub.pending.filter((a) => a.id !== action.id);
-                setConfirmed(sub, entity, confirmedState);
+                setConfirmed(sub, confirmedState);
                 sub.ready = true;
                 // Only notify React if the optimistic state actually
                 // changed. The pending count going 1→0 is not a visible
