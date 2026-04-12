@@ -1,5 +1,5 @@
 import { useEffect, useRef, useMemo, useState } from "react";
-import { store, useStore, useEntity } from "@syncengine/client";
+import { store, useStore } from "@syncengine/client";
 
 // ── Schema: tables, views, channels ─────────────────────────────
 // Tables are CRDT-replicated rows synced via JetStream. Views are
@@ -53,11 +53,11 @@ export default function App() {
   const color = useMemo(randomColor, []);
 
   // ── Entities: durable actors via Restate ──────────────────────
-  const { state: counterState, actions: counterActions } = useEntity(
+  const { state: counterState, actions: counterActions } = s.useEntity(
     counter,
     "global",
   );
-  const { state: acctState, actions: acctActions } = useEntity(account, userId);
+  const { state: acctState, actions: acctActions } = s.useEntity(account, userId);
   const [acctError, setAcctError] = useState<string | null>(null);
 
   // ── Topics: ephemeral peer state via NATS core ────────────────

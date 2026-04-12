@@ -40,9 +40,12 @@ import {
     type SyncStatus,
     type ConflictRecord,
     type TopicDef,
+    type EntityDef,
     type EntityStateShape,
     type EntityState,
+    type EntityHandlerMap,
 } from '@syncengine/core';
+import { useEntity as useEntityImpl, type UseEntityResult } from './entity-client';
 import type { SyncConfig } from '@syncengine/core/internal';
 // Runtime-config virtual module — populated at bundle time by
 // @syncengine/vite-plugin from .syncengine/dev/runtime.json (dev) or
@@ -208,6 +211,13 @@ export interface Store<
     /** Consolidated React hook. Select views by name; returns typed data
      *  and the full sync/status/conflict bundle. */
     use<TViews extends Record<string, ViewBuilder<unknown>>>(views: TViews): UseResult<TViews>;
+
+    /** Subscribe to a durable entity (Restate actor). Returns optimistic
+     *  state with latency compensation and typed action proxies. */
+    useEntity<TName extends string, TShape extends EntityStateShape, THandlers extends EntityHandlerMap<EntityState<TShape>>>(
+        entityDef: EntityDef<TName, TShape, THandlers>,
+        key: string,
+    ): UseEntityResult<EntityState<TShape>, THandlers>;
 
     /** Subscribe to an ephemeral topic. Returns a reactive peer map and
      *  a publish function for broadcasting this peer's state. */
@@ -877,6 +887,7 @@ export function store<
 
     return {
         use: useHook,
+        useEntity: useEntityImpl as Store<TTables, TChannels>['useEntity'],
         useTopic: useTopicHook,
         tables: tableNs as TableNamespace<TTables>,
         channels: channelNs as ChannelNamespace<TChannels>,
