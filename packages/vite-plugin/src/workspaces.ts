@@ -1,37 +1,32 @@
 /**
  * `@syncengine/vite-plugin` — workspaces sub-plugin (PLAN Phase 8).
  *
- * Responsibilities:
+ * Dev-mode wiring around the shared `@syncengine/http-core` pipeline:
  *
- *   1. Load the user's `syncengine.config.ts` from the Vite project root
- *      once at startup. The config's `workspaces.resolve({ request, user })`
- *      is called on every page request to turn a raw user identity into
- *      a stable workspace id.
+ *   1. Load the user's `syncengine.config.ts` from the Vite project root,
+ *      lazily on first request and hot-reloaded on file edits.
  *
- *   2. Hash the resolved id to a bounded-length `wsKey` (SHA-256 first
- *      `WSKEY_HEX_CHARS` hex chars). NATS subject tokens and Restate
- *      virtual-object keys have length limits, and users might return
- *      `org:long-orgname` or URL-derived strings — hashing keeps the
- *      internal names sane.
+ *   2. On every HTML request, marshal the Connect `IncomingMessage` into
+ *      a standard `Request` and delegate to `http-core.resolveWorkspace`.
+ *      That function runs auth.verify + workspaces.resolve + hash +
+ *      provision. The same function runs in the prod `syncengine serve`
+ *      binary, so dev and prod resolve identically.
  *
- *   3. Lazy-provision each wsKey the first time it's seen by POSTing to
- *      the framework's existing `workspace.provision` Restate handler.
- *      Provisioned keys are cached in memory for the dev session; a
- *      fresh orchestrator run re-provisions on first request. Concurrent
- *      first-requests share a single inflight provision via a map so
- *      we never double-POST.
+ *   3. Thread the resolved context (wsKey, natsUrl, restateUrl, etc.)
+ *      through AsyncLocalStorage into Vite's `transformIndexHtml` hook
+ *      so meta tags land on Vite's official HTML-injection path.
  *
- *   4. Run resolution from a Connect middleware that sees the real
- *      IncomingMessage (headers, cookies, auth), not a fake built from
- *      `ctx.originalUrl`. The resolved values are passed through to
- *      Vite's `transformIndexHtml` hook via AsyncLocalStorage so we
- *      can still use Vite's official HTML-injection path.
+ * Dev-only conveniences:
  *
- * The `user` parameter passed to `resolve` is a stub in dev: the
- * middleware builds `{ id: <query-param> }` from the incoming URL's
- * `?user=` search param. Real auth (Clerk / Auth.js / custom) plugs in
- * at the same seam in a future phase by replacing the stub with the
- * session user. The resolve contract doesn't change.
+ *   - If the user hasn't declared `auth.verify` in their config,
+ *     `devAuthShim` injects one that reads `?user=` from the URL.
+ *     Preserves the pre-auth-hook "open two tabs with different users"
+ *     demo flow without forcing apps to declare auth for local dev.
+ *
+ *   - Provisioning failures log a warning and let the page load anyway —
+ *     restarting Restate shouldn't take the dev page down. Prod uses
+ *     the same pipeline without the `onProvisionError` override, so
+ *     real users see a proper 502 when provisioning fails.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -40,45 +35,16 @@ import { resolve as resolvePath } from 'node:path';
 import type { Connect, Plugin, ViteDevServer } from 'vite';
 
 import {
-    hashWorkspaceId,
-    injectMetaTags,
     escapeAttr,
     provisionWorkspace,
 } from '@syncengine/core/http';
 import { errors, SchemaCode } from '@syncengine/core';
-
-// Structural types mirroring `@syncengine/core`'s `config.ts`. The
-// plugin intentionally does not take a dep on core to keep the
-// package boundary clean — core can consume the plugin, not the other
-// way around.
-//
-// ⚠️  DRIFT RISK: these types are load-bearing for the resolve-callback
-// contract, so any change to the equivalent interfaces in
-// `packages/core/src/config.ts` MUST be mirrored here. There is no
-// compile-time check enforcing this — a mismatch surfaces only at
-// runtime inside user-provided resolvers. If core adds a required
-// field to SyncengineUser or WorkspaceResolveContext, update this
-// file in the same commit.
-
-interface SyncengineUser {
-    readonly id: string;
-    readonly [key: string]: unknown;
-}
-
-interface WorkspaceResolveContext {
-    readonly request: Request;
-    readonly user: SyncengineUser;
-}
-
-interface WorkspacesConfig {
-    readonly resolve: (
-        ctx: WorkspaceResolveContext,
-    ) => string | Promise<string>;
-}
-
-interface SyncengineConfig {
-    readonly workspaces: WorkspacesConfig;
-}
+import type { SyncengineConfig, SyncengineUser } from '@syncengine/core';
+import {
+    ProvisionCache,
+    createHtmlInjector,
+    resolveWorkspace,
+} from '@syncengine/http-core';
 
 // ── Defaults (used when no syncengine.config.ts is present) ────────────────
 
@@ -212,9 +178,14 @@ function makeRuntimeCache(): (root: string) => DevRuntimeJson {
 // ── User extraction from the incoming request ─────────────────────────────
 
 /**
- * Build the `user` stub the plugin passes into `workspaces.resolve`.
- * In dev we read a `?user=` query param from the request URL. Real
- * auth plugs in here in a later phase (Clerk session, Auth.js, etc.).
+ * Build the `user` stub the plugin passes into `workspaces.resolve`
+ * when the user's config has no `auth.verify` declared. Reads the
+ * `?user=` query param from the request URL.
+ *
+ * Kept for backward compat with existing tests and as a small helper
+ * for the devAuthShim below. Real prod auth uses `auth.verify` in the
+ * user's config; `devAuthShim` short-circuits this function when that's
+ * present.
  *
  * @internal Exported for unit tests.
  */
@@ -223,6 +194,32 @@ export function extractUser(req: Connect.IncomingMessage): SyncengineUser {
     const parsed = new URL(url, 'http://localhost');
     const queryUser = parsed.searchParams.get('user') ?? 'anon';
     return { id: queryUser };
+}
+
+/**
+ * Dev-convenience shim: if the user hasn't declared `auth.verify` in
+ * their syncengine.config.ts, inject a synthetic one that reads the
+ * `?user=` query param. This preserves the pre-auth-hook dev workflow
+ * (open two tabs with `?user=alice` and `?user=bob` to see real-time
+ * sync between users) while letting `http-core.resolveWorkspace` own
+ * the resolve pipeline in both dev and prod.
+ *
+ * When `auth.verify` IS declared, the user's callback wins — behavior
+ * matches production exactly.
+ *
+ * @internal Exported for unit tests.
+ */
+export function devAuthShim(config: SyncengineConfig): SyncengineConfig {
+    if (config.auth) return config;
+    return {
+        ...config,
+        auth: {
+            verify: ({ request }) => {
+                const url = new URL(request.url);
+                return { id: url.searchParams.get('user') ?? 'anon' };
+            },
+        },
+    };
 }
 
 /**
@@ -274,9 +271,21 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
     let viteRoot: string | null = null;
     let devServer: ViteDevServer | null = null;
     let configPromise: Promise<SyncengineConfig> | null = null;
-    const provisioned = new Set<string>();
-    const provisioning = new Map<string, Promise<void>>();
     const readDevRuntime = makeRuntimeCache();
+
+    // The provision cache is built lazily on first request so the
+    // restateUrl (read from the dev runtime.json, which may not exist
+    // at plugin-construction time) is available. Cache lifetime ==
+    // Vite process lifetime; identity is stable across requests.
+    let provisionCache: ProvisionCache | null = null;
+    const getProvisionCache = (restateUrl: string): ProvisionCache => {
+        if (!provisionCache) {
+            provisionCache = new ProvisionCache((wsKey) =>
+                provisionWorkspace(restateUrl, wsKey),
+            );
+        }
+        return provisionCache;
+    };
 
     /**
      * Lazy-load the config. On failure, clears the cached promise so
@@ -293,29 +302,6 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
             });
         }
         return configPromise;
-    };
-
-    /**
-     * Ensure the wsKey is provisioned. Concurrent first-requests for
-     * the same key share a single inflight promise so we never fire
-     * two `workspace.provision` POSTs for the same key.
-     */
-    const ensureProvisioned = async (wsKey: string, restateUrl: string): Promise<void> => {
-        if (provisioned.has(wsKey)) return;
-        let inflight = provisioning.get(wsKey);
-        if (!inflight) {
-            inflight = provisionWorkspace(restateUrl, wsKey)
-                .then(() => {
-                    provisioned.add(wsKey);
-                    provisioning.delete(wsKey);
-                })
-                .catch((err: unknown) => {
-                    provisioning.delete(wsKey);
-                    throw err;
-                });
-            provisioning.set(wsKey, inflight);
-        }
-        await inflight;
     };
 
     return {
@@ -376,9 +362,9 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
                     || (!/\.[a-zA-Z0-9]+(\?|$)/.test(url));
                 if (!isHtml) return next();
 
-                let config: SyncengineConfig;
+                let rawConfig: SyncengineConfig;
                 try {
-                    config = await getConfig();
+                    rawConfig = await getConfig();
                 } catch (err) {
                     // Config load failed; render a dev-mode error page
                     // so the developer immediately knows something is
@@ -387,29 +373,6 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
                     // and reloading will retry cleanly.
                     return sendDevError(res, 'failed to load syncengine.config.ts', err);
                 }
-
-                const user = extractUser(req);
-                const request = buildRequest(req);
-
-                let rawWorkspaceId: string;
-                try {
-                    rawWorkspaceId = await config.workspaces.resolve({ request, user });
-                } catch (err) {
-                    // Never fall through to a stable 'error' workspace —
-                    // that would silently merge every failing user's
-                    // data into one shared backend. Stop the request.
-                    return sendDevError(res, `workspaces.resolve failed for user=${user.id}`, err);
-                }
-
-                if (typeof rawWorkspaceId !== 'string' || rawWorkspaceId.length === 0) {
-                    return sendDevError(
-                        res,
-                        'workspaces.resolve must return a non-empty string',
-                        new Error(`got ${typeof rawWorkspaceId}: ${String(rawWorkspaceId)}`),
-                    );
-                }
-
-                const wsKey = hashWorkspaceId(rawWorkspaceId);
 
                 // Pick up the NATS WS / Restate URLs from the cached
                 // dev runtime file written by the CLI orchestrator;
@@ -421,18 +384,36 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
                 const restateUrl = runtime.restateUrl ?? 'http://localhost:8080';
                 const restateForProvision = opts.restateUrl ?? restateUrl;
 
+                // Delegate the whole pipeline — auth.verify, resolve,
+                // hash, provision — to @syncengine/http-core, which is
+                // also what the prod serve binary uses. `devAuthShim`
+                // preserves the pre-existing `?user=` dev shortcut when
+                // the user hasn't declared their own `auth.verify`.
+                const config = devAuthShim(rawConfig);
+                const request = buildRequest(req);
+
+                let wsKey: string;
                 try {
-                    await ensureProvisioned(wsKey, restateForProvision);
+                    const result = await resolveWorkspace(request, {
+                        config,
+                        provisionCache: getProvisionCache(restateForProvision),
+                        // Dev is warn-and-continue on provision failures
+                        // — restarting Restate shouldn't kill the page.
+                        // Prod (syncengine serve) omits this and lets
+                        // the error surface as a 502.
+                        onProvisionError: (err, key) => {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            // eslint-disable-next-line no-console
+                            console.warn(`[syncengine] provision(${key}) failed: ${msg}`);
+                        },
+                    });
+                    wsKey = result.wsKey;
                 } catch (err) {
-                    // Provisioning failure is warn-and-continue: the
-                    // user sees a broken app (the client will retry
-                    // connecting) but the dev server itself stays up
-                    // so fixing Restate doesn't require a Vite restart.
-                    const msg = err instanceof Error ? err.message : String(err);
-                    // eslint-disable-next-line no-console
-                    console.warn(
-                        `[syncengine] provision(${wsKey}) for user=${user.id} failed: ${msg}`,
-                    );
+                    // Resolve failures (RESOLVE_FAILED / RESOLVE_TIMEOUT)
+                    // get the dev-mode error page. Never fall through
+                    // to a default workspace — that would silently merge
+                    // every failing user's data into one shared backend.
+                    return sendDevError(res, 'workspace resolution failed', err);
                 }
 
                 // Run the remainder of the middleware chain (including
@@ -453,11 +434,16 @@ export function workspacesPlugin(opts: WorkspacesPluginOptions = {}): Plugin {
          * If the hook fires outside our middleware path (non-browser
          * requests, tooling that asks Vite for the raw index html),
          * the store is undefined and we return the HTML unchanged.
+         *
+         * Vite may hand us different HTML bodies per request (templates
+         * with user-land HTML transformations, etc.), so we construct
+         * the injector per call. For prod, the serve binary caches a
+         * single injector once at boot because index.html is static.
          */
         transformIndexHtml(html) {
             const ctx = als.getStore();
             if (!ctx) return html;
-            return injectMetaTags(html, {
+            return createHtmlInjector(html).inject({
                 workspaceId: ctx.wsKey,
                 natsUrl: ctx.natsUrl,
                 restateUrl: ctx.restateUrl,

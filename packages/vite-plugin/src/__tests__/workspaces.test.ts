@@ -12,7 +12,8 @@ import { describe, it, expect } from 'vitest';
 import type { IncomingMessage } from 'node:http';
 
 import { hashWorkspaceId, injectMetaTags } from '@syncengine/core/http';
-import { extractUser, buildRequest } from '../workspaces';
+import { extractUser, buildRequest, devAuthShim } from '../workspaces';
+import type { SyncengineConfig } from '@syncengine/core';
 
 // Connect's IncomingMessage type is a thin wrapper over Node's
 // IncomingMessage. We build minimal stubs that satisfy only the
@@ -232,5 +233,61 @@ describe('buildRequest', () => {
             headers: {},
         }));
         expect(req.url).toMatch(/^http:\/\/localhost\//);
+    });
+});
+
+describe('devAuthShim', () => {
+    const baseConfig: SyncengineConfig = {
+        workspaces: { resolve: () => 'default' },
+    };
+
+    it('returns the user config unchanged when auth is already declared', () => {
+        const userAuth = {
+            verify: async () => ({ id: 'from-user-verify' }),
+        };
+        const userConfig: SyncengineConfig = {
+            ...baseConfig,
+            auth: userAuth,
+        };
+
+        const shimmed = devAuthShim(userConfig);
+        expect(shimmed).toBe(userConfig);          // identity: no cloning
+        expect(shimmed.auth).toBe(userAuth);       // same object
+    });
+
+    it('injects a ?user=-reading verify when auth is absent', async () => {
+        const shimmed = devAuthShim(baseConfig);
+        expect(shimmed.auth).toBeDefined();
+
+        const user = await shimmed.auth!.verify({
+            request: new Request('http://localhost/?user=alice'),
+        });
+        expect(user).toEqual({ id: 'alice' });
+    });
+
+    it('injected verify falls back to id=anon when no ?user= param', async () => {
+        const shimmed = devAuthShim(baseConfig);
+        const user = await shimmed.auth!.verify({
+            request: new Request('http://localhost/'),
+        });
+        expect(user).toEqual({ id: 'anon' });
+    });
+
+    it('injected verify reads the user param, not other query params', async () => {
+        const shimmed = devAuthShim(baseConfig);
+        const user = await shimmed.auth!.verify({
+            request: new Request('http://localhost/?foo=1&user=bob&bar=2'),
+        });
+        expect(user).toEqual({ id: 'bob' });
+    });
+
+    it('preserves the rest of the user config verbatim', () => {
+        const userConfig: SyncengineConfig = {
+            workspaces: {
+                resolve: ({ user }) => `user:${user.id}`,
+            },
+        };
+        const shimmed = devAuthShim(userConfig);
+        expect(shimmed.workspaces).toBe(userConfig.workspaces);
     });
 });

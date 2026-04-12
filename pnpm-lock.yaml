@@ -316,6 +316,9 @@ importers:
       '@syncengine/core':
         specifier: workspace:*
         version: link:../core
+      '@syncengine/http-core':
+        specifier: workspace:*
+        version: link:../http-core
       '@syncengine/server':
         specifier: workspace:*
         version: link:../server

@@ -124,6 +124,37 @@ describe('resolveWorkspace — provisioning', () => {
             category: 'connection',
         });
     });
+
+    it('calls onProvisionError instead of throwing when the callback is supplied', async () => {
+        const cache = new ProvisionCache(async () => {
+            throw new Error('restate down');
+        });
+        const onProvisionError = vi.fn();
+
+        const result = await resolveWorkspace(makeRequest(), {
+            config: makeConfig({ resolve: () => 'alice' }),
+            provisionCache: cache,
+            onProvisionError,
+        });
+
+        expect(result.workspaceId).toBe('alice');
+        expect(result.wsKey).toHaveLength(16);
+        expect(onProvisionError).toHaveBeenCalledTimes(1);
+        const [err, wsKey] = onProvisionError.mock.calls[0]!;
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toBe('restate down');
+        expect(wsKey).toBe(result.wsKey);
+    });
+
+    it('does not call onProvisionError on success', async () => {
+        const onProvisionError = vi.fn();
+        await resolveWorkspace(makeRequest(), {
+            config: makeConfig({ resolve: () => 'alice' }),
+            provisionCache: makeCache(),
+            onProvisionError,
+        });
+        expect(onProvisionError).not.toHaveBeenCalled();
+    });
 });
 
 // ── Auth ───────────────────────────────────────────────────────────────────

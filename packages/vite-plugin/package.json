@@ -17,6 +17,7 @@
     "@nats-io/jetstream": "^3.3.1",
     "@nats-io/transport-node": "^3.3.1",
     "@syncengine/core": "workspace:*",
+    "@syncengine/http-core": "workspace:*",
     "@syncengine/server": "workspace:*",
     "vite-plugin-wasm": "^3.0.0",
     "vite-plugin-top-level-await": "^1.0.0"

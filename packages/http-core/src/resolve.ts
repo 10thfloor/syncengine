@@ -8,6 +8,16 @@ export interface ResolvePipelineOptions {
     readonly provisionCache: ProvisionCache;
     /** Hard ceiling on resolve() wall time. Default 5000ms. */
     readonly resolveTimeoutMs?: number;
+    /**
+     * If set, provisioning failures are reported to this callback and
+     * resolution returns normally (with the derived wsKey). If unset,
+     * provisioning failures throw `RESTATE_UNREACHABLE`.
+     *
+     * Dev middleware uses this to warn-and-continue — a restated
+     * Restate shouldn't take the page down. Prod (the serve binary)
+     * omits it, so failures surface as 502s.
+     */
+    readonly onProvisionError?: (err: unknown, wsKey: string) => void;
 }
 
 export interface ResolutionResult {
@@ -53,11 +63,15 @@ export async function resolveWorkspace(
     try {
         await provisionCache.ensureProvisioned(wsKey);
     } catch (err) {
-        throw errors.connection('RESTATE_UNREACHABLE', {
-            message: `workspace provisioning failed for wsKey=${wsKey}`,
-            cause: err instanceof Error ? err : new Error(String(err)),
-            context: { wsKey },
-        });
+        if (opts.onProvisionError) {
+            opts.onProvisionError(err, wsKey);
+        } else {
+            throw errors.connection('RESTATE_UNREACHABLE', {
+                message: `workspace provisioning failed for wsKey=${wsKey}`,
+                cause: err instanceof Error ? err : new Error(String(err)),
+                context: { wsKey },
+            });
+        }
     }
 
     return { wsKey, workspaceId, user };
