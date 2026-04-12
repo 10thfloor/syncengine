@@ -2,6 +2,14 @@ import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import { DbspEngine } from '@syncengine/dbsp';
 import { connectToGateway } from '../gateway-connection.js';
 
+// Cache the SQLite WASM module — initialization downloads and compiles the
+// binary. Subsequent calls return the cached instance immediately.
+let _sqlite3Promise = null;
+function getSqlite3() {
+    if (!_sqlite3Promise) _sqlite3Promise = sqlite3InitModule();
+    return _sqlite3Promise;
+}
+
 // ── Shared lib imports (eliminates duplication) ─────────────────────────────
 // HLC and migration logic live in @syncengine/core and are the single source
 // of truth. The worker imports them instead of reimplementing.
@@ -276,6 +284,39 @@ const nats = {
     outboundQueues: {},    // subject → pending messages (per-channel offline queue)
     peerAckTimer: null,
 };
+
+/**
+ * Initialize nats.routing from a sync config: build channel routing,
+ * outbound queues, and channel-name-to-subject maps. Shared between
+ * handleInit and handleSwitchWorkspace.
+ */
+function initNatsRouting(syncConfig, tableNames) {
+    nats.routing = buildChannelRouting(syncConfig, tableNames);
+    for (const s of nats.routing.subjects) {
+        if (!nats.outboundQueues[s]) nats.outboundQueues[s] = [];
+    }
+    const channelNames = [];
+    const channelNameToSubject = {};
+    if (syncConfig.channels) {
+        for (const ch of syncConfig.channels) {
+            const chName = ch.name;
+            channelNames.push(chName);
+            channelNameToSubject[chName] = `ws.${syncConfig.workspaceId}.ch.${chName}.deltas`;
+        }
+    }
+    if (channelNames.length === 0 && nats.routing.subjects.length === 1) {
+        channelNames.push('__default__');
+        channelNameToSubject['__default__'] = nats.routing.subjects[0];
+    }
+    const subjectToChannelName = {};
+    for (const [chName, subj] of Object.entries(channelNameToSubject)) {
+        subjectToChannelName[subj] = chName;
+    }
+    nats.routing.channelNames = channelNames;
+    nats.routing.channelNameToSubject = channelNameToSubject;
+    nats.routing.subjectToChannelName = subjectToChannelName;
+    nats.routing.entityWritesSubject = `ws.${syncConfig.workspaceId}.entity-writes`;
+}
 
 // ── Topic state (ephemeral NATS core pub/sub) ──────────────────────────────
 
@@ -1519,7 +1560,7 @@ async function handleSwitchWorkspace(data) {
     // 1. Open workspace-scoped SQLite
     emitWorkspaceStatus(wsKey, requestId, 'provisioning');
     try {
-        const sqlite3 = await sqlite3InitModule();
+        const sqlite3 = await getSqlite3();
         const dbPath = `/syncengine-${wsKey}.sqlite3`;
         if (sqlite3.oo1.OpfsDb) {
             db = new sqlite3.oo1.OpfsDb(dbPath);
@@ -1591,34 +1632,7 @@ async function handleSwitchWorkspace(data) {
     nats._lastSyncConfig = syncConfig;
     if (syncConfig.restateUrl) authority.restateUrl = syncConfig.restateUrl;
 
-    nats.routing = buildChannelRouting(syncConfig, _schemaTables.map(t => t.name));
-    for (const s of nats.routing.subjects) {
-        if (!nats.outboundQueues[s]) nats.outboundQueues[s] = [];
-    }
-
-    // Build channel name mappings
-    const channelNames = [];
-    const channelNameToSubject = {};
-    if (syncConfig.channels) {
-        for (const ch of syncConfig.channels) {
-            const chName = ch.name;
-            const subject = `ws.${syncConfig.workspaceId}.ch.${chName}.deltas`;
-            channelNames.push(chName);
-            channelNameToSubject[chName] = subject;
-        }
-    }
-    if (channelNames.length === 0 && nats.routing.subjects.length === 1) {
-        channelNames.push('__default__');
-        channelNameToSubject['__default__'] = nats.routing.subjects[0];
-    }
-    const subjectToChannelName = {};
-    for (const [chName, subj] of Object.entries(channelNameToSubject)) {
-        subjectToChannelName[subj] = chName;
-    }
-    nats.routing.channelNames = channelNames;
-    nats.routing.channelNameToSubject = channelNameToSubject;
-    nats.routing.subjectToChannelName = subjectToChannelName;
-    nats.routing.entityWritesSubject = `ws.${syncConfig.workspaceId}.entity-writes`;
+    initNatsRouting(syncConfig, _schemaTables.map(t => t.name));
 
     // Store requestId so sync status transitions can emit workspace status
     nats._currentRequestId = requestId;
@@ -1666,7 +1680,7 @@ async function handleInit(data) {
     _schemaMergeConfigs = schema.mergeConfigs || [];
 
     // 2. SQLite with OPFS persistence
-    const sqlite3 = await sqlite3InitModule();
+    const sqlite3 = await getSqlite3();
     const wsKey = data.sync?.workspaceId || 'default';
     currentWsKey = wsKey;
     const dbPath = `/syncengine-${wsKey}.sqlite3`;
@@ -1778,37 +1792,7 @@ async function handleInit(data) {
         nats._lastSyncConfig = { ...data.sync };
         if (data.sync.restateUrl) authority.restateUrl = data.sync.restateUrl;
 
-        // Build channel routing: legacy mode (no channels) uses one default
-        // subject; multi-channel mode maps tables to per-channel subjects.
-        nats.routing = buildChannelRouting(data.sync, schema.tables.map(t => t.name));
-        for (const s of nats.routing.subjects) {
-            if (!nats.outboundQueues[s]) nats.outboundQueues[s] = [];
-        }
-
-        // Add channel name mappings for gateway transport
-        const channelNames = [];
-        const channelNameToSubject = {};
-        if (data.sync.channels) {
-            for (const ch of data.sync.channels) {
-                const chName = ch.name;
-                const subject = `ws.${data.sync.workspaceId}.ch.${chName}.deltas`;
-                channelNames.push(chName);
-                channelNameToSubject[chName] = subject;
-            }
-        }
-        // Legacy (no channels) — single default subject
-        if (channelNames.length === 0 && nats.routing.subjects.length === 1) {
-            channelNames.push('__default__');
-            channelNameToSubject['__default__'] = nats.routing.subjects[0];
-        }
-        const subjectToChannelName = {};
-        for (const [chName, subj] of Object.entries(channelNameToSubject)) {
-            subjectToChannelName[subj] = chName;
-        }
-        nats.routing.channelNames = channelNames;
-        nats.routing.channelNameToSubject = channelNameToSubject;
-        nats.routing.subjectToChannelName = subjectToChannelName;
-        nats.routing.entityWritesSubject = `ws.${data.sync.workspaceId}.entity-writes`;
+        initNatsRouting(data.sync, schema.tables.map(t => t.name));
 
         if (data.sync.gatewayUrl) {
             connectGateway();

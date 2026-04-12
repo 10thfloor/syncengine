@@ -66,11 +66,14 @@ let currentWorkspaceId: string = runtimeWorkspaceId;
 
 /** Called by the store when the workspace changes. */
 export function setEntityClientWorkspace(wsKey: string): void {
+    if (wsKey === currentWorkspaceId) return;
     currentWorkspaceId = wsKey;
-    // Close existing connections — they're bound to the old workspace.
-    // Next entity subscription will reconnect with the new workspace.
     natsConnPromise = null;
     gwPromise = null;
+    // Clear stale subscriptions — they hold confirmed state and NATS
+    // subjects scoped to the old workspace.
+    subscriptions.clear();
+    gwEntityHandlers.clear();
 }
 import { connectToGateway } from './gateway-connection';
 

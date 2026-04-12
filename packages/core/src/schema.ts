@@ -18,6 +18,9 @@
 //    column key at the top level without colliding with user-defined names.
 //    Runtime guard rejects `$`-prefixed column names at `table()` construction.
 
+/** Sentinel id_key for zero-group-by (global) aggregates — a single output row. */
+export const GLOBAL_AGG_KEY = '$agg';
+
 export type MergeStrategy = 'lww' | 'set_union' | 'max' | 'min' | 'add';
 
 // ── Column definitions ────────────────────────────────────────────────────
@@ -444,11 +447,11 @@ function createViewBuilder<TRecord>(
             // (no source PK). The id_key must match what's in the output:
             //   - single column  → that column name (string)
             //   - multiple columns → the column names (string[])
-            //   - zero columns   → '$agg' sentinel (global single-row aggregate)
+            //   - zero columns   → GLOBAL_AGG_KEY sentinel (global single-row aggregate)
             const aggIdKey: string | string[] = groupByNames.length === 1
                 ? groupByNames[0]
                 : groupByNames.length === 0
-                    ? '$agg'
+                    ? GLOBAL_AGG_KEY
                     : groupByNames;
             return createViewBuilder($id, tableName, sourceIdKey, aggIdKey, [
                 ...pipeline,

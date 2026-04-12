@@ -489,6 +489,7 @@ export function store<
             viewSnapshots.set(viewId, []);
             notifyView(viewId);
         }
+        viewMaps.clear();
         ready = false;
         readyListeners.clear();
         seedsApplied = false;
@@ -584,20 +585,34 @@ export function store<
         return String(record[idKey]);
     }
 
+    // Internal map representation for O(1) delta application. Converted
+    // to an array for the useSyncExternalStore snapshot on read.
+    const viewMaps = new Map<string, Map<string, Record<string, unknown>>>();
+
+    function getOrCreateViewMap(viewId: string): Map<string, Record<string, unknown>> {
+        let m = viewMaps.get(viewId);
+        if (!m) {
+            m = new Map();
+            viewMaps.set(viewId, m);
+        }
+        return m;
+    }
+
     function applyDeltas(viewId: string, deltas: Array<{ record: Record<string, unknown>; weight: number }>): void {
         const view = viewsById.get(viewId);
         const idKey = view?.$idKey ?? 'id';
-        const current = (viewSnapshots.get(viewId) ?? []) as Record<string, unknown>[];
-        const next = [...current];
+        const m = getOrCreateViewMap(viewId);
 
         for (const delta of deltas) {
             const recId = recordId(delta.record, idKey);
-            const idx = next.findIndex((item) => recordId(item, idKey) === recId);
-            if (idx !== -1) next.splice(idx, 1);
-            if (delta.weight > 0) next.push(delta.record);
+            if (delta.weight > 0) {
+                m.set(recId, delta.record);
+            } else {
+                m.delete(recId);
+            }
         }
 
-        viewSnapshots.set(viewId, next);
+        viewSnapshots.set(viewId, [...m.values()]);
         notifyView(viewId);
     }
 
@@ -642,6 +657,7 @@ export function store<
                         for (const viewId of viewSnapshots.keys()) {
                             viewSnapshots.set(viewId, []);
                         }
+                        viewMaps.clear();
                         pendingViewClear = false;
                     }
                     applyDeltas(viewDisplayToId.get(msg.viewName) ?? msg.viewName, msg.deltas);
@@ -1102,6 +1118,7 @@ export function store<
             readyListeners.clear();
             viewSubscribers.clear();
             viewSnapshots.clear();
+            viewMaps.clear();
             connectionSubscribers.clear();
             syncStatusSubscribers.clear();
             conflictSubscribers.clear();

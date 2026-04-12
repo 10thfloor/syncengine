@@ -4,6 +4,7 @@ import { jetstream, DeliverPolicy, type JetStreamClient } from '@nats-io/jetstre
 import { RingBuffer } from './ring-buffer.js';
 import { ClientSession } from './client-session.js';
 import { streamName } from '../workspace/workspace.js';
+import { provisionWorkspace } from '@syncengine/core/http';
 
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;
@@ -42,7 +43,7 @@ export class WorkspaceBridge {
         // Provision the workspace — creates the NATS JetStream stream if
         // it doesn't exist. Required for client-initiated workspace switches
         // where the new workspace hasn't been seen by this dev session.
-        await this.provision();
+        await provisionWorkspace(this.restateUrl, this.workspaceId);
 
         this.nc = await connect({ servers: this.natsUrl });
         this.js = jetstream(this.nc);
@@ -262,19 +263,6 @@ export class WorkspaceBridge {
     private onGCMessage(data: Record<string, unknown>): void {
         for (const session of this.sessions) {
             session.send({ type: 'gc', payload: data });
-        }
-    }
-
-    private async provision(): Promise<void> {
-        const url = `${this.restateUrl}/workspace/${encodeURIComponent(this.workspaceId)}/provision`;
-        const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ tenantId: 'default' }),
-        });
-        if (!res.ok) {
-            const text = await res.text().catch(() => '<no body>');
-            console.warn(`[gateway] workspace.provision(${this.workspaceId}) failed: HTTP ${res.status}: ${text}`);
         }
     }
 
