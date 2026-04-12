@@ -63,6 +63,12 @@ import {
 // Re-export connection/status types for React components
 export type { ConnectionStatus, SyncStatus, ConflictRecord };
 
+/** Minimal shape of a WorkflowDef — avoids importing @syncengine/server in the client. */
+interface AnyWorkflowDef {
+    readonly $tag: 'workflow';
+    readonly $name: string;
+}
+
 // ── Worker message types (internal, unchanged from the pre-2.5 protocol) ─
 
 interface InitMessage {
@@ -237,6 +243,13 @@ export interface Store<
         key: string,
         opts?: { ttl?: number },
     ): UseTopicResult<EntityState<TShape>>;
+
+    /** Execute a durable workflow via the RPC proxy. Returns when the
+     *  workflow completes (or throws on failure). */
+    runWorkflow<TInput>(
+        workflow: AnyWorkflowDef & { readonly $handler: (ctx: any, input: TInput) => Promise<void> },
+        input: TInput,
+    ): Promise<void>;
 
     /** Per-table typed imperative namespace. */
     readonly tables: TableNamespace<TTables>;
@@ -926,6 +939,23 @@ export function store<
         use: useHook,
         useEntity: useEntityImpl as Store<TTables, TChannels>['useEntity'],
         useTopic: useTopicHook,
+        async runWorkflow(workflow: AnyWorkflowDef, input: unknown): Promise<void> {
+            const invocationId = crypto.randomUUID();
+            const url = `/__syncengine/rpc/workflow/${workflow.$name}/${invocationId}`;
+            const headers: Record<string, string> = { 'content-type': 'application/json' };
+            if (runtimeWorkspaceId) {
+                headers['x-syncengine-workspace'] = runtimeWorkspaceId;
+            }
+            const res = await fetch(url, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(input),
+            });
+            if (!res.ok) {
+                const text = await res.text().catch(() => '<no body>');
+                throw new Error(`workflow '${workflow.$name}' failed: ${res.status} ${text}`);
+            }
+        },
         tables: tableNs as TableNamespace<TTables>,
         channels: channelNs as ChannelNamespace<TChannels>,
         destroy(): void {
