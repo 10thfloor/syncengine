@@ -987,7 +987,10 @@ function natsPublish(msg) {
     // Gateway path — publish via gateway WebSocket
     if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
         for (const s of subjects) {
-            nats.gwWs.send(JSON.stringify({ type: 'publish', kind: 'delta', subject: s, payload: msg }));
+            const chName = nats.routing.subjectToChannelName[s];
+            if (chName) {
+                nats.gwWs.send(JSON.stringify({ type: 'publish', kind: 'delta', channel: chName, payload: msg }));
+            }
         }
         return;
     }
@@ -1342,8 +1345,13 @@ async function handleInit(data) {
             channelNames.push('__default__');
             channelNameToSubject['__default__'] = nats.routing.subjects[0];
         }
+        const subjectToChannelName = {};
+        for (const [chName, subj] of Object.entries(channelNameToSubject)) {
+            subjectToChannelName[subj] = chName;
+        }
         nats.routing.channelNames = channelNames;
         nats.routing.channelNameToSubject = channelNameToSubject;
+        nats.routing.subjectToChannelName = subjectToChannelName;
         nats.routing.entityWritesSubject = `ws.${data.sync.workspaceId}.entity-writes`;
 
         if (data.sync.gatewayUrl) {
@@ -1546,11 +1554,11 @@ async function handleTopicSubscribe({ name, key }) {
 async function handleTopicPublish({ name, key, data }) {
     // Gateway path
     if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
-        const subject = topicSubject(name, key);
         nats.gwWs.send(JSON.stringify({
             type: 'publish',
             kind: 'topic',
-            subject,
+            name,
+            key,
             payload: { _clientId: CLIENT_ID, peerId: CLIENT_ID, data, ts: Date.now() },
         }));
         return;
@@ -1573,11 +1581,11 @@ async function handleTopicPublish({ name, key, data }) {
 async function handleTopicLeave({ name, key }) {
     // Gateway path
     if (nats.gwWs && nats.gwWs.readyState === WebSocket.OPEN) {
-        const subject = topicSubject(name, key);
         nats.gwWs.send(JSON.stringify({
             type: 'publish',
             kind: 'topic',
-            subject,
+            name,
+            key,
             payload: { _clientId: CLIENT_ID, peerId: CLIENT_ID, $leave: true, ts: Date.now() },
         }));
         return;

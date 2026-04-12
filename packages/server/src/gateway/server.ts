@@ -130,11 +130,12 @@ export class GatewayServer {
 
                 case 'publish':
                     if (msg.kind === 'delta') {
-                        bridge.publishDelta(msg.subject, msg.payload);
+                        // Construct NATS subject from channel name — subject stays internal to the bridge
+                        const subject = `ws.${bridge.workspaceId}.ch.${msg.channel}.deltas`;
+                        bridge.publishDelta(subject, msg.payload);
                     } else if (msg.kind === 'topic') {
-                        // Parse topic name/key from subject: ws.{wsId}.topic.{name}.{key}
-                        const parts = msg.subject.split('.');
-                        bridge.publishTopicLocal(parts[3] ?? '', parts[4] ?? '', msg.payload, session.clientId);
+                        // No more split('.') — name and key come directly from the message
+                        bridge.publishTopicLocal(msg.name, msg.key, msg.payload, session.clientId);
                     } else if (msg.kind === 'authority') {
                         void bridge.publishAuthority(msg.viewName, msg.deltas, authToken);
                     }

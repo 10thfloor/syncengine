@@ -85,7 +85,7 @@ export interface ClientUnsubscribeTopicMessage {
 export interface ClientPublishDeltaMessage {
   type: 'publish';
   kind: 'delta';
-  subject: string;
+  channel: string;             // channel name (not NATS subject)
   payload: Record<string, unknown>;
 }
 
@@ -95,7 +95,8 @@ export interface ClientPublishDeltaMessage {
 export interface ClientPublishTopicMessage {
   type: 'publish';
   kind: 'topic';
-  subject: string;
+  name: string;                // topic name
+  key: string;                 // topic key
   payload: Record<string, unknown>;
 }
 
