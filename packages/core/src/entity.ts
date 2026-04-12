@@ -662,9 +662,16 @@ export function applyHandler(
     next = { ...base, ...result };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
+    // Preserve EntityError code through the re-wrap so the server can
+    // include it in the TerminalError and the client can distinguish
+    // error categories.
+    const wrapped = new Error(
       `entity '${entity.$name}' handler '${handlerName}' rejected: ${message}`,
     );
+    if (err instanceof EntityError) {
+      (wrapped as any).code = err.code;
+    }
+    throw wrapped;
   }
 
   // Validate declared state fields but preserve extra fields (e.g.,
