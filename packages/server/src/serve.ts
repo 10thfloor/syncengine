@@ -296,7 +296,8 @@ export function startHttpServer(config: ProductionServerConfig): void {
             console.warn(`[syncengine] provision(${wsKey}) failed: ${msg}`);
         }
 
-        const gatewayUrl = `ws://${req.headers.host}/gateway`;
+        const wsProto = req.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
+        const gatewayUrl = `${wsProto}://${req.headers.host}/gateway`;
         const html = injectMetaTags(opts.indexHtml, {
             workspaceId: wsKey,
             natsUrl: opts.natsUrl,

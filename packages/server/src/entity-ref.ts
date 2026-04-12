@@ -66,7 +66,7 @@ export function entityRef<
 
     return new Proxy({} as EntityRefProxy<THandlers>, {
         get(_, handlerName: string) {
-            return (...args: unknown[]) => client[handlerName](...args);
+            return (...args: unknown[]) => client[handlerName](args);
         },
     });
 }

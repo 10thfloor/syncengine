@@ -238,9 +238,11 @@ export class WorkspaceBridge {
     }
 
     private onEntityMessage(data: Record<string, unknown>, tokens: string[]): void {
+        // Subject: ws.{wsId}.entity.{entityName}.{entityKey...}.state
+        // Entity keys may contain dots, so join everything between index 4 and the terminal 'state'.
         if (tokens.length < 6) return;
         const entityName = tokens[3]!;
-        const entityKey = tokens[4]!;
+        const entityKey = tokens.slice(4, -1).join('.');
         const matchKey = `${entityName}:${entityKey}`;
         for (const session of this.sessions) {
             if (session.entities.has(matchKey)) {
@@ -260,9 +262,11 @@ export class WorkspaceBridge {
     }
 
     private onTopicMessage(data: Record<string, unknown>, tokens: string[]): void {
+        // Subject: ws.{wsId}.topic.{topicName}.{topicKey...}
+        // Topic keys may contain dots — join everything from index 4 onward.
         if (tokens.length < 5) return;
         const topicName = tokens[3]!;
-        const topicKey = tokens[4]!;
+        const topicKey = tokens.slice(4).join('.');
         const matchKey = `${topicName}:${topicKey}`;
 
         // Skip messages from local sessions — they were already delivered

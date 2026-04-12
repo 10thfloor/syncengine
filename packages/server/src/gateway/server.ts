@@ -78,6 +78,10 @@ export class GatewayServer {
             }
 
             if (msg.type === 'init') {
+                if (session) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Already initialized', code: 'REINIT' }));
+                    return;
+                }
                 const init = msg as ClientInitMessage;
                 session = new ClientSession(init.clientId, ws as any);
                 authToken = init.authToken;
@@ -177,8 +181,8 @@ export class GatewayServer {
             void bridge.stop();
             this.bridges.delete(workspaceId);
         };
-        this.bridges.set(workspaceId, bridge);
         await bridge.start();
+        this.bridges.set(workspaceId, bridge);
         return bridge;
     }
 }
