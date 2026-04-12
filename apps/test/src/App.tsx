@@ -45,7 +45,7 @@ export default function App() {
   const s = useStore<DB>();
 
   // ── Tables + Views: CRDT rows with incremental projections ────
-  const { views, ready } = s.use({ totalsView });
+  const { views, ready } = s.useView({ totalsView });
   const total = views.totalsView[0]?.total ?? 0;
   const numClicks = views.totalsView[0]?.numClicks ?? 0;
 

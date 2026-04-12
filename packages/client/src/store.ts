@@ -203,13 +203,16 @@ export interface UseTopicResult<TState> {
     leave(): void;
 }
 
-/** The returned `Store<T>` — top-level surface is `{ use, useTopic, tables, channels, destroy }`. */
+/** The returned `Store<T>` — top-level surface is `{ useView, useEntity, useTopic, tables, channels, destroy }`. */
 export interface Store<
     TTables extends readonly AnyTable[] = readonly AnyTable[],
     TChannels extends readonly ChannelConfig[] = readonly ChannelConfig[],
 > {
-    /** Consolidated React hook. Select views by name; returns typed data
-     *  and the full sync/status/conflict bundle. */
+    /** Sync views from the DBSP worker. Returns typed view data and the
+     *  connection/sync/conflict status bundle. */
+    useView<TViews extends Record<string, ViewBuilder<unknown>>>(views: TViews): UseResult<TViews>;
+
+    /** @deprecated Use `useSync` instead. */
     use<TViews extends Record<string, ViewBuilder<unknown>>>(views: TViews): UseResult<TViews>;
 
     /** Subscribe to a durable entity (Restate actor). Returns optimistic
@@ -886,6 +889,7 @@ export function store<
     getWorker();
 
     return {
+        useView: useHook,
         use: useHook,
         useEntity: useEntityImpl as Store<TTables, TChannels>['useEntity'],
         useTopic: useTopicHook,
