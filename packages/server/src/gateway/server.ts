@@ -13,6 +13,7 @@ export interface GatewayConfig {
 export class GatewayServer {
     private readonly config: GatewayConfig;
     private readonly bridges = new Map<string, WorkspaceBridge>();
+    private readonly bridgeCreating = new Map<string, Promise<WorkspaceBridge>>();
     private readonly wss: WebSocketServer;
 
     constructor(config: GatewayConfig) {
@@ -100,10 +101,17 @@ export class GatewayServer {
             switch (msg.type) {
                 case 'subscribe':
                     if (msg.kind === 'channel') {
+                        // Mark replaying BEFORE subscribing interest so the
+                        // live consumer loop skips this session for this channel
+                        // until replay-end is sent.
+                        if (msg.lastSeq != null && msg.lastSeq > 0) {
+                            session.replayingChannels.add(msg.name);
+                        }
                         session.subscribeChannel(msg.name);
                         await bridge.ensureChannelConsumer(msg.name);
                         if (msg.lastSeq != null && msg.lastSeq > 0) {
                             bridge.replayChannel(session, msg.name, msg.lastSeq);
+                            session.replayingChannels.delete(msg.name);
                         } else {
                             session.send({ type: 'replay-end', channel: msg.name });
                         }
@@ -143,17 +151,29 @@ export class GatewayServer {
         });
     }
 
-    private async getOrCreateBridge(workspaceId: string): Promise<WorkspaceBridge> {
-        let bridge = this.bridges.get(workspaceId);
-        if (bridge) return bridge;
+    private getOrCreateBridge(workspaceId: string): Promise<WorkspaceBridge> {
+        const existing = this.bridges.get(workspaceId);
+        if (existing) return Promise.resolve(existing);
 
-        bridge = new WorkspaceBridge({
+        let inflight = this.bridgeCreating.get(workspaceId);
+        if (!inflight) {
+            inflight = this.createBridge(workspaceId).finally(() => {
+                this.bridgeCreating.delete(workspaceId);
+            });
+            this.bridgeCreating.set(workspaceId, inflight);
+        }
+        return inflight;
+    }
+
+    private async createBridge(workspaceId: string): Promise<WorkspaceBridge> {
+        const bridge = new WorkspaceBridge({
             natsUrl: this.config.natsUrl,
             restateUrl: this.config.restateUrl,
             workspaceId,
         });
         bridge.onEmpty = () => {
-            void bridge!.stop();
+            // Guard: stop() is idempotent (checks this.closed internally)
+            void bridge.stop();
             this.bridges.delete(workspaceId);
         };
         this.bridges.set(workspaceId, bridge);

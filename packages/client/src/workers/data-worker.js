@@ -663,6 +663,13 @@ async function connectGateway() {
             ws.addEventListener('message', handler);
         });
 
+        // Set message handler BEFORE sending subscribes so no frames are
+        // dropped between ready and the first subscribe response.
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            handleGatewayMessage(msg);
+        };
+
         // Initialize replay coordination
         sync.isReplaying = true;
         const channelNames = nats.routing.channelNames || [];
@@ -691,12 +698,6 @@ async function connectGateway() {
             const key = subKey.slice(sep + 1);
             ws.send(JSON.stringify({ type: 'subscribe', kind: 'topic', name, key }));
         }
-
-        // Main message handler
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            handleGatewayMessage(msg);
-        };
 
         ws.onclose = () => {
             console.log('[gateway] connection closed');
@@ -761,10 +762,14 @@ function handleGatewayMessage(msg) {
         }
 
         case 'replay-end': {
-            // Map channel name to subject for the replay coord
-            const subject = nats.routing?.channelNameToSubject
-                ? nats.routing.channelNameToSubject[msg.channel]
-                : msg.channel;
+            // Map channel name back to NATS subject for replay coordination.
+            // markConsumerCaughtUp checks caughtUp.size === expected, so
+            // the value MUST match what resetReplayCoord expects.
+            const subject = nats.routing?.channelNameToSubject?.[msg.channel];
+            if (!subject) {
+                console.warn(`[gateway] replay-end for unknown channel '${msg.channel}', skipping`);
+                break;
+            }
             markConsumerCaughtUp(subject);
             break;
         }

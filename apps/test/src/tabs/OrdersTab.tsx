@@ -10,6 +10,13 @@ export const OrdersTab = memo(function OrdersTab({ userId }: { userId: string })
 
   const orders = views.allOrders;
 
+  // Group by productSlug to show quantity badges
+  const slugCounts = new Map<string, number>();
+  for (const o of orders) {
+    const slug = String(o.productSlug);
+    slugCounts.set(slug, (slugCounts.get(slug) ?? 0) + 1);
+  }
+
   return (
     <div>
       <div className="section-heading">
@@ -30,6 +37,7 @@ export const OrdersTab = memo(function OrdersTab({ userId }: { userId: string })
               orderPrice={Number(o.price)}
               orderUserId={String(o.userId)}
               currentUserId={userId}
+              quantity={slugCounts.get(String(o.productSlug)) ?? 1}
             />
           ))}
         </div>
@@ -39,10 +47,10 @@ export const OrdersTab = memo(function OrdersTab({ userId }: { userId: string })
 });
 
 const OrderRow = memo(function OrderRow({
-  orderId, productSlug, orderPrice, orderUserId, currentUserId,
+  orderId, productSlug, orderPrice, orderUserId, currentUserId, quantity,
 }: {
   orderId: string; productSlug: string; orderPrice: number;
-  orderUserId: string; currentUserId: string;
+  orderUserId: string; currentUserId: string; quantity: number;
 }) {
   const s = useStore<DB>();
   const { state, actions, ready } = s.useEntity(order, orderId);
@@ -82,7 +90,10 @@ const OrderRow = memo(function OrderRow({
         >
           {status}
         </span>
-        <span className="order-product">{productSlug}</span>
+        <span className="order-product">
+          {productSlug}
+          {quantity > 1 && <span style={{ color: '#6366f1', fontWeight: 600, marginLeft: '0.25rem' }}>&times;{quantity}</span>}
+        </span>
         <span className="order-price">${orderPrice}</span>
         <span className="order-user">{orderUserId}</span>
       </div>

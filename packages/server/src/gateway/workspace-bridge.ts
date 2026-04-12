@@ -9,7 +9,7 @@ import {
 } from 'nats';
 import { RingBuffer } from './ring-buffer.js';
 import { ClientSession } from './client-session.js';
-import type { ServerMsg } from './protocol.js';
+
 
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;
@@ -58,6 +58,7 @@ export class WorkspaceBridge {
     }
 
     async stop(): Promise<void> {
+        if (this.closed) return;
         this.closed = true;
         if (this.peerAckTimer) clearInterval(this.peerAckTimer);
         if (this.teardownTimer) clearTimeout(this.teardownTimer);
@@ -114,6 +115,7 @@ export class WorkspaceBridge {
                         ring.push(seq, payload, msgClientId);
                         for (const session of this.sessions) {
                             if (!session.channels.has(channelName)) continue;
+                            if (session.replayingChannels.has(channelName)) continue;
                             if (msgClientId === session.clientId) continue;
                             session.send({ type: 'delta', channel: channelName, seq, payload });
                             session.channelSeqs.set(channelName, seq);
@@ -191,7 +193,18 @@ export class WorkspaceBridge {
         this.nc.publish(subject, this.codec.encode(payload));
     }
 
-    publishTopicLocal(name: string, key: string, payload: Record<string, unknown>, _senderClientId: string): void {
+    publishTopicLocal(name: string, key: string, payload: Record<string, unknown>, senderClientId: string): void {
+        // Local echo: route to interested sessions immediately (low latency
+        // for cursors/presence) without waiting for the NATS round-trip.
+        const matchKey = `${name}:${key}`;
+        for (const session of this.sessions) {
+            if (session.topics.has(matchKey)) {
+                session.send({ type: 'topic', name, key, payload });
+            }
+        }
+
+        // Also publish to NATS so other gateway instances (future) and
+        // non-gateway subscribers receive the message.
         const subject = `ws.${this.workspaceId}.topic.${name}.${key}`;
         if (this.nc && !this.nc.isClosed()) {
             this.nc.publish(subject, this.codec.encode(payload));
@@ -250,6 +263,13 @@ export class WorkspaceBridge {
         const topicName = tokens[3]!;
         const topicKey = tokens[4]!;
         const matchKey = `${topicName}:${topicKey}`;
+
+        // Skip messages from local sessions — they were already delivered
+        // via publishTopicLocal's local echo path.
+        const msgClientId = (data._clientId as string) ?? '';
+        const isLocal = [...this.sessions].some(s => s.clientId === msgClientId);
+        if (isLocal) return;
+
         for (const session of this.sessions) {
             if (session.topics.has(matchKey)) {
                 session.send({ type: 'topic', name: topicName, key: topicKey, payload: data });

@@ -6,6 +6,8 @@ export class ClientSession {
     readonly entities = new Set<string>();
     readonly topics = new Set<string>();
     readonly channelSeqs = new Map<string, number>();
+    /** Channels currently being replayed — live messages are buffered until replay-end. */
+    readonly replayingChannels = new Set<string>();
 
     private readonly ws: { send(data: string): void; readyState: number; OPEN: number };
 

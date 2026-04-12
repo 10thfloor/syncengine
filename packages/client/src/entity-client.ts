@@ -206,7 +206,32 @@ function getGateway(): Promise<WebSocket> {
                 }
             };
             ws.onerror = () => { gwPromise = null; reject(new Error('Gateway connection failed')); };
-            ws.onclose = () => { gwPromise = null; };
+            ws.onclose = () => {
+                gwPromise = null;
+                // Re-subscribe all entity interests on next reconnect.
+                // getGateway() will be called again by the next entity
+                // state update or subscription, and we re-send subscribes
+                // after the ready handshake.
+                const staleHandlers = new Map(gwEntityHandlers);
+                setTimeout(async () => {
+                    if (staleHandlers.size === 0) return;
+                    try {
+                        const gw = await getGateway();
+                        for (const matchKey of staleHandlers.keys()) {
+                            const [entity, ...rest] = matchKey.split(':');
+                            const key = rest.join(':');
+                            gw.send(JSON.stringify({
+                                type: 'subscribe',
+                                kind: 'entity',
+                                entity,
+                                key,
+                            }));
+                        }
+                    } catch {
+                        // reconnect will retry
+                    }
+                }, 1000);
+            };
         });
     }
     return gwPromise;

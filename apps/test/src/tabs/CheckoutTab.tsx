@@ -82,7 +82,7 @@ const CheckoutFlow = memo(function CheckoutFlow({
     tick();
     timerRef.current = setInterval(tick, 100);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [reservedAt, actions, userId]);
+  }, [reservedAt, userId]); // eslint-disable-line react-hooks/exhaustive-deps — actions is a stable proxy
 
   const handleReserve = useCallback(async () => {
     setError(null);
