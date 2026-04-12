@@ -55,6 +55,7 @@ import {
     workspaceId as runtimeWorkspaceId,
     natsUrl as runtimeNatsUrl,
     authToken as runtimeAuthToken,
+    gatewayUrl as runtimeGatewayUrl,
     // eslint-disable-next-line import/no-unresolved
 } from 'virtual:syncengine/runtime-config';
 
@@ -174,6 +175,43 @@ async function getNats() {
     return natsConnPromise;
 }
 
+// ── Gateway transport for entity subscriptions ───────────────────────────
+
+let gwPromise: Promise<WebSocket> | null = null;
+const gwEntityHandlers = new Map<string, (data: Record<string, unknown>) => void>();
+
+function getGateway(): Promise<WebSocket> {
+    if (!gwPromise) {
+        gwPromise = new Promise<WebSocket>((resolve, reject) => {
+            const ws = new WebSocket(runtimeGatewayUrl);
+            ws.onopen = () => {
+                ws.send(JSON.stringify({
+                    type: 'init',
+                    workspaceId: runtimeWorkspaceId,
+                    channels: [],  // entity-client doesn't need channel consumers
+                    clientId: `entity-${crypto.randomUUID().slice(0, 8)}`,
+                    authToken: runtimeAuthToken || undefined,
+                }));
+            };
+            ws.onmessage = (event: MessageEvent) => {
+                const msg = JSON.parse(event.data as string) as { type?: string; message?: string; entity?: string; key?: string; payload?: Record<string, unknown> };
+                if (msg.type === 'ready') {
+                    resolve(ws);
+                } else if (msg.type === 'error') {
+                    gwPromise = null;
+                    reject(new Error(msg.message));
+                } else if (msg.type === 'entity-state') {
+                    const key = `${msg.entity}:${msg.key}`;
+                    gwEntityHandlers.get(key)?.(msg.payload ?? {});
+                }
+            };
+            ws.onerror = () => { gwPromise = null; reject(new Error('Gateway connection failed')); };
+            ws.onclose = () => { gwPromise = null; };
+        });
+    }
+    return gwPromise;
+}
+
 /** Open or reuse a subscription for a specific (entity, key). */
 function getOrCreateSubscription(
     entity: AnyEntity,
@@ -210,52 +248,81 @@ function getOrCreateSubscription(
             notify(sub);
         });
 
-    // 2. Subscribe to the per-instance NATS subject for live updates
-    //    from other clients. Each arriving state update replaces our
+    // 2. Subscribe to the per-instance subject for live updates from other
+    //    clients. Uses gateway WebSocket when available, otherwise falls back
+    //    to a direct NATS connection. Each arriving state update replaces our
     //    `confirmed` base and triggers a rebase of still-pending actions.
-    let natsSub: { unsubscribe(): void } | null = null;
-    (async () => {
-        try {
-            const { nc, codec } = await getNats();
-            const subject = `ws.${runtimeWorkspaceId}.entity.${entity.$name}.${key}.state`;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            natsSub = nc.subscribe(subject) as any;
-            (async () => {
-                if (!natsSub) return;
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                for await (const msg of natsSub as any) {
-                    try {
-                        const decoded = codec.decode(msg.data) as {
-                            type?: string;
-                            state?: Record<string, unknown>;
-                        };
-                        if (decoded.type === 'ENTITY_STATE' && decoded.state) {
-                            const wasReady = sub.ready;
-                            sub.ready = true;
-                            sub.error = null;
-                            // setConfirmed skips rebase when pending > 0
-                            // (self-echo protection). Only notify React if
-                            // something actually changed for the UI.
-                            const prevOptimistic = sub.optimistic;
-                            setConfirmed(sub, decoded.state);
-                            if (sub.optimistic !== prevOptimistic || !wasReady) {
-                                notify(sub);
-                            }
-                        }
-                    } catch {
-                        // Drop malformed message — keep the sub alive.
+    if (runtimeGatewayUrl) {
+        // Gateway path
+        (async () => {
+            try {
+                const gw = await getGateway();
+                const matchKey = `${entity.$name}:${key}`;
+                gwEntityHandlers.set(matchKey, (payload: Record<string, unknown>) => {
+                    const decoded = payload as { type?: string; state?: Record<string, unknown> };
+                    if (decoded.type === 'ENTITY_STATE' && decoded.state) {
+                        sub.ready = true;
+                        sub.error = null;
+                        setConfirmed(sub, decoded.state);
+                        notify(sub);
                     }
-                }
-            })();
-        } catch (err) {
-            // NATS subscription failed — the hook still works in
-            // request/response mode (each action POSTs and gets the new
-            // state back), just without cross-tab live updates.
-            // eslint-disable-next-line no-console
-            console.warn('[syncengine] entity NATS subscription failed:', err);
-        }
-    })();
-    void natsSub;
+                });
+                gw.send(JSON.stringify({
+                    type: 'subscribe',
+                    kind: 'entity',
+                    entity: entity.$name,
+                    key,
+                }));
+            } catch (err) {
+                console.warn('[entity-client] gateway subscribe failed:', err);
+            }
+        })();
+    } else {
+        // NATS path (direct, used when --raw-nats escape hatch is active)
+        let natsSub: { unsubscribe(): void } | null = null;
+        (async () => {
+            try {
+                const { nc, codec } = await getNats();
+                const subject = `ws.${runtimeWorkspaceId}.entity.${entity.$name}.${key}.state`;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                natsSub = nc.subscribe(subject) as any;
+                (async () => {
+                    if (!natsSub) return;
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    for await (const msg of natsSub as any) {
+                        try {
+                            const decoded = codec.decode(msg.data) as {
+                                type?: string;
+                                state?: Record<string, unknown>;
+                            };
+                            if (decoded.type === 'ENTITY_STATE' && decoded.state) {
+                                const wasReady = sub.ready;
+                                sub.ready = true;
+                                sub.error = null;
+                                // setConfirmed skips rebase when pending > 0
+                                // (self-echo protection). Only notify React if
+                                // something actually changed for the UI.
+                                const prevOptimistic = sub.optimistic;
+                                setConfirmed(sub, decoded.state);
+                                if (sub.optimistic !== prevOptimistic || !wasReady) {
+                                    notify(sub);
+                                }
+                            }
+                        } catch {
+                            // Drop malformed message — keep the sub alive.
+                        }
+                    }
+                })();
+            } catch (err) {
+                // NATS subscription failed — the hook still works in
+                // request/response mode (each action POSTs and gets the new
+                // state back), just without cross-tab live updates.
+                // eslint-disable-next-line no-console
+                console.warn('[syncengine] entity NATS subscription failed:', err);
+            }
+        })();
+        void natsSub;
+    }
 
     // Subscriptions intentionally live for the tab lifetime. Earlier
     // versions disposed on last-listener-removed, but that races with
