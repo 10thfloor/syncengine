@@ -26,6 +26,7 @@ import {
     hashWorkspaceId,
     injectMetaTags,
 } from '@syncengine/core/http';
+import { GatewayServer } from './gateway/server.js';
 import type {
     SyncengineConfig,
     SyncengineUser,
@@ -169,6 +170,14 @@ export function startHttpServer(config: ProductionServerConfig): void {
         'cross-origin-embedder-policy': 'require-corp',
     };
 
+    const natsInternalUrl = (config.natsUrl ?? 'ws://localhost:9222')
+        .replace(/^ws/, 'nats')
+        .replace(/:9222/, ':4222');
+    const gateway = new GatewayServer({
+        natsUrl: natsInternalUrl,
+        restateUrl: config.restateUrl,
+    });
+
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
         const url = req.url ?? '/';
         const pathname = new URL(url, 'http://localhost').pathname;
@@ -206,6 +215,15 @@ export function startHttpServer(config: ProductionServerConfig): void {
             if (!res.headersSent) {
                 res.writeHead(500, { 'content-type': 'text/plain' }).end('Internal Server Error');
             }
+        }
+    });
+
+    server.on('upgrade', (req, socket, head) => {
+        const pathname = (req.url ?? '').split('?')[0];
+        if (pathname === '/gateway') {
+            gateway.handleUpgrade(req, socket, head);
+        } else {
+            socket.destroy();
         }
     });
 
@@ -277,10 +295,12 @@ export function startHttpServer(config: ProductionServerConfig): void {
             console.warn(`[syncengine] provision(${wsKey}) failed: ${msg}`);
         }
 
+        const gatewayUrl = `ws://${req.headers.host}/gateway`;
         const html = injectMetaTags(opts.indexHtml, {
             workspaceId: wsKey,
             natsUrl: opts.natsUrl,
             restateUrl: opts.restateUrl,
+            gatewayUrl,
         });
 
         const buf = Buffer.from(html, 'utf8');
