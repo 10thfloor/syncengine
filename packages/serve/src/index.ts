@@ -1,0 +1,200 @@
+#!/usr/bin/env bun
+/**
+ * `syncengine serve` — production HTTP server.
+ *
+ * Entry point. Boots:
+ *   1. parseFlags — argv → validated Flags (design §8)
+ *   2. env check — required SYNCENGINE_* vars present
+ *   3. dynamic-import `<distDir>/server/config.mjs` → user's config
+ *   4. createServer — composes static + HTML + health + ready
+ *   5. Bun.serve — listen on host:port
+ *   6. SIGTERM handler — drain inflight, exit gracefully
+ *   7. markReady — flips /_ready to 200
+ *
+ * Compiled with:
+ *   bun build --compile --minify --sourcemap=none \
+ *     --target=bun-linux-x64 \
+ *     --outfile=dist/syncengine-serve \
+ *     src/index.ts
+ */
+
+import { resolve as resolvePath, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { errors, CliCode, formatError } from '@syncengine/core';
+import type { SyncengineConfig } from '@syncengine/core';
+import { parseFlags } from './flags.ts';
+import type { Flags } from './flags.ts';
+import { createServer } from './server.ts';
+import { createLogger } from './logger.ts';
+import type { Logger } from './logger.ts';
+import { createShutdownController } from './shutdown.ts';
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+
+async function main(argv: readonly string[]): Promise<void> {
+    let flags: Flags;
+    try {
+        flags = parseFlags(argv);
+    } catch (err) {
+        process.stderr.write(
+            (err instanceof Error ? err.message : String(err)) + '\n',
+        );
+        process.exit(2);
+    }
+
+    const logger = createLogger({ level: flags.logLevel, format: flags.logFormat });
+
+    // Required env vars.
+    const natsUrl = process.env.SYNCENGINE_NATS_URL;
+    const restateUrl = process.env.SYNCENGINE_RESTATE_URL;
+    const gatewayUrl = process.env.SYNCENGINE_GATEWAY_URL;
+    if (!natsUrl || !restateUrl) {
+        const err = errors.cli(CliCode.ENV_MISSING, {
+            message:
+                `syncengine serve requires SYNCENGINE_NATS_URL and SYNCENGINE_RESTATE_URL`,
+            hint: `Set these in your deployment environment.`,
+        });
+        process.stderr.write(formatError(err, { color: process.stderr.isTTY }) + '\n');
+        process.exit(1);
+    }
+
+    // Locate the build output.
+    const distDir = resolvePath(flags.distDir);
+    if (!existsSync(distDir)) {
+        const err = errors.cli(CliCode.BUILD_OUTPUT_MISSING, {
+            message: `distDir ${distDir} does not exist`,
+            hint: `Run \`syncengine build\` first, or pass the correct path as the first argument.`,
+        });
+        process.stderr.write(formatError(err, { color: process.stderr.isTTY }) + '\n');
+        process.exit(1);
+    }
+
+    // Load the compiled config emitted by `syncengine build`.
+    const configPath = join(distDir, 'server', 'config.mjs');
+    if (!existsSync(configPath)) {
+        const err = errors.cli(CliCode.BUILD_OUTPUT_MISSING, {
+            message: `missing ${configPath}`,
+            hint: `Re-run \`syncengine build\` — this file is emitted by the build step.`,
+        });
+        process.stderr.write(formatError(err, { color: process.stderr.isTTY }) + '\n');
+        process.exit(1);
+    }
+    const config = (await import(configPath)).default as SyncengineConfig;
+
+    // Build the server fetch handler.
+    const handle = await createServer({
+        distDir,
+        config,
+        natsUrl,
+        restateUrl,
+        ...(gatewayUrl ? { gatewayUrl } : {}),
+        assetsPrefix: flags.assetsPrefix,
+        resolveTimeoutMs: flags.resolveTimeoutMs,
+        devMode: process.env.NODE_ENV !== 'production',
+    });
+
+    // Track inflight requests so SIGTERM can drain them.
+    const shutdown = createShutdownController({ drainMs: flags.shutdownDrainMs });
+
+    const server = Bun.serve({
+        port: flags.port,
+        hostname: flags.host,
+        maxRequestBodySize: flags.maxBodyBytes,
+        async fetch(req: Request): Promise<Response> {
+            const t0 = performance.now();
+            const work = handle.fetch(req);
+            return shutdown.track(work).then((res) => {
+                logRequest(logger, req, res, t0);
+                return res;
+            });
+        },
+    });
+
+    logger.info({
+        event: 'server.listening',
+        host: flags.host,
+        port: flags.port,
+        distDir,
+        logLevel: flags.logLevel,
+    });
+
+    // Mark ready — accept traffic.
+    handle.markReady();
+
+    // Install SIGTERM / SIGINT handlers.
+    installShutdownHandlers(server, shutdown, logger);
+
+    // Keep the process alive. Bun.serve holds the event loop open on
+    // its own; this Promise is here for clarity.
+    await new Promise<void>(() => {
+        /* never resolves — exit is driven by signals */
+    });
+}
+
+function logRequest(
+    logger: Logger,
+    req: Request,
+    res: Response,
+    t0: number,
+): void {
+    const url = new URL(req.url);
+    const status = res.status;
+    const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+    logger[level]({
+        event: eventFor(url.pathname, status),
+        request_id: res.headers.get('x-request-id'),
+        method: req.method,
+        path: url.pathname,
+        status,
+        duration_ms: Math.round((performance.now() - t0) * 100) / 100,
+    });
+}
+
+function eventFor(path: string, status: number): string {
+    if (path === '/_health') return 'health.ok';
+    if (path === '/_ready') return status === 200 ? 'ready.ok' : 'ready.fail';
+    // Static assets usually have an extension; HTML is the rest.
+    const isStatic = /\.[a-zA-Z0-9]+$/.test(path);
+    const kind = isStatic ? 'static' : 'html';
+    if (status >= 500) return `${kind}.err`;
+    if (status === 404) return `${kind}.404`;
+    if (status === 405) return `${kind}.405`;
+    return `${kind}.ok`;
+}
+
+let signalHandlersInstalled = false;
+
+function installShutdownHandlers(
+    server: ReturnType<typeof Bun.serve>,
+    shutdown: ReturnType<typeof createShutdownController>,
+    logger: Logger,
+): void {
+    if (signalHandlersInstalled) return;
+    signalHandlersInstalled = true;
+
+    let hardExitQueued = false;
+
+    const onSignal = async (sig: NodeJS.Signals): Promise<void> => {
+        if (shutdown.isDraining()) {
+            if (hardExitQueued) return;
+            hardExitQueued = true;
+            logger.warn({ event: 'shutdown.force', signal: sig });
+            process.exit(130);
+        }
+
+        logger.info({ event: 'shutdown.begin', signal: sig });
+        // Stop accepting new connections.
+        server.stop(false);
+        const result = await shutdown.drain();
+        logger.info({ event: 'shutdown.done', ...result });
+        process.exit(0);
+    };
+
+    process.on('SIGTERM', onSignal);
+    process.on('SIGINT', onSignal);
+}
+
+// ── Run ────────────────────────────────────────────────────────────────────
+
+// argv[0] = bun executable, argv[1] = script path. User args start at [2].
+await main(process.argv.slice(2));
