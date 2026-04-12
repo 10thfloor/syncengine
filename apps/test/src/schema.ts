@@ -1,6 +1,6 @@
 import {
   table, id, real, text, integer, view,
-  sum, count, channel,
+  sum, count, max, channel,
 } from '@syncengine/core';
 
 // ── Domain constants ──────────────────────────────────────────────
@@ -66,7 +66,13 @@ export const totalSales = view(transactions)
     count: count(),
   });
 
-export const allOrders = view(orderIndex).distinct();
+// Aggregate by orderId to collapse duplicate rows from Restate replays.
+// Group by the display fields; use max() for numeric fields.
+export const allOrders = view(orderIndex)
+  .aggregate([orderIndex.orderId, orderIndex.productSlug, orderIndex.userId], {
+    price: max(orderIndex.price),
+    createdAt: max(orderIndex.createdAt),
+  });
 
 // ── Channels ──────────────────────────────────────────────────────
 
