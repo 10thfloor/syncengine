@@ -1,5 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { store, useStore } from "@syncengine/client";
+import { hashWorkspaceId } from "@syncengine/core/http";
 
 import {
   products,
@@ -42,6 +43,69 @@ function getUserId(): string {
 const TABS = ["Catalog", "Orders", "Checkout", "Activity"] as const;
 type Tab = (typeof TABS)[number];
 
+// ── Workspace Switcher ──────────────────────────────────────────
+
+const STATUS_COLORS: Record<string, string> = {
+  live: "#22c55e",
+  switching: "#eab308",
+  provisioning: "#eab308",
+  connecting: "#eab308",
+  replaying: "#3b82f6",
+  error: "#ef4444",
+};
+
+function WorkspaceSwitcher() {
+  const s = useStore<DB>();
+  const { workspace, setWorkspace } = s.use({ totalSales });
+  const [input, setInput] = useState("");
+
+  const handleSwitch = useCallback(() => {
+    if (!input.trim()) return;
+    setWorkspace(hashWorkspaceId(input.trim()));
+    setInput("");
+  }, [input, setWorkspace]);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+      <span style={{
+        background: STATUS_COLORS[workspace.status] ?? "#71717a",
+        color: "white",
+        padding: "2px 8px",
+        borderRadius: "4px",
+        fontFamily: "monospace",
+        fontSize: "0.75rem",
+      }}>
+        {workspace.wsKey.slice(0, 8)}{"\u2026"} {workspace.status}
+      </span>
+      <input
+        type="text"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && handleSwitch()}
+        placeholder="workspace id"
+        style={{
+          background: "#27272a",
+          border: "1px solid #3f3f46",
+          borderRadius: "4px",
+          color: "#e4e4e7",
+          padding: "2px 8px",
+          width: "120px",
+          fontSize: "0.75rem",
+        }}
+      />
+      <button onClick={handleSwitch} style={{
+        background: "#3f3f46",
+        border: "none",
+        borderRadius: "4px",
+        color: "#e4e4e7",
+        padding: "2px 8px",
+        cursor: "pointer",
+        fontSize: "0.75rem",
+      }}>Switch</button>
+    </div>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────
 
 export default function App() {
@@ -62,7 +126,10 @@ export default function App() {
       <div className="app-shell">
         <div className="app-header">
           <h1>syncengine storefront</h1>
-          <span className="user-tag">{userId}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            <WorkspaceSwitcher />
+            <span className="user-tag">{userId}</span>
+          </div>
         </div>
 
         <div className="tab-bar" role="tablist">
