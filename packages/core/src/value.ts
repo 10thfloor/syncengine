@@ -161,6 +161,100 @@ export interface ScalarValueDef<
  *  with heavy generic context). */
 export type ValueType<V> = V extends { readonly T: infer T } ? T : never;
 
+// ── Composite form types ──────────────────────────────────────────────────
+
+/** The raw shape a composite value wraps — a record of typed columns
+ *  where each column's `$type` becomes the field type. Nested values
+ *  are ColumnDefs returned by their own `defineValue` call, so they
+ *  naturally unfold into the parent's shape with their branded types
+ *  intact. */
+export type CompositeShape = Record<string, ColumnDef<unknown>>;
+
+/** Flatten a composite shape into its raw object type. For a shape
+ *  `{ amount: integer(), currency: text({ enum: [...] }) }` this yields
+ *  `{ amount: number, currency: 'USD' | 'EUR' | ... }`. Nested value
+ *  columns contribute their already-branded types. */
+export type ShapeOf<S extends CompositeShape> = {
+    readonly [K in keyof S]: S[K] extends ColumnDef<infer T> ? T : never;
+};
+
+export interface CompositeValueOptions<
+    S extends CompositeShape,
+    TCreate extends Record<string, (...args: any[]) => ShapeOf<S>> = Record<
+        string,
+        (...args: any[]) => ShapeOf<S>
+    >,
+    TOps extends Record<string, (v: ShapeOf<S>, ...args: any[]) => unknown> = Record<
+        string,
+        (v: ShapeOf<S>, ...args: any[]) => unknown
+    >,
+> {
+    /** Shape + cross-field invariants. Runs at construction, op return
+     *  (when the op looks self-returning), and `.is()` — see header for
+     *  the auto-rebrand rules. */
+    readonly invariant?: (v: ShapeOf<S>) => boolean;
+    /** Named factories — `Money.usd(100)` etc. Each factory returns the
+     *  raw shape (no brand); the framework validates + stamps. */
+    readonly create?: TCreate;
+    /** Pure ops. If the return's shape matches the composite (plain
+     *  object with the same keys), it's auto-revalidated and stamped —
+     *  so `Money.add(a, b)` returns a branded Money without the user
+     *  doing anything. Other-shaped returns (`boolean`, `string`,
+     *  `number`, nested objects that don't match) pass through. */
+    readonly ops?: TOps;
+}
+
+export interface CompositeValueDef<
+    TName extends string,
+    S extends CompositeShape,
+    TCreate extends Record<string, (...args: any[]) => ShapeOf<S>>,
+    TOps extends Record<string, (v: ShapeOf<S>, ...args: any[]) => unknown>,
+> {
+    /** Callable as a column factory. Composite columns store as
+     *  JSON-encoded TEXT — the shape is atomic on the wire (LWW on the
+     *  whole object). */
+    (): ColumnDef<Branded<ShapeOf<S>, TName>>;
+
+    readonly T: Branded<ShapeOf<S>, TName>;
+    readonly $name: TName;
+    /** The declared shape. Exposed for introspection (column runtime
+     *  validation, zod derivation, nested composite traversal). */
+    readonly $shape: S;
+    readonly zod: ZodType<Branded<ShapeOf<S>, TName>>;
+
+    equals(a: Branded<ShapeOf<S>, TName>, b: Branded<ShapeOf<S>, TName>): boolean;
+    is(x: unknown): x is Branded<ShapeOf<S>, TName>;
+    unsafe(raw: ShapeOf<S>): Branded<ShapeOf<S>, TName>;
+
+    readonly create: {
+        readonly [K in keyof TCreate]: TCreate[K] extends (...args: infer A) => ShapeOf<S>
+            ? (...args: A) => Branded<ShapeOf<S>, TName>
+            : never;
+    };
+
+    readonly ops: {
+        readonly [K in keyof TOps]: TOps[K] extends (v: ShapeOf<S>, ...args: infer A) => infer R
+            // If the op return-type matches the raw shape, it's auto-
+            // rebranded at runtime — reflect that in the type by
+            // mapping `R` → `Branded<R, TName>` when R is assignable
+            // to the shape.
+            ? (v: Branded<ShapeOf<S>, TName>, ...args: A) => R extends ShapeOf<S>
+                ? Branded<ShapeOf<S>, TName>
+                : R
+            : never;
+    };
+}
+
+/** Shared brand between scalar and composite value defs — lets callers
+ *  accept either form without caring which. */
+export interface AnyValueDef {
+    readonly $name: string;
+    readonly zod: ZodType<unknown>;
+    readonly is: (x: unknown) => boolean;
+    readonly equals: (a: never, b: never) => boolean;
+    readonly unsafe: (raw: never) => unknown;
+}
+
 // ── defineValue — scalar form ──────────────────────────────────────────────
 
 /** Internal: run an invariant, converting `false` / `throw` into the
@@ -227,9 +321,26 @@ function buildScalarZod<TRaw>(
     return base as unknown as ZodType<TRaw>;
 }
 
-/** Scalar `defineValue`. The second argument is a single `ColumnDef<T>` —
- *  `text()`, `integer()`, etc. Composite form (second arg a shape record)
- *  lands in Phase A2. */
+/** Overloads — TS picks the scalar form when arg 2 is a ColumnDef (has
+ *  `kind` and `sqlType`) and the composite form when it's a plain
+ *  shape record. */
+export function defineValue<
+    const TName extends string,
+    S extends CompositeShape,
+    TCreate extends Record<string, (...args: any[]) => ShapeOf<S>> = Record<
+        string,
+        (...args: any[]) => ShapeOf<S>
+    >,
+    TOps extends Record<string, (v: ShapeOf<S>, ...args: any[]) => unknown> = Record<
+        string,
+        (v: ShapeOf<S>, ...args: any[]) => unknown
+    >,
+>(
+    name: TName,
+    shape: S,
+    opts?: CompositeValueOptions<S, TCreate, TOps>,
+): CompositeValueDef<TName, S, TCreate, TOps>;
+
 export function defineValue<
     const TName extends string,
     TRaw,
@@ -244,10 +355,53 @@ export function defineValue<
 >(
     name: TName,
     column: ColumnDef<TRaw>,
-    opts: ScalarValueOptions<TRaw, TCreate, TOps> = {},
-): ScalarValueDef<TName, TRaw, TCreate, TOps> {
-    validateName(name);
+    opts?: ScalarValueOptions<TRaw, TCreate, TOps>,
+): ScalarValueDef<TName, TRaw, TCreate, TOps>;
 
+export function defineValue(
+    name: string,
+    shapeOrColumn: ColumnDef<unknown> | CompositeShape,
+    opts: ScalarValueOptions<unknown> | CompositeValueOptions<CompositeShape> = {},
+): unknown {
+    // Implementation signature returns `unknown` to satisfy both
+    // overloads — the type-level narrowing happens at the call site via
+    // overload resolution.
+    validateName(name);
+    if (isColumnDef(shapeOrColumn)) {
+        return defineScalar(
+            name,
+            shapeOrColumn as ColumnDef<unknown>,
+            opts as ScalarValueOptions<unknown>,
+        );
+    }
+    return defineComposite(
+        name,
+        shapeOrColumn as CompositeShape,
+        opts as CompositeValueOptions<CompositeShape>,
+    );
+}
+
+function isColumnDef(v: unknown): v is ColumnDef<unknown> {
+    return (
+        !!v &&
+        typeof v === 'object' &&
+        typeof (v as ColumnDef<unknown>).kind === 'string' &&
+        typeof (v as ColumnDef<unknown>).sqlType === 'string'
+    );
+}
+
+// ── Scalar implementation ────────────────────────────────────────────────
+
+function defineScalar<
+    TName extends string,
+    TRaw,
+    TCreate extends Record<string, (...args: any[]) => TRaw> = Record<string, (...args: any[]) => TRaw>,
+    TOps extends Record<string, (v: TRaw, ...args: any[]) => unknown> = Record<string, (v: TRaw, ...args: any[]) => unknown>,
+>(
+    name: TName,
+    column: ColumnDef<TRaw>,
+    opts: ScalarValueOptions<TRaw, TCreate, TOps>,
+): ScalarValueDef<TName, TRaw, TCreate, TOps> {
     const invariant = opts.invariant;
     const zodSchema = buildScalarZod(name, column, invariant);
 
@@ -303,18 +457,21 @@ export function defineValue<
         }
     }
 
-    // Callable column factory. Returns a ColumnDef whose `$type` is the
-    // branded type so entity / table state inference picks it up. The
-    // `as ColumnDef<Branded<TRaw, TName>>` cast crosses the brand
-    // boundary — the underlying `ColumnDef` is inferred with the raw
-    // `TRaw`, and we lift it once here so callers see the branded form
-    // everywhere downstream.
-    const factory = (): ColumnDef<Branded<TRaw, TName>> => (
-        { ...column, $type: undefined as never } as unknown as ColumnDef<Branded<TRaw, TName>>
-    );
+    // Closure slot populated after the def is built so the returned
+    // column factory can stamp `$valueRef` pointing at it — lets
+    // composites recurse into nested scalar value columns during shape
+    // validation / rehydration.
+    let selfRef: AnyValueDef | null = null;
 
-    // Stitch everything into the final value-def object. The cast is
-    // safe: we've mirrored the public shape piece by piece.
+    const factory = (): ColumnDef<Branded<TRaw, TName>> => {
+        const col = {
+            ...column,
+            $type: undefined as never,
+            $valueRef: selfRef,
+        } as unknown as ColumnDef<Branded<TRaw, TName>>;
+        return col;
+    };
+
     const def = Object.assign(factory, {
         $name: name,
         T: undefined as unknown as Branded<TRaw, TName>,
@@ -325,7 +482,200 @@ export function defineValue<
         create: wrappedCreate as never,
         ops: wrappedOps as never,
     }) as unknown as ScalarValueDef<TName, TRaw, TCreate, TOps>;
+    selfRef = def as unknown as AnyValueDef;
+    return def;
+}
 
+// ── Composite implementation ─────────────────────────────────────────────
+
+/** For each composite shape field, decide how to validate + rehydrate.
+ *  If the column was produced by `SomeValueDef()`, its `$valueRef`
+ *  points at the nested def so we can recurse. Primitive columns get
+ *  a direct type-of check. */
+interface FieldValidator {
+    readonly key: string;
+    readonly isValid: (v: unknown) => boolean;
+    readonly rehydrate: (v: unknown) => unknown;
+}
+
+function buildFieldValidators<S extends CompositeShape>(shape: S): FieldValidator[] {
+    const out: FieldValidator[] = [];
+    for (const key of Object.keys(shape)) {
+        const col = shape[key] as ColumnDef<unknown> & { $valueRef?: AnyValueDef };
+        const nested = col.$valueRef;
+        if (nested) {
+            out.push({
+                key,
+                isValid: (v) => nested.is(v),
+                rehydrate: (v) => {
+                    // Unsafe-brand on rehydration — the NATS path has
+                    // already validated, and re-validating on every
+                    // subscribe hammers the hot path. `.is()` above
+                    // decides admissibility; this just restamps.
+                    return (nested.unsafe as (x: unknown) => unknown)(v);
+                },
+            });
+            continue;
+        }
+        const prim: (v: unknown) => boolean = (() => {
+            switch (col.kind) {
+                case 'text': case 'id': return (v: unknown) => typeof v === 'string';
+                case 'integer': case 'real': return (v: unknown) => typeof v === 'number';
+                case 'boolean': return (v: unknown) => typeof v === 'boolean';
+                default: return () => false;
+            }
+        })();
+        out.push({ key, isValid: prim, rehydrate: (v) => v });
+    }
+    return out;
+}
+
+function buildCompositeZod<S extends CompositeShape>(
+    name: string,
+    shape: S,
+    invariant: ((v: ShapeOf<S>) => boolean) | undefined,
+): ZodType<ShapeOf<S>> {
+    const shapeZod: Record<string, ZodType<unknown>> = {};
+    for (const key of Object.keys(shape)) {
+        const col = shape[key] as ColumnDef<unknown> & { $valueRef?: AnyValueDef };
+        // Nested value columns use their own `.zod` — already includes
+        // their enum + invariant handling. Primitive columns use the
+        // scalar zod builder (no invariant, nothing user-level to run)
+        // so enum narrowing, numeric refinement etc. stay consistent
+        // with `defineValue('x', text({ enum }))` scalars.
+        shapeZod[key] = col.$valueRef
+            ? (col.$valueRef.zod as ZodType<unknown>)
+            : (buildScalarZod(name, col, undefined) as ZodType<unknown>);
+    }
+    let base = z.object(shapeZod) as unknown as ZodType<ShapeOf<S>>;
+    if (invariant) {
+        base = (base as unknown as { refine: (fn: (v: ShapeOf<S>) => boolean, msg: unknown) => ZodType<ShapeOf<S>> })
+            .refine(
+                (v) => { try { return invariant(v); } catch { return false; } },
+                { message: `${name}: invariant rejected value` },
+            ) as unknown as ZodType<ShapeOf<S>>;
+    }
+    return base;
+}
+
+function defineComposite<
+    TName extends string,
+    S extends CompositeShape,
+    TCreate extends Record<string, (...args: any[]) => ShapeOf<S>> = Record<string, (...args: any[]) => ShapeOf<S>>,
+    TOps extends Record<string, (v: ShapeOf<S>, ...args: any[]) => unknown> = Record<string, (v: ShapeOf<S>, ...args: any[]) => unknown>,
+>(
+    name: TName,
+    shape: S,
+    opts: CompositeValueOptions<S, TCreate, TOps>,
+): CompositeValueDef<TName, S, TCreate, TOps> {
+    const invariant = opts.invariant;
+    const validators = buildFieldValidators(shape);
+    const zodSchema = buildCompositeZod(name, shape, invariant);
+
+    function shapeMatches(x: unknown): boolean {
+        if (x === null || typeof x !== 'object') return false;
+        for (const v of validators) {
+            const field = (x as Record<string, unknown>)[v.key];
+            if (field === undefined) return false;
+            if (!v.isValid(field)) return false;
+        }
+        return true;
+    }
+
+    function is(x: unknown): x is Branded<ShapeOf<S>, TName> {
+        // Always runs the invariant, even for branded values — `unsafe`
+        // bypasses invariant at construction, so a branded value can
+        // still be invalid. Matches the spec: `.is()` answers "is this
+        // a valid instance?", not "was this ever branded?".
+        if (!shapeMatches(x)) return false;
+        if (!invariant) return true;
+        try { return invariant(x as ShapeOf<S>); } catch { return false; }
+    }
+
+    function equals(a: Branded<ShapeOf<S>, TName>, b: Branded<ShapeOf<S>, TName>): boolean {
+        if (a === b) return true;
+        if (!a || !b) return false;
+        for (const v of validators) {
+            const av = (a as Record<string, unknown>)[v.key];
+            const bv = (b as Record<string, unknown>)[v.key];
+            const col = shape[v.key] as ColumnDef<unknown> & { $valueRef?: AnyValueDef };
+            if (col.$valueRef) {
+                if (!(col.$valueRef.equals as (x: unknown, y: unknown) => boolean)(av, bv)) {
+                    return false;
+                }
+            } else {
+                if (av !== bv) return false;
+            }
+        }
+        return true;
+    }
+
+    function unsafe(raw: ShapeOf<S>): Branded<ShapeOf<S>, TName> {
+        // Rehydrate nested value fields so the brand chain is preserved
+        // after JSON.parse. Pure primitives pass through.
+        const rehydrated: Record<string, unknown> = {};
+        for (const v of validators) {
+            rehydrated[v.key] = v.rehydrate((raw as Record<string, unknown>)[v.key]);
+        }
+        return stampBrand(rehydrated as ShapeOf<S>, name) as Branded<ShapeOf<S>, TName>;
+    }
+
+    // Wrap user create-fns: run invariant + stamp brand.
+    const wrappedCreate: Record<string, (...args: unknown[]) => unknown> = {};
+    if (opts.create) {
+        for (const [key, fn] of Object.entries(opts.create)) {
+            wrappedCreate[key] = (...args: unknown[]) => {
+                const raw = (fn as (...a: unknown[]) => ShapeOf<S>)(...args);
+                runInvariant(name, invariant, raw);
+                return unsafe(raw);
+            };
+        }
+    }
+
+    // Ops auto-rebrand when the return matches the composite shape.
+    // Other-shaped returns pass through untouched — see header block.
+    const wrappedOps: Record<string, (...args: unknown[]) => unknown> = {};
+    if (opts.ops) {
+        for (const [key, fn] of Object.entries(opts.ops)) {
+            wrappedOps[key] = (...args: unknown[]) => {
+                const result = (fn as (...a: unknown[]) => unknown)(...args);
+                if (hasBrand(result, name)) return result;
+                if (shapeMatches(result)) {
+                    runInvariant(name, invariant, result as ShapeOf<S>);
+                    return unsafe(result as ShapeOf<S>);
+                }
+                return result;
+            };
+        }
+    }
+
+    let selfRef: AnyValueDef | null = null;
+
+    const factory = (): ColumnDef<Branded<ShapeOf<S>, TName>> => {
+        const col = {
+            $type: undefined as never,
+            kind: 'text' as const,    // JSON-in-TEXT; Phase B1 adds 'value' kind
+            sqlType: 'TEXT',
+            nullable: false,
+            primaryKey: false,
+            merge: 'lww' as const,
+            $valueRef: selfRef,
+        } as unknown as ColumnDef<Branded<ShapeOf<S>, TName>>;
+        return col;
+    };
+
+    const def = Object.assign(factory, {
+        $name: name,
+        $shape: shape,
+        T: undefined as unknown as Branded<ShapeOf<S>, TName>,
+        zod: zodSchema as ZodType<Branded<ShapeOf<S>, TName>>,
+        is,
+        equals,
+        unsafe,
+        create: wrappedCreate as never,
+        ops: wrappedOps as never,
+    }) as unknown as CompositeValueDef<TName, S, TCreate, TOps>;
+    selfRef = def as unknown as AnyValueDef;
     return def;
 }
 
