@@ -290,34 +290,8 @@ if (appDir) {
         const { entities, workflows, heartbeats, webhooks, services, buses } = await loadDefinitions(appDir);
         await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services);
 
-        // Bus runtime — only spin up if there are subscribers or declared
-        // buses. Matches the generated-entry gate in packages/cli/src/build.ts.
-        const hasSubscribers = workflows.some(isBusSubscriberWorkflow);
-        if (hasSubscribers || buses.length > 0) {
-            const { BusManager, realDispatcherFactory } = await import('./bus-manager.js');
-            const { installBusPublisher } = await import('./bus-context.js');
-            const { connectNats } = await import('@syncengine/gateway-core');
-
-            const natsUrl = process.env.SYNCENGINE_NATS_URL ?? 'ws://localhost:9222';
-            const restateUrl = process.env.SYNCENGINE_RESTATE_URL ?? 'http://localhost:8080';
-            const busManager = new BusManager({
-                natsUrl,
-                restateUrl,
-                workflows,
-                dispatcherFactory: realDispatcherFactory,
-                installSignalHandlers: process.env.SYNCENGINE_NO_BUS_SIGNALS !== '1',
-            });
-            await busManager.start();
-            try {
-                const nc = await connectNats(natsUrl);
-                installBusPublisher(nc);
-                await busManager.attachToNats(nc);
-                console.log('[syncengine] bus runtime attached to ' + natsUrl);
-            } catch (err) {
-                console.warn('[syncengine] bus runtime could not attach to NATS: ' +
-                    (err instanceof Error ? err.message : String(err)));
-            }
-        }
+        const { bootBusRuntime } = await import('./bus-boot.js');
+        await bootBusRuntime({ workflows, buseCount: buses.length });
     })();
 }
 
@@ -385,3 +359,5 @@ export type {
     DispatcherFactory,
     DispatcherHandle,
 } from './bus-manager.js';
+export { bootBusRuntime } from './bus-boot.js';
+export type { BootBusRuntimeOptions, BusRuntimeHandle } from './bus-boot.js';
