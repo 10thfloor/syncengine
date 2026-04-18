@@ -132,7 +132,7 @@ export const order = entity('order', {
             at: req.at,
           }),
         ],
-      }) as unknown as typeof state;
+      });
     },
 
     // Parallel branch: after the subscriber workflow successfully ships,

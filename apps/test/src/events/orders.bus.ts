@@ -1,23 +1,31 @@
 // ── Orders Event Bus ────────────────────────────────────────────────────────
 //
-// The `orderEvents` bus carries order lifecycle events (placed, paid,
-// shipped, cancelled) from the `order` entity to any subscriber workflow.
+// Order lifecycle events (placed, paid, shipped, cancelled) fan out to every
+// interested subscriber workflow. Used as the kitchen-sink bus demo — it
+// exercises both effect-style `publish()` (from the order entity) and
+// imperative `orderEvents.publish(ctx, ...)` (from the shipOnPay workflow).
 //
-// Phase 1 event-bus demo wiring:
-//
-//   order.pay()  ──publish()──▶  orderEvents   ◀──on()──  shipOnPay
-//                                     │
-//                                     └── on shipping failure ──▶
-//                                           TerminalError
-//                                                │
-//                                                ▼
-//                                         orderEvents.dlq  ◀──on()──  alertOnShippingFailure
-//
-// The auto-generated `orderEvents.dlq` accessor carries `DeadEvent<OrderEvent>`
-// — every subscriber workflow that terminally fails one of these events
-// lands there, and `alertOnShippingFailure` subscribes to log the failure.
+//   order.pay()  ──publish()──▶  orderEvents  ◀──on().where(paid)──  shipOnPay
+//                                     ▲                                  │
+//                                     │              on success          │
+//                                     └─── orderEvents.publish(ctx) ─────┘
+//                                                                        │
+//                                                  on shipping failure   │
+//                                                  (TerminalError)       │
+//                                                         │              │
+//                                                         ▼              ▼
+//                                      orderEvents.dlq ◀──on()─  ◀──on().where(shipped)─
+//                                      (alertOnShippingFailure)  (advanceOrderOnShipped)
 
-import { bus, Retention, days } from '@syncengine/core';
+import {
+    bus,
+    Retention,
+    Delivery,
+    Retry,
+    seconds,
+    minutes,
+    days,
+} from '@syncengine/core';
 import { z } from 'zod';
 
 /** Typed enum for the lifecycle event field. Use `OrderEvent.enum.paid`
@@ -35,11 +43,21 @@ export const OrderEventSchema = z.object({
 
 export type OrderEventPayload = z.infer<typeof OrderEventSchema>;
 
+/** Bus-wide default retry policy. Individual subscribers can still
+ *  override this via their own `retry:` option (see shipOnPay for a
+ *  tighter per-subscriber schedule). */
+export const ORDER_EVENTS_RETRY = Retry.exponential({
+    attempts: 3,
+    initial: seconds(1),
+    max: minutes(1),
+});
+
 export const orderEvents = bus('orderEvents', {
     schema: OrderEventSchema,
-    // Layer 2 override: durable for 30 days so DLQ replays stay
-    // meaningful across multi-day incident windows. Fan-out (the
-    // default) lets shipOnPay + future subscribers read the same
-    // stream independently.
+    // 30-day durability so DLQ replays stay meaningful across incident
+    // windows. Fan-out delivery is also the default, but declaring it
+    // explicitly documents the topology: every subscriber reads an
+    // independent cursor over the same stream.
     retention: Retention.durableFor(days(30)),
+    delivery: Delivery.fanout(),
 });
