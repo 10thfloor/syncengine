@@ -73,7 +73,7 @@ export const order = defineEntity('order', {
 });
 ```
 
-The entity runtime validates the payload against the bus schema, persists state, then publishes to NATS JetStream inside a `ctx.run` so Restate's deterministic replay never double-fires.
+The entity runtime validates the payload against the bus schema, persists state, then publishes to NATS JetStream via `js.publish()` inside a `ctx.run`. The JetStream `PubAck` confirms durable persistence before the `ctx.run` completes — if the ack fails, Restate retries the handler. Deterministic replay ensures effects never double-fire.
 
 ## Publishing from a workflow / webhook / heartbeat (imperative)
 

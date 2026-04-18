@@ -137,21 +137,26 @@ export function uninstallBusPublisher(): void {
     setBusPublisher(null);
 }
 
-// Lazily imported — nats.js exposes `headers()` from @nats-io/nats-core
-// transitively, but the import path differs across package versions.
-// We cache the factory so the publish hot path avoids repeat requires.
-let headersFactory: ((init?: [string, string][]) => unknown) | null = null;
-function buildHeaders(requestId: string): unknown {
+// The real `headers()` signature is `headers(code?: number, description?: string)`
+// — it returns an empty MsgHdrs that callers populate via `.set()`. An earlier
+// version of this helper passed a tuple-array initializer; the nats.js client
+// silently dropped it, so `x-request-id` never actually shipped. Match the
+// pattern used in packages/gateway-core/src/bus-dlq.ts.
+type MsgHdrsLike = { set(key: string, value: string): void };
+let headersFactory: (() => MsgHdrsLike) | null = null;
+function buildHeaders(requestId: string): MsgHdrsLike {
     if (!headersFactory) {
         // @nats-io/transport-node re-exports core primitives.
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const mod = require('@nats-io/transport-node') as {
-            headers?: (init?: [string, string][]) => unknown;
+            headers?: () => MsgHdrsLike;
         };
         if (typeof mod.headers !== 'function') {
             throw new Error('[bus] @nats-io/transport-node.headers() not available');
         }
         headersFactory = mod.headers;
     }
-    return headersFactory([['x-request-id', requestId]]);
+    const h = headersFactory();
+    h.set('x-request-id', requestId);
+    return h;
 }

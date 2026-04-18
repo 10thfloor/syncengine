@@ -14,6 +14,22 @@ import { banner, note } from './runner';
 import { findAppRoot } from './state';
 import { errors, CliCode } from '@syncengine/core';
 
+/**
+ * Map a public-facing NATS URL to the internal connection URL.
+ * See packages/server/src/serve.ts for canonical implementation.
+ */
+function toNatsInternalUrl(publicUrl: string): string {
+    try {
+        const u = new URL(publicUrl);
+        if (u.protocol === 'ws:') u.protocol = 'nats:';
+        else if (u.protocol === 'wss:') u.protocol = 'tls:';
+        if (u.port === '9222') u.port = '4222';
+        return u.toString().replace(/\/$/, '');
+    } catch {
+        return publicUrl;
+    }
+}
+
 export async function startCommand(_args: string[]): Promise<void> {
     const repoRoot = await findAppRoot();
 
@@ -53,7 +69,7 @@ export async function startCommand(_args: string[]): Promise<void> {
             HTTP_PORT: String(httpPort),
             SYNCENGINE_NATS_URL: natsUrl,
             SYNCENGINE_RESTATE_URL: restateUrl,
-            NATS_URL: natsUrl.replace(/^ws/, 'nats').replace(/:9222/, ':4222'),
+            NATS_URL: toNatsInternalUrl(natsUrl),
         },
     });
 }

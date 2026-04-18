@@ -61,20 +61,26 @@ async function entityEffect<T>(
     if (attrs.user !== undefined) spanAttrs[ATTR_USER] = attrs.user;
 
     const tracer = trace.getTracer(TRACER_NAME);
-    const span = tracer.startSpan(`entity.${attrs.name}.${attrs.op}`, {
-        attributes: spanAttrs,
-    });
-
-    try {
-        const result = await fn();
-        span.end();
-        return result;
-    } catch (err) {
-        span.recordException(err as Error);
-        span.setStatus({ code: SpanStatusCode.ERROR });
-        span.end();
-        throw err;
-    }
+    // startActiveSpan — NOT startSpan — so the span becomes the active
+    // parent for the duration of fn(). Child spans created inside the
+    // user effect (Phase B2 `ObservabilityCtx.span`, Phase C bus/HTTP
+    // auto-instrumentation) nest under this one instead of becoming
+    // siblings of the outer request span.
+    return tracer.startActiveSpan(
+        `entity.${attrs.name}.${attrs.op}`,
+        { attributes: spanAttrs },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
 }
 
 export const instrument = {

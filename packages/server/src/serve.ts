@@ -34,11 +34,37 @@ import {
     isRpcError,
 } from '@syncengine/http-core';
 import { GatewayServer } from './gateway/server.js';
+import { dispatchWebhook, findWebhook } from './webhook-http.js';
+import { getRegisteredWebhooks } from './webhook-registry.js';
 import type {
     SyncengineConfig,
     SyncengineUser,
 } from '@syncengine/core';
 import { provisionWorkspace } from '@syncengine/core/http';
+
+/**
+ * Map a public-facing NATS URL to the internal connection URL.
+ *
+ *   ws://host:9222   → nats://host:4222   (cleartext)
+ *   wss://host:9222  → tls://host:4222    (TLS)
+ *
+ * Any other scheme is passed through untouched. Port 9222 (the gateway's
+ * WebSocket port) maps to 4222 (native NATS); any other port is preserved.
+ *
+ * This replaces a regex that silently corrupted `wss://` to `natss://`
+ * because `/^ws/` only matched the first two characters.
+ */
+export function toNatsInternalUrl(publicUrl: string): string {
+    try {
+        const u = new URL(publicUrl);
+        if (u.protocol === 'ws:') u.protocol = 'nats:';
+        else if (u.protocol === 'wss:') u.protocol = 'tls:';
+        if (u.port === '9222') u.port = '4222';
+        return u.toString().replace(/\/$/, '');
+    } catch {
+        return publicUrl;
+    }
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -167,9 +193,7 @@ export function startHttpServer(config: ProductionServerConfig): void {
         'cross-origin-embedder-policy': 'require-corp',
     };
 
-    const natsInternalUrl = (config.natsUrl ?? 'ws://localhost:9222')
-        .replace(/^ws/, 'nats')
-        .replace(/:9222/, ':4222');
+    const natsInternalUrl = toNatsInternalUrl(config.natsUrl ?? 'ws://localhost:9222');
     const gateway = new GatewayServer({
         natsUrl: natsInternalUrl,
         restateUrl: config.restateUrl,
@@ -183,6 +207,12 @@ export function startHttpServer(config: ProductionServerConfig): void {
             // ── RPC proxy ──────────────────────────────────────────
             if (pathname.startsWith('/__syncengine/rpc/') && req.method === 'POST') {
                 await handleRpc(req, res, restateUrl);
+                return;
+            }
+
+            // ── Webhooks (external senders) ────────────────────────
+            if (pathname.startsWith('/webhooks')) {
+                await handleWebhook(req, res, pathname, restateUrl);
                 return;
             }
 
@@ -312,6 +342,38 @@ export function startHttpServer(config: ProductionServerConfig): void {
             'cache-control': 'no-cache',
             ...securityHeaders,
         }).end(buf);
+    }
+
+    // ── Webhook handler ────────────────────────────────────────────────
+
+    async function handleWebhook(
+        req: IncomingMessage,
+        res: ServerResponse,
+        pathname: string,
+        restateIngressUrl: string,
+    ): Promise<void> {
+        if (req.method !== 'POST') {
+            res.writeHead(405, { 'content-type': 'application/json' }).end(
+                JSON.stringify({ ok: false, reason: 'webhooks accept POST only' }),
+            );
+            return;
+        }
+        const defs = getRegisteredWebhooks();
+        const def = findWebhook(pathname, defs);
+        if (!def) {
+            res.writeHead(404, { 'content-type': 'application/json' }).end(
+                JSON.stringify({ ok: false, reason: `no webhook registered at ${pathname}` }),
+            );
+            return;
+        }
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const rawBody = Buffer.concat(chunks).toString('utf8');
+        const request = buildRequest(req);
+        const result = await dispatchWebhook(def, request, rawBody, restateIngressUrl);
+        const headers: Record<string, string> = {};
+        if (result.contentType) headers['content-type'] = result.contentType;
+        res.writeHead(result.status, headers).end(result.body);
     }
 
     // ── RPC proxy handler ──────────────────────────────────────────────
