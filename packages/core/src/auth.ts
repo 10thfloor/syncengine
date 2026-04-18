@@ -53,3 +53,32 @@ export interface AccessPolicy {
     readonly $kind: 'access';
     readonly check: (ctx: AccessContext) => boolean;
 }
+
+// ── Access DSL ─────────────────────────────────────────────────────────────
+//
+// Composable access predicates. Every value here is either a terminal
+// constant (Access.public, Access.authenticated, Access.deny) or a
+// factory that returns a fresh AccessPolicy. All policies share the
+// same envelope so they can be composed with `any()` / `all()` and
+// evaluated uniformly by the enforcement layer.
+
+const publicPolicy: AccessPolicy = {
+    $kind: 'access',
+    check: () => true,
+};
+
+const authenticatedPolicy: AccessPolicy = {
+    $kind: 'access',
+    check: (ctx) => ctx.user !== null,
+};
+
+const denyPolicy: AccessPolicy = {
+    $kind: 'access',
+    check: () => false,
+};
+
+export const Access = {
+    public: publicPolicy,
+    authenticated: authenticatedPolicy,
+    deny: denyPolicy,
+};
