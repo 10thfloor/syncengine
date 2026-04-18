@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { bus } from '@syncengine/core';
+import { bus, Concurrency, Rate } from '@syncengine/core';
 import { on, From, isSubscription, deriveInvocationId } from '../bus-on';
 
 const schema = z.object({
@@ -118,6 +118,72 @@ describe('on().ordered / .orderedBy / .key (invocation-id modifiers)', () => {
     it('.orderedBy / .key reject non-function arg', () => {
         expect(() => on(orderEvents).orderedBy(42 as never)).toThrow(/orderedBy/);
         expect(() => on(orderEvents).key('static' as never)).toThrow(/key/);
+    });
+});
+
+describe('Concurrency + Rate factories', () => {
+    it('Concurrency.global carries the limit', () => {
+        expect(Concurrency.global(10)).toEqual({ kind: 'global', limit: 10 });
+    });
+
+    it('Concurrency.perKey carries the limit', () => {
+        expect(Concurrency.perKey(3)).toEqual({ kind: 'perKey', limit: 3 });
+    });
+
+    it('Concurrency rejects non-positive / non-integer limits', () => {
+        expect(() => Concurrency.global(0)).toThrow(/positive integer/);
+        expect(() => Concurrency.global(-1)).toThrow(/positive integer/);
+        expect(() => Concurrency.global(1.5)).toThrow(/positive integer/);
+        expect(() => Concurrency.perKey(0)).toThrow(/positive integer/);
+    });
+
+    it('Rate.perSecond stores rate directly', () => {
+        expect(Rate.perSecond(100)).toEqual({ kind: 'tokenBucket', perSecond: 100 });
+    });
+
+    it('Rate.perMinute / perHour compile to perSecond', () => {
+        expect(Rate.perMinute(60)).toEqual({ kind: 'tokenBucket', perSecond: 1 });
+        expect(Rate.perHour(3600)).toEqual({ kind: 'tokenBucket', perSecond: 1 });
+    });
+
+    it('Rate rejects non-positive / non-finite values', () => {
+        expect(() => Rate.perSecond(0)).toThrow(/positive finite/);
+        expect(() => Rate.perSecond(-1)).toThrow(/positive finite/);
+        expect(() => Rate.perSecond(Infinity)).toThrow(/positive finite/);
+        expect(() => Rate.perMinute(NaN)).toThrow(/positive finite/);
+    });
+});
+
+describe('on().concurrency / .rate (throttle modifiers)', () => {
+    it('.concurrency(Concurrency.global(n)) attaches the config', () => {
+        const s = on(orderEvents).concurrency(Concurrency.global(5));
+        expect(s.$concurrency).toEqual({ kind: 'global', limit: 5 });
+    });
+
+    it('.rate(Rate.perSecond(n)) attaches the config', () => {
+        const s = on(orderEvents).rate(Rate.perSecond(100));
+        expect(s.$rate).toEqual({ kind: 'tokenBucket', perSecond: 100 });
+    });
+
+    it('composes with every other modifier', () => {
+        const s = on(orderEvents)
+            .where((e) => e.event === 'paid')
+            .from(From.latest())
+            .orderedBy((e) => e.orderId)
+            .concurrency(Concurrency.perKey(3))
+            .rate(Rate.perSecond(50));
+        expect(s.predicate).toBeDefined();
+        expect(s.cursor).toEqual({ kind: 'latest' });
+        expect(s.keying?.kind).toBe('byKey');
+        expect(s.$concurrency).toEqual({ kind: 'perKey', limit: 3 });
+        expect(s.$rate).toEqual({ kind: 'tokenBucket', perSecond: 50 });
+    });
+
+    it('later modifier replaces earlier', () => {
+        const s = on(orderEvents)
+            .concurrency(Concurrency.global(5))
+            .concurrency(Concurrency.global(10));
+        expect(s.$concurrency).toEqual({ kind: 'global', limit: 10 });
     });
 });
 

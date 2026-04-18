@@ -233,6 +233,12 @@ export class BusManager {
             // the dispatcher just calls it on every message.
             invocationIdOf: (seq: bigint, event: unknown) =>
                 deriveInvocationId(busName, seq, event, keying as never),
+            ...(sub.$subscription.$concurrency
+                ? { concurrency: sub.$subscription.$concurrency }
+                : {}),
+            ...(sub.$subscription.$rate
+                ? { rate: sub.$subscription.$rate }
+                : {}),
         };
         const handle = this.config.dispatcherFactory(cfg);
         this.handles.set(key, handle);

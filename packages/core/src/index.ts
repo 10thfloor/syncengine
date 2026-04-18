@@ -222,7 +222,7 @@ export { bytes } from './bytes';
 export type { Bytes } from './bytes';
 
 // ── Bus config factory namespaces ──────────────────────────────────────────
-export { Retention, Delivery, Storage, Retry, Backoff } from './bus-config';
+export { Retention, Delivery, Storage, Retry, Backoff, Concurrency, Rate } from './bus-config';
 export type {
     RetentionConfig,
     DeliveryConfig,
@@ -231,6 +231,8 @@ export type {
     StorageKind,
     RetryConfig,
     BackoffConfig,
+    ConcurrencyConfig,
+    RateConfig,
 } from './bus-config';
 
 // ── bus() primitive ────────────────────────────────────────────────────────

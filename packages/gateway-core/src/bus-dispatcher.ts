@@ -35,7 +35,7 @@ import {
     type JsMsg,
 } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
-import type { DeadEvent, RetryConfig } from '@syncengine/core';
+import type { DeadEvent, RetryConfig, ConcurrencyConfig, RateConfig } from '@syncengine/core';
 import { connectNats } from './nats-connect';
 import { retryToBackoffArray } from './bus-backoff';
 import { cursorToDeliverPolicy, type CursorConfig } from './bus-cursor';
@@ -67,6 +67,14 @@ export interface BusDispatcherConfig {
      *  processing per JetStream seq, no ordering. Matches Phase 2a
      *  behaviour. */
     readonly invocationIdOf?: (seq: bigint, event: unknown) => string;
+    /** In-flight invocation cap. `kind: 'global'` maps to the JetStream
+     *  durable consumer's `max_ack_pending`; `perKey` is an in-process
+     *  counter that isn't wired yet (throws at dispatcher start). */
+    readonly concurrency?: ConcurrencyConfig;
+    /** Token-bucket throttle. Not wired yet; declared here so the
+     *  BusManager → dispatcher contract is stable once the runtime
+     *  lands. */
+    readonly rate?: RateConfig;
 }
 
 type RestateOutcome =
@@ -85,6 +93,11 @@ export class BusDispatcher {
 
     constructor(config: BusDispatcherConfig) {
         this.config = config;
+        // Fail loud at construction — the BusManager constructs one
+        // dispatcher per (workspace × subscriber) and a thrown error
+        // here means the declaration is unrunnable. Better to surface
+        // during boot than to silently drop packets.
+        this.validateUnsupportedModifiers();
     }
 
     async start(): Promise<void> {
@@ -144,7 +157,35 @@ export class BusDispatcher {
             max_deliver: maxDeliver,
             backoff,
         };
+        // Concurrency.global(n) → JetStream bounds the count of
+        // unacknowledged messages the consumer holds. Combined with
+        // explicit ack, this is a strict in-flight cap: workers only
+        // pull the next message after acking the previous one, so
+        // `n` in-flight at most. Concurrency.perKey requires an
+        // in-process counter and is enforced in the dispatch loop —
+        // rejected at start() until that landing.
+        const concurrency = this.config.concurrency;
+        if (concurrency?.kind === 'global') {
+            base.max_ack_pending = concurrency.limit;
+        }
         return { ...base, ...cursorToDeliverPolicy(this.config.cursor) };
+    }
+
+    private validateUnsupportedModifiers(): void {
+        if (this.config.concurrency?.kind === 'perKey') {
+            throw new Error(
+                `[bus-dispatcher:${this.config.busName}:${this.config.subscriberName}] ` +
+                `Concurrency.perKey is declared but not wired yet (Phase 2b-B2). ` +
+                `Use Concurrency.global(n) for now, or remove the modifier.`,
+            );
+        }
+        if (this.config.rate) {
+            throw new Error(
+                `[bus-dispatcher:${this.config.busName}:${this.config.subscriberName}] ` +
+                `Rate.* is declared but the token-bucket throttle isn't wired yet (Phase 2b-B2). ` +
+                `Track the limit externally or remove the .rate() modifier for now.`,
+            );
+        }
     }
 
     /**

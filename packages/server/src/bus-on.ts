@@ -16,7 +16,7 @@
  * so it serialises through build-time manifests without loss.
  */
 
-import type { BusRef } from '@syncengine/core';
+import type { BusRef, ConcurrencyConfig, RateConfig } from '@syncengine/core';
 
 export type CursorConfig =
     | { readonly kind: 'beginning' }
@@ -70,6 +70,16 @@ export interface Subscription<T> {
     /** Ordering / dedup mode. Defaults to `{ kind: 'perMessage' }` when
      *  none of `.ordered` / `.orderedBy` / `.key` is used. */
     readonly keying?: InvocationKeying<T>;
+    /** Concurrency cap on in-flight invocations. `.global(n)` maps to
+     *  JetStream `max_ack_pending`; `.perKey(n)` (pairs with
+     *  `.orderedBy`) is enforced in-process.
+     *
+     *  Field uses the `$` prefix to avoid colliding with the method
+     *  of the same name. Match the `$tag` / `$name` convention —
+     *  user code should only touch the method. */
+    readonly $concurrency?: ConcurrencyConfig;
+    /** Token-bucket throttle in invocations per second. */
+    readonly $rate?: RateConfig;
     where(predicate: (event: T) => boolean): Subscription<T>;
     from(cursor: CursorConfig): Subscription<T>;
     /** Single in-flight invocation for this subscriber. Redeliveries
@@ -84,6 +94,8 @@ export interface Subscription<T> {
      *  same logical event enters through multiple buses and you want
      *  a single dedup barrier. */
     key(fn: (event: T) => string): Subscription<T>;
+    concurrency(c: ConcurrencyConfig): Subscription<T>;
+    rate(r: RateConfig): Subscription<T>;
 }
 
 function validateKeyFn(fn: unknown, method: string): void {
@@ -97,23 +109,29 @@ export function on<T>(busRef: BusRef<T>): Subscription<T> {
         predicate?: Subscription<T>['predicate'],
         cursor?: CursorConfig,
         keying?: InvocationKeying<T>,
+        concurrency?: ConcurrencyConfig,
+        rate?: RateConfig,
     ): Subscription<T> => ({
         $tag: 'bus-subscription',
         bus: busRef,
         ...(predicate ? { predicate } : {}),
         ...(cursor ? { cursor } : {}),
         ...(keying ? { keying } : {}),
-        where: (p) => build(p, cursor, keying),
-        from: (c) => build(predicate, c, keying),
-        ordered: () => build(predicate, cursor, { kind: 'singleton' }),
+        ...(concurrency ? { $concurrency: concurrency } : {}),
+        ...(rate ? { $rate: rate } : {}),
+        where: (p) => build(p, cursor, keying, concurrency, rate),
+        from: (c) => build(predicate, c, keying, concurrency, rate),
+        ordered: () => build(predicate, cursor, { kind: 'singleton' }, concurrency, rate),
         orderedBy: (fn) => {
             validateKeyFn(fn, 'orderedBy');
-            return build(predicate, cursor, { kind: 'byKey', fn });
+            return build(predicate, cursor, { kind: 'byKey', fn }, concurrency, rate);
         },
         key: (fn) => {
             validateKeyFn(fn, 'key');
-            return build(predicate, cursor, { kind: 'custom', fn });
+            return build(predicate, cursor, { kind: 'custom', fn }, concurrency, rate);
         },
+        concurrency: (c) => build(predicate, cursor, keying, c, rate),
+        rate: (r) => build(predicate, cursor, keying, concurrency, r),
     });
     return build();
 }
