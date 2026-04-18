@@ -1,10 +1,11 @@
 // SDK bootstrap.
 //
-// `bootSdk` starts the OTel Node SDK with OTLP/HTTP exporters for traces
-// and metrics, a parent-based sampler at the configured ratio, and the
-// resource built by `resource.ts`. The SDK registers a global tracer
-// provider so `trace.getTracer(...)` inside framework seams and user code
-// picks it up without further plumbing.
+// `bootSdk` is a factory — it constructs an `SdkHandle` whose methods
+// drive the SDK's lifecycle. Lifecycle ops live on the handle
+// (`handle.forceFlush()`, `handle.shutdown()`) rather than as
+// top-level functions: one less thing to import, autocomplete reveals
+// the whole surface, and the disabled-path degrades to no-op methods
+// without any cast.
 //
 // When `config.exporter === false` the function returns an inert handle
 // and does not import `@opentelemetry/sdk-node` at all — keeps the
@@ -12,10 +13,10 @@
 //
 // For unit tests, `traceExporterOverride` injects an arbitrary
 // `SpanExporter` (typically `InMemorySpanExporter`) wrapped in a
-// `SimpleSpanProcessor` so spans flush quickly on end. Tests then call
-// `forceFlush(handle)` before asserting on span contents, because the
-// simple processor's export is dispatched to a microtask — reads that
-// skip the flush will see an empty buffer.
+// `SimpleSpanProcessor`. Tests then call `handle.forceFlush()` before
+// asserting on span contents, because the simple processor's export
+// is dispatched to a microtask — reads that skip the flush will see
+// an empty buffer.
 
 import {
     context,
@@ -32,11 +33,20 @@ import {
     type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 
+import type { ObservabilityConfig } from '@syncengine/core';
+
 import { buildResource } from './resource.ts';
-import type { ObservabilityConfig } from './types.ts';
 
 export interface SdkHandle {
     readonly enabled: boolean;
+    /** Drain any pending span exports. Useful as a graceful-shutdown
+     *  preamble in prod, and required in tests to read the in-memory
+     *  exporter after `span.end()` — `SimpleSpanProcessor` dispatches
+     *  the export to a microtask. */
+    forceFlush(): Promise<void>;
+    /** Tear down the SDK and clear the OTel API globals. Safe to call
+     *  multiple times; on a disabled handle this is a no-op. */
+    shutdown(): Promise<void>;
 }
 
 export interface BootSdkOptions {
@@ -44,22 +54,17 @@ export interface BootSdkOptions {
     /**
      * Test-only: replace the default OTLP trace exporter. When set, the
      * SDK is configured with a `SimpleSpanProcessor(override)` so tests
-     * read spans with `forceFlush(handle)` then `exporter.getFinishedSpans()`.
+     * read spans with `handle.forceFlush()` then
+     * `exporter.getFinishedSpans()`.
      */
     readonly traceExporterOverride?: SpanExporter;
 }
 
-interface EnabledHandle extends SdkHandle {
-    readonly enabled: true;
-    readonly forceFlush: () => Promise<void>;
-    readonly shutdown: () => Promise<void>;
-}
-
-interface DisabledHandle extends SdkHandle {
-    readonly enabled: false;
-}
-
-const DISABLED_HANDLE: DisabledHandle = { enabled: false };
+const DISABLED_HANDLE: SdkHandle = Object.freeze({
+    enabled: false,
+    forceFlush: async () => {},
+    shutdown: async () => {},
+});
 
 function resolveSamplerRatio(config: ObservabilityConfig | undefined): number {
     if (config?.sampling?.ratio !== undefined) return config.sampling.ratio;
@@ -134,35 +139,24 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
     // Snapshot the provider now so forceFlush can drive it directly.
     const provider = resolveActiveProvider();
 
-    const handle: EnabledHandle = {
+    return {
         enabled: true,
-        forceFlush: async () => {
+        async forceFlush() {
             if (typeof provider.forceFlush === 'function') {
                 await provider.forceFlush();
             }
         },
-        shutdown: () => sdk.shutdown(),
+        async shutdown() {
+            await sdk.shutdown();
+            // NodeSDK.shutdown() closes the providers but leaves them
+            // wired into the OTel API globals. Clearing them makes
+            // shutdown fully symmetric with boot — necessary for test
+            // isolation across repeated boots and harmless in prod
+            // where shutdown fires on process exit.
+            trace.disable();
+            metrics.disable();
+            context.disable();
+            propagation.disable();
+        },
     };
-    return handle;
-}
-
-/** Drain any pending span exports. Called by tests before reading the
- *  in-memory exporter's buffer, and available in prod as a graceful-
- *  shutdown helper before the process exits. */
-export async function forceFlush(handle: SdkHandle): Promise<void> {
-    if (!handle.enabled) return;
-    await (handle as EnabledHandle).forceFlush();
-}
-
-export async function shutdownSdk(handle: SdkHandle): Promise<void> {
-    if (!handle.enabled) return;
-    await (handle as EnabledHandle).shutdown();
-    // NodeSDK.shutdown() closes the providers but leaves them wired into
-    // the OTel API globals. Clearing them makes shutdown fully symmetric
-    // with boot — necessary for test isolation across repeated boots and
-    // harmless in prod where shutdown fires on process exit.
-    trace.disable();
-    metrics.disable();
-    context.disable();
-    propagation.disable();
 }

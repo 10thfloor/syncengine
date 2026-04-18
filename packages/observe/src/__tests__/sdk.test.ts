@@ -12,23 +12,22 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { trace } from '@opentelemetry/api';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 
-import { bootSdk, forceFlush, shutdownSdk } from '../sdk.ts';
+import { bootSdk, type SdkHandle } from '../sdk.ts';
 
 // Track handles so we always tear the SDK down between tests — leaving a
 // provider installed globally bleeds state into the next case.
-const cleanupQueue: Array<() => Promise<void>> = [];
+const teardown: SdkHandle[] = [];
 afterEach(async () => {
-    while (cleanupQueue.length > 0) {
-        const fn = cleanupQueue.shift()!;
-        await fn();
+    while (teardown.length > 0) {
+        await teardown.shift()!.shutdown();
     }
 });
 
 async function boot(
     ...args: Parameters<typeof bootSdk>
-): Promise<ReturnType<typeof bootSdk>> {
+): Promise<SdkHandle> {
     const handle = await bootSdk(...args);
-    cleanupQueue.push(() => shutdownSdk(handle));
+    teardown.push(handle);
     return handle;
 }
 
@@ -39,10 +38,6 @@ describe('bootSdk — disabled path', () => {
     });
 
     it('does not install a tracer provider when disabled', async () => {
-        // Baseline: before boot, the global provider is the NoopTracerProvider
-        // (API-level default). A span created with that provider never gets
-        // a recording backend. After bootSdk({exporter:false}), no provider
-        // should have been installed — the same no-op tracer wins.
         await boot({ config: { exporter: false } });
 
         const span = trace.getTracer('test').startSpan('sample');
@@ -51,9 +46,10 @@ describe('bootSdk — disabled path', () => {
         span.end();
     });
 
-    it('shutdownSdk on a disabled handle is a no-op', async () => {
+    it('shutdown / forceFlush on a disabled handle are no-ops', async () => {
         const handle = await bootSdk({ config: { exporter: false } });
-        await expect(shutdownSdk(handle)).resolves.toBeUndefined();
+        await expect(handle.forceFlush()).resolves.toBeUndefined();
+        await expect(handle.shutdown()).resolves.toBeUndefined();
     });
 });
 
@@ -69,7 +65,7 @@ describe('bootSdk — enabled path', () => {
         span.setAttribute('test.key', 'test-value');
         span.end();
 
-        await forceFlush(handle);
+        await handle.forceFlush();
         const finished = exporter.getFinishedSpans();
         expect(finished).toHaveLength(1);
         expect(finished[0]!.name).toBe('unit-span');
@@ -85,7 +81,7 @@ describe('bootSdk — enabled path', () => {
 
         trace.getTracer('test').startSpan('resource-check').end();
 
-        await forceFlush(handle);
+        await handle.forceFlush();
         const finished = exporter.getFinishedSpans();
         expect(finished).toHaveLength(1);
         expect(finished[0]!.resource.attributes['service.name']).toBe(
@@ -106,7 +102,7 @@ describe('bootSdk — enabled path', () => {
 
         trace.getTracer('test').startSpan('merge').end();
 
-        await forceFlush(handle);
+        await handle.forceFlush();
         const finished = exporter.getFinishedSpans();
         const attrs = finished[0]!.resource.attributes;
         expect(attrs['service.name']).toBe('resource-merge');
@@ -128,7 +124,7 @@ describe('bootSdk — enabled path', () => {
             trace.getTracer('test').startSpan(`n-${i}`).end();
         }
 
-        await forceFlush(handle);
+        await handle.forceFlush();
         expect(exporter.getFinishedSpans()).toHaveLength(0);
     });
 
@@ -146,7 +142,7 @@ describe('bootSdk — enabled path', () => {
             trace.getTracer('test').startSpan(`s-${i}`).end();
         }
 
-        await forceFlush(handle);
+        await handle.forceFlush();
         expect(exporter.getFinishedSpans()).toHaveLength(5);
     });
 });
@@ -158,7 +154,7 @@ describe('bootSdk — config defaults', () => {
 
         trace.getTracer('test').startSpan('default-cfg').end();
 
-        await forceFlush(handle);
+        await handle.forceFlush();
         expect(exporter.getFinishedSpans()).toHaveLength(1);
     });
 });
