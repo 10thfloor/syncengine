@@ -150,10 +150,14 @@ function scaffoldProject(target: string, name: string, useWorkspace: boolean): v
         },
         devDependencies: {
             '@syncengine/vite-plugin': depVersion,
-            '@syncengine/cli': depVersion,
             '@types/react': '^19.0.0',
             '@types/react-dom': '^19.0.0',
             '@vitejs/plugin-react': '^4.0.0',
+            // tsx is required by the CLI's `syncengine dev` to run the
+            // workspace service and gateway processes. The CLI itself
+            // is a global binary (install via curl; see install.sh) and
+            // is not a project dependency.
+            'tsx': '^4.19.0',
             'typescript': '~5.9.0',
             'vite': '6.4.2',
             'vite-plugin-wasm': '^3.0.0',

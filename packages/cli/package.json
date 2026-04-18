@@ -13,7 +13,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "compile": "bun build --compile --minify --sourcemap=none --outfile=dist/syncengine src/index.ts",
+    "compile:all": "tsx scripts/compile-all.ts"
   },
   "dependencies": {
     "@syncengine/bin-utils": "workspace:*",

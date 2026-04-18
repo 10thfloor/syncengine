@@ -1,3 +1,6 @@
+#Claude
+.claude
+
 # Dependencies
 node_modules
 
@@ -5,6 +8,7 @@ node_modules
 dist
 dist-ssr
 *.tsbuildinfo
+packages/cli/dist/
 
 # Test coverage
 coverage
