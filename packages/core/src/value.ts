@@ -260,14 +260,23 @@ export interface CompositeValueDef<
     };
 }
 
-/** Shared brand between scalar and composite value defs — lets callers
- *  accept either form without caring which. */
-export interface AnyValueDef {
+/** Shared shape across scalar and composite value defs — lets callers
+ *  accept either form without caring which. The `T` type parameter
+ *  carries the branded value type for contexts that need it (e.g.
+ *  `op()` inferring its return type from the ref); it defaults to
+ *  `unknown` for the many internal spots that don't. */
+export interface AnyValueDef<T = unknown> {
     readonly $name: string;
-    readonly zod: ZodType<unknown>;
+    readonly T: T;
+    readonly zod: ZodType<T>;
     readonly is: (x: unknown) => boolean;
     readonly equals: (a: never, b: never) => boolean;
-    readonly unsafe: (raw: never) => unknown;
+    /** Parameter is `unknown` at this level — narrower typed inputs
+     *  live on the concrete `ScalarValueDef` / `CompositeValueDef`;
+     *  callers through this generic view pass through the duck-type
+     *  guard (`isValueDefLike`) so the runtime accepts whatever the
+     *  concrete `.unsafe` stamps. */
+    readonly unsafe: (raw: unknown) => T;
 }
 
 // ── defineValue — scalar form ──────────────────────────────────────────────
@@ -713,15 +722,8 @@ function defineComposite<
 // brands it; if it returned something invalid, the throw points at the
 // op name.
 
-export interface ValueMarker<T> {
-    readonly $name: string;
-    readonly T: T;
-    is(x: unknown): boolean;
-    unsafe(raw: never): unknown;
-}
-
 export function op<
-    V extends ValueMarker<unknown>,
+    V extends AnyValueDef,
     TArgs extends any[],
 >(
     ref: V,
@@ -765,21 +767,20 @@ type ArgsOf<T extends readonly unknown[]> = {
     [K in keyof T]: ArgOf<T[K]>;
 };
 
-interface ValueDefLike {
-    readonly $name: string;
-    readonly is: (x: unknown) => boolean;
-    readonly unsafe: (raw: unknown) => unknown;
-}
-
 interface ZodLike {
     readonly parse: (x: unknown) => unknown;
 }
 
-function isValueDefLike(s: unknown): s is ValueDefLike {
-    // Value defs are callable (as column factories) so `typeof` is
-    // 'function', not 'object'. Duck-type on the public surface.
-    if (s === null || (typeof s !== 'object' && typeof s !== 'function')) return false;
-    const v = s as ValueDefLike;
+// Value defs are callable (as column factories) so `typeof` is
+// 'function'; zod schemas are plain objects. Both guards need the
+// same "is it object-shaped (including functions)?" predicate.
+function isObjectOrFunction(s: unknown): s is object {
+    return s !== null && (typeof s === 'object' || typeof s === 'function');
+}
+
+function isValueDefLike(s: unknown): s is AnyValueDef {
+    if (!isObjectOrFunction(s)) return false;
+    const v = s as Partial<AnyValueDef>;
     return (
         typeof v.$name === 'string' &&
         typeof v.is === 'function' &&
@@ -788,8 +789,7 @@ function isValueDefLike(s: unknown): s is ValueDefLike {
 }
 
 function isZodLike(s: unknown): s is ZodLike {
-    if (s === null || (typeof s !== 'object' && typeof s !== 'function')) return false;
-    return typeof (s as ZodLike).parse === 'function';
+    return isObjectOrFunction(s) && typeof (s as ZodLike).parse === 'function';
 }
 
 export function withArgs<
