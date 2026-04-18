@@ -120,7 +120,7 @@ function roleBare(...allowed: [string, ...string[]]): AccessPolicy {
 
 function roleTyped<E extends readonly string[]>(
     _def: RoleEnumCarrier<E>,
-    ...allowed: E[number][]
+    ...allowed: [E[number], ...E[number][]]
 ): AccessPolicy {
     return {
         $kind: 'access',
@@ -133,7 +133,7 @@ function roleTyped<E extends readonly string[]>(
 
 function role<E extends readonly string[]>(
     def: RoleEnumCarrier<E>,
-    ...allowed: E[number][]
+    ...allowed: [E[number], ...E[number][]]
 ): AccessPolicy;
 function role(...allowed: [string, ...string[]]): AccessPolicy;
 function role(
@@ -143,7 +143,9 @@ function role(
     if (typeof defOrFirst === 'string') {
         return roleBare(defOrFirst, ...rest);
     }
-    return roleTyped(defOrFirst, ...rest);
+    // Overload enforces at-least-one role at the public boundary; internal
+    // dispatch casts to match the tuple signature.
+    return roleTyped(defOrFirst, ...(rest as [string, ...string[]]));
 }
 
 function owner(field: string = 'userId'): AccessPolicy {
