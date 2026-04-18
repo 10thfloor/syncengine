@@ -82,6 +82,17 @@ type RestateOutcome =
     | { readonly kind: 'terminal'; readonly error: { message: string; code?: string } }
     | { readonly kind: 'retriable'; readonly reason: string };
 
+/** Lazy-refill token bucket for `Rate.*` modifiers. Refills fractionally
+ *  between checks, so a 100/sec cap really is 100/sec over any window.
+ *  Burst capacity = 1s worth of tokens (min 1) so a short blip of idle
+ *  traffic doesn't starve a cold bucket. */
+interface TokenBucket {
+    tokens: number;
+    lastRefillAt: number;
+    readonly perSecond: number;
+    readonly capacity: number;
+}
+
 export class BusDispatcher {
     private readonly config: BusDispatcherConfig;
     private nc: NatsConnection | null = null;
@@ -90,6 +101,7 @@ export class BusDispatcher {
     private stopped = false;
     private activeLoop: Promise<void> | null = null;
     private messagesHandle: { stop(): void } | null = null;
+    private readonly bucket: TokenBucket | null;
 
     constructor(config: BusDispatcherConfig) {
         this.config = config;
@@ -98,6 +110,21 @@ export class BusDispatcher {
         // here means the declaration is unrunnable. Better to surface
         // during boot than to silently drop packets.
         this.validateUnsupportedModifiers();
+
+        // Prime the token bucket at full capacity so the first message
+        // under a rate limit always flows; cold buckets only bite when
+        // the consumer has been idle and then gets a burst.
+        if (config.rate) {
+            const capacity = Math.max(1, Math.ceil(config.rate.perSecond));
+            this.bucket = {
+                tokens: capacity,
+                lastRefillAt: Date.now(),
+                perSecond: config.rate.perSecond,
+                capacity,
+            };
+        } else {
+            this.bucket = null;
+        }
     }
 
     async start(): Promise<void> {
@@ -175,17 +202,38 @@ export class BusDispatcher {
         if (this.config.concurrency?.kind === 'perKey') {
             throw new Error(
                 `[bus-dispatcher:${this.config.busName}:${this.config.subscriberName}] ` +
-                `Concurrency.perKey is declared but not wired yet (Phase 2b-B2). ` +
-                `Use Concurrency.global(n) for now, or remove the modifier.`,
+                `Concurrency.perKey is declared but not wired yet — the dispatcher's ` +
+                `dispatch loop is serial so per-key capping would always collapse to ` +
+                `max 1 in-flight. Landing alongside the concurrent-dispatch refactor ` +
+                `in a future slice. Use Concurrency.global(n) for now, or remove the modifier.`,
             );
         }
-        if (this.config.rate) {
-            throw new Error(
-                `[bus-dispatcher:${this.config.busName}:${this.config.subscriberName}] ` +
-                `Rate.* is declared but the token-bucket throttle isn't wired yet (Phase 2b-B2). ` +
-                `Track the limit externally or remove the .rate() modifier for now.`,
-            );
+    }
+
+    /** Consume one token; if the bucket is empty, report how many ms
+     *  until one is available so the caller can NAK with an appropriate
+     *  delay and JetStream hands the message back at the right time. */
+    private consumeToken(): { allowed: true } | { allowed: false; delayMs: number } {
+        if (!this.bucket) return { allowed: true };
+        const now = Date.now();
+        const elapsed = (now - this.bucket.lastRefillAt) / 1000;
+        const refilled = Math.min(
+            this.bucket.capacity,
+            this.bucket.tokens + elapsed * this.bucket.perSecond,
+        );
+        this.bucket.lastRefillAt = now;
+        if (refilled < 1) {
+            this.bucket.tokens = refilled;
+            const deficit = 1 - refilled;
+            return {
+                allowed: false,
+                // Ceil to avoid NAKing with 0ms on borderline cases
+                // (would just loop back immediately and churn CPU).
+                delayMs: Math.max(1, Math.ceil((deficit * 1000) / this.bucket.perSecond)),
+            };
         }
+        this.bucket.tokens = refilled - 1;
+        return { allowed: true };
     }
 
     /**
@@ -267,6 +315,19 @@ export class BusDispatcher {
         if (this.config.filterPredicate && !this.config.filterPredicate(event)) {
             // Predicate rejection — the subscriber opted out. ACK and move on.
             m.ack();
+            return;
+        }
+
+        // Rate gate runs AFTER the filter predicate: skipped events
+        // don't burn tokens. Runs BEFORE the Restate POST so a throttled
+        // subscriber doesn't keep its Restate virtual-object slot warm
+        // for no reason.
+        const gate = this.consumeToken();
+        if (!gate.allowed) {
+            // `m.nak(millis)` — JetStream NAK accepts a millisecond
+            // delay. The consumer re-delivers after the delay, hitting
+            // the same gate check with a refilled bucket.
+            m.nak(gate.delayMs);
             return;
         }
 
