@@ -1,5 +1,9 @@
 # Event Bus Phase 2a — Dispatcher Lifecycle + Runtime Smoke
 
+> **STATUS: ✅ shipped.** Commits `0fbd92e` (A1) through `dfc5129` (B2). A6 + A7 follow-on landed as `a8dd75e` / `eb0beb1`.
+> End-to-end smoke proved via `bash scripts/smoke-docker.sh --buses` — happy path, DLQ path, consumer reuse across
+> app-container restart. See `2026-04-21-event-bus-epic-completion.md` for the consolidated closeout summary.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Task steps use `- [ ]` checkbox syntax.
 
 **Goal:** Wire the `BusDispatcher` built in Phase 1 Task 7 into a real runtime lifecycle, then prove end-to-end message delivery on `apps/test`. After this plan lands, `publish(bus, event)` from an entity handler actually reaches a subscriber workflow.

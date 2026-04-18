@@ -1,5 +1,9 @@
 # Event Bus — Phase 2b (modifiers, test mode, escape hatch)
 
+> **STATUS: ✅ substantively shipped; 5 slices deferred with rationale** (table below). End-to-end verified live:
+> `scripts/smoke-docker.sh --buses` + the apps/test vitest harness demo. See
+> `2026-04-21-event-bus-epic-completion.md` for the consolidated epic closeout.
+
 > Phase 2a made dispatchers real and proved the end-to-end loop via
 > `apps/test` as the kitchen-sink demo. Phase 2b finishes the
 > subscriber DSL that the spec [§6](../specs/2026-04-20-event-bus-design.md#6-scope--ordering)
