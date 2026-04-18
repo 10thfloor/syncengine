@@ -47,6 +47,17 @@ jobs:
       - name: setup wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
 
+      # Build the DBSP WASM bundle before install — @syncengine/test-utils
+      # has a `file:../dbsp-engine/pkg` dependency that pnpm resolves at
+      # install time, and the pkg/ dir only exists after wasm-pack runs.
+      # Using wasm-pack directly (not `pnpm build:wasm`) because the pnpm
+      # script also runs sync-wasm.mjs which needs node_modules that don't
+      # exist yet. The postinstall hook re-runs the full build:wasm,
+      # which is cheap when the output is already fresh.
+      - name: build dbsp wasm
+        working-directory: packages/dbsp-engine
+        run: wasm-pack build --target bundler --out-dir pkg --scope syncengine
+
       - name: install
         run: pnpm install --frozen-lockfile
 
