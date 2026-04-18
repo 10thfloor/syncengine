@@ -3,7 +3,7 @@
 // framework dependencies — only `node:crypto` for hashing.
 
 import { createHash } from 'node:crypto';
-import { errors, ConnectionCode } from './errors/index.js';
+import { errors, ConnectionCode } from './errors';
 
 // ── wsKey derivation ────────────────────────────────────────────────────────
 

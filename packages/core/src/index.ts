@@ -10,7 +10,7 @@ export {
     ConnectionCode,
     HandlerCode,
     CliCode,
-} from './errors/index.js';
+} from './errors';
 
 export type {
     ErrorCategory,
@@ -23,7 +23,7 @@ export type {
     ConnectionCodeValue,
     HandlerCodeValue,
     CliCodeValue,
-} from './errors/index.js';
+} from './errors';
 
 // ── Schema DSL ──────────────────────────────────────────────────────────────
 export {

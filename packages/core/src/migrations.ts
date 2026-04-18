@@ -1,7 +1,7 @@
 // ── Migration types ─────────────────────────────────────────────────────────
 
 import { escapeIdentifier, escapeLiteral } from './sql-gen';
-import { errors, SchemaCode } from './errors/index.js';
+import { errors, SchemaCode } from './errors';
 
 export type MigrationStep =
     | { op: 'addColumn'; table: string; column: string; type: string; default?: string | number | boolean; nullable?: boolean }

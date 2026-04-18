@@ -23,7 +23,7 @@
 
 import type { EntityStateShape, EntityState } from "./entity";
 import { buildInitialState } from "./entity";
-import { errors, SchemaCode } from './errors/index.js';
+import { errors, SchemaCode } from './errors';
 
 // ── Topic definition ──────────────────────────────────────────────────────
 

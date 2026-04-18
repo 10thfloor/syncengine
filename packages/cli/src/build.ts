@@ -42,7 +42,12 @@ export async function buildCommand(_args: string[]): Promise<void> {
     // 2. Run vite build
     banner('building client bundle');
     const viteBin = join(appDir, 'node_modules', '.bin', 'vite');
-    execFileSync(viteBin, ['build'], {
+    // `--configLoader runner` is required for workspaces that import TS
+    // source directly (packages/*/src/*.ts). The default `bundle` loader
+    // externalizes every workspace dep and Node's native ESM resolver
+    // then can't follow the internal extensionless imports. Mirrors the
+    // flag passed in dev.ts.
+    execFileSync(viteBin, ['build', '--configLoader', 'runner'], {
         cwd: appDir,
         stdio: 'inherit',
         env: {

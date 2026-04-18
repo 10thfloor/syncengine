@@ -19,7 +19,7 @@
 //    Runtime guard rejects `$`-prefixed column names at `table()` construction.
 
 /** Sentinel id_key for zero-group-by (global) aggregates — a single output row. */
-import { errors, SchemaCode } from './errors/index.js';
+import { errors, SchemaCode } from './errors';
 
 export const GLOBAL_AGG_KEY = '$agg';
 

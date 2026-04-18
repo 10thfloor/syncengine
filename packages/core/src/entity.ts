@@ -28,7 +28,7 @@
 //    and server (Restate object factory). No codegen, no IDL.
 
 import type { ColumnDef, ColumnRef, InferRecord, AnyTable } from "./schema";
-import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './errors/index.js';
+import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './errors';
 
 // ── EntityError ──────────────────────────────────────────────────────────────
 

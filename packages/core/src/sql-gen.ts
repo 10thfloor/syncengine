@@ -3,7 +3,7 @@
 // All identifier/value interpolation goes through escaping helpers.
 
 import type { AnyTable, ColumnDef } from './schema';
-import { errors, SchemaCode } from './errors/index.js';
+import { errors, SchemaCode } from './errors';
 
 // ── Escaping ────────────────────────────────────────────────────────────────
 
