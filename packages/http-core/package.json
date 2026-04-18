@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "Shared HTTP resolve/provision/inject pipeline consumed by dev (Vite) and prod (Bun) paths",
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",

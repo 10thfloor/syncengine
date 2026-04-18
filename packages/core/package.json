@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "syncengine core primitives — entity, bus, table, topic, workflow, service, value",
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",

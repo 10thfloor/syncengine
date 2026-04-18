@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "syncengine Vite plugin — actor discovery, workspace resolution, dev-server wiring",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

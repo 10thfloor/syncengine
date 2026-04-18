@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "syncengine browser runtime — useStore, useEntity, useTable, useTopic hooks",
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",

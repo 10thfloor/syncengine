@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "Framework-agnostic WebSocket↔NATS bridge used by syncengine's edge and server tiers",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

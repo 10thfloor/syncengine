@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "syncengine CLI — dev, start, build, serve, add",
   "type": "module",
   "bin": {
     "syncengine": "./bin/syncengine.mjs"

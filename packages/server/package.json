@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "syncengine server runtime — defineWorkflow, heartbeat, webhook, entity runtime, bus dispatcher",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

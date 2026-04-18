@@ -3,6 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "Lazy resolver for the syncengine-serve binary (Bun edge)",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
