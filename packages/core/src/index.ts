@@ -106,6 +106,7 @@ export {
     defineEntity,
     isEntity,
     validateEntityState,
+    buildInitialState,
     applyHandler,
     rebase,
     emit,

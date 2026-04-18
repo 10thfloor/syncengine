@@ -14,6 +14,7 @@ Practical docs for building with syncengine primitives. Each guide opens with "w
 | [webhooks.md](webhooks.md) | Inbound HTTP with signature verification + idempotency |
 | [heartbeats.md](heartbeats.md) | Durable scheduled work (interval or cron) |
 | [services.md](services.md) | Hex-architecture driven ports for vendor SDKs |
+| [value-objects.md](value-objects.md) | Branded domain types with invariants, factories, and pure ops |
 
 ## Meta
 
