@@ -291,7 +291,7 @@ if (appDir) {
         await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services);
 
         const { bootBusRuntime } = await import('./bus-boot.js');
-        await bootBusRuntime({ workflows, buseCount: buses.length });
+        await bootBusRuntime({ workflows, buses });
     })();
 }
 

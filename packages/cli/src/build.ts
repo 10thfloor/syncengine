@@ -283,7 +283,7 @@ function generateServerEntry(
     // own publish path). The helper is shared with dev mode so both
     // paths behave identically — see @syncengine/server/bus-boot.
     lines.push(
-        `await bootBusRuntime({ workflows, buseCount: buses.length });`,
+        `await bootBusRuntime({ workflows, buses });`,
         ``,
     );
 

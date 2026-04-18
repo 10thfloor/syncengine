@@ -24,6 +24,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { MsgHdrs, NatsConnection } from '@nats-io/transport-node';
 import { setBusPublisher, type BusPublishCtx } from '@syncengine/core';
+import type { InMemoryBusDriver } from './in-memory-bus.js';
 
 export interface BusContext {
     readonly workspaceId: string;
@@ -60,20 +61,59 @@ export function getInstalledBusNc(): NatsConnection | null {
     return installedNc;
 }
 
+export interface InstallBusPublisherOptions {
+    readonly nc?: NatsConnection;
+    /** Driver for in-memory-mode buses. When set, any bus whose name
+     *  `modeOf` resolves to `'inMemory'` bypasses NATS and fans out
+     *  through the driver instead — same semantics as the test harness,
+     *  so subscribers fire synchronously with resolved `ctx.services`.
+     *
+     *  Publishes on in-memory buses don't need a BusContext ALS frame,
+     *  so they still work in code paths that predate the 2a ALS wiring
+     *  (e.g. raw test scaffolds that call `orderEvents.publish(ctx, ...)`
+     *  without a wrapping handler). */
+    readonly inMemoryDriver?: InMemoryBusDriver;
+    /** Resolves each bus name to its mode. Omit to keep NATS-only
+     *  behaviour (all publishes go through NATS). */
+    readonly modeOf?: (busName: string) => 'nats' | 'inMemory';
+}
+
 /**
- * Wire `@syncengine/core`'s bus publisher to NATS. Call once at
- * server boot. Subsequent calls replace the previous publisher.
+ * Wire `@syncengine/core`'s bus publisher to NATS (and optionally to
+ * an in-memory driver for buses with `BusMode.inMemory()`). Call once
+ * at server boot. Subsequent calls replace the previous publisher.
  *
- * The NATS connection argument is optional — leaving it undefined
- * keeps the "ALS-only" behaviour (tests that manually wrap calls in
- * `runInBusContext({ workspaceId, nc }, ...)` don't need a module
- * handle). Production callers pass their shared `NatsConnection`
- * so subscriber workflows / heartbeats / webhooks can do imperative
- * `bus.publish(ctx, payload)` without per-handler boilerplate.
+ * Backwards-compat: calling with a bare `NatsConnection` argument keeps
+ * the pre-2b-C3 behaviour (NATS-only, ALS-frame required).
+ *
+ * The default — no args — leaves the seam in "ALS-only" mode (tests
+ * that manually wrap calls in `runInBusContext({ workspaceId, nc }, ...)`
+ * don't need a module handle).
  */
-export function installBusPublisher(nc?: NatsConnection): void {
-    if (nc) installedNc = nc;
-    setBusPublisher(async (_ctx: BusPublishCtx, busName: string, payload: unknown) => {
+export function installBusPublisher(
+    ncOrOpts?: NatsConnection | InstallBusPublisherOptions,
+): void {
+    const opts: InstallBusPublisherOptions =
+        ncOrOpts && typeof (ncOrOpts as NatsConnection).publish === 'function'
+            ? { nc: ncOrOpts as NatsConnection }
+            : ((ncOrOpts as InstallBusPublisherOptions | undefined) ?? {});
+
+    if (opts.nc) installedNc = opts.nc;
+
+    setBusPublisher(async (ctx: BusPublishCtx, busName: string, payload: unknown) => {
+        const mode = opts.modeOf?.(busName) ?? 'nats';
+
+        if (mode === 'inMemory') {
+            if (!opts.inMemoryDriver) {
+                throw new Error(
+                    `bus.publish(${busName}): bus is declared inMemory but no in-memory driver was installed. ` +
+                    `Pass { inMemoryDriver, modeOf } to installBusPublisher(...) at boot.`,
+                );
+            }
+            await opts.inMemoryDriver.fanOut(busName, payload, ctx);
+            return;
+        }
+
         const bc = busContextStorage.getStore();
         if (!bc) {
             throw new Error(
