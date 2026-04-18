@@ -552,10 +552,6 @@ dist
 `);
 
     // ── Dockerfile (single-process / \`syncengine start\` deployment)
-    //
-    // Kept in sync with apps/test/Dockerfile — that file is the canonical
-    // reference exercised by scripts/smoke-docker.sh. If you change one,
-    // change the other.
     write(target, 'Dockerfile', `\
 # Production image — packages the \`syncengine build\` output behind a
 # slim Node runtime. The bundled dist/server/index.mjs starts both the

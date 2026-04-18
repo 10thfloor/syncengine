@@ -5,13 +5,12 @@
 > the bus harness) were designed so most tests run inline in
 > vitest — no Docker, no network, no flakes.
 
-## Three layers
+## Two layers
 
 | Layer | What it tests | Harness | Speed |
 |---|---|---|---|
 | **Unit** | Pure handlers, service overrides, view pipelines, CRDT merges | `applyHandler`, `override`, direct calls | 1–5 ms |
 | **Integration** | Entity runtime + bus + workflows together | `createBusTestHarness` | 10–50 ms |
-| **Smoke** | Real Restate + NATS + Docker stack | `scripts/smoke-docker.sh` | 30–60 s |
 
 Use the cheapest layer that gives you confidence. Most code should live in the unit layer.
 
@@ -159,18 +158,6 @@ expect(merged.price).toBe(incoming.price);  // LWW by HLC
 ```
 
 `apps/test/src/__tests__/views.test.ts` has richer examples including DBSP view pipelines.
-
-## Smoke tests
-
-When you need real Restate + real NATS:
-
-```bash
-bash scripts/smoke-docker.sh             # basic HTML + meta-tag smoke
-bash scripts/smoke-docker.sh --buses     # adds the full publish → subscribe → DLQ chain
-KEEP_UP=1 bash scripts/smoke-docker.sh   # leave stack running for manual poking
-```
-
-Use smoke for "does the whole thing boot and route messages" checks before merging infrastructure changes. Don't use smoke for domain logic — unit tests are faster and give better signal.
 
 ## Common patterns
 

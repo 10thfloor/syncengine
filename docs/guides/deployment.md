@@ -36,42 +36,9 @@ syncengine start
 
 Generated `dist/server/index.mjs` is portable — `node dist/server/index.mjs` works anywhere with Node 22+.
 
-### Docker-compose example
+### Image
 
-```yaml
-# docker-compose.yml
-services:
-  nats:
-    image: nats:2.12-alpine
-    command: ["-c", "/etc/nats/nats.conf"]
-    volumes:
-      - ./docker/nats.conf:/etc/nats/nats.conf:ro
-    ports: ["4222:4222", "9222:9222", "8222:8222"]
-
-  restate:
-    image: docker.restate.dev/restatedev/restate:1.6
-    environment:
-      RESTATE_AUTO_PROVISION: "true"
-    ports: ["8080:8080", "9070:9070"]
-
-  app:
-    build: .
-    environment:
-      SYNCENGINE_NATS_URL: nats://nats:4222
-      SYNCENGINE_RESTATE_URL: http://restate:8080
-      PORT: "3000"
-    depends_on: { nats: { condition: service_healthy }, restate: { condition: service_healthy } }
-    ports: ["3000:3000"]
-```
-
-`Dockerfile` for the app:
-```dockerfile
-FROM node:22-bookworm-slim
-WORKDIR /app
-COPY --chown=node:node dist/ ./dist/
-USER node
-CMD ["node", "dist/server/index.mjs"]
-```
+`syncengine init` scaffolds a production-ready `Dockerfile` (single-process) and `Dockerfile.handlers` (scale-out handlers) alongside a `.dockerignore`. Point your orchestrator at them and run the build output under Node 22+. NATS and Restate run as separate containers — use their official images.
 
 That's the full production deploy for most apps. NATS + Restate are stateful services with their own persistence — back them up like any database.
 
@@ -112,8 +79,6 @@ Both connect to shared NATS + Restate. Edge scales horizontally by traffic; hand
 ```
 
 Edge is stateless — kill a pod, spin up another. Handlers hold bus dispatcher state (consumer cursors), so handler restarts are coordinated with NATS consumer durability (`bus:<bus>:<subscriber>` durable names persist).
-
-See `docker-compose.serve.yml` in the repo root for the full scale-out stack.
 
 ## Shape 4 — Future `syncengine launch` (Galaxy-style PaaS)
 
@@ -165,11 +130,10 @@ No syncengine-specific secret manager. Use your platform's (k8s Secrets, Doppler
 - **WebSocket URLs need scheme matching.** Production over HTTPS needs `wss://`; mixed content fails silently in browsers. The edge tier auto-upgrades based on the incoming scheme.
 - **Restate state is persistent.** A handler rename + restart leaves the old registration — use `syncengine state reset` or the admin API to force re-discovery. See the CLI guide.
 - **Handlers tier restart drains in-flight bus invocations.** The `BusManager` installs SIGTERM handlers that stop cleanly. Rolling restarts are safe; hard kills can re-deliver in-flight messages (at-least-once delivery is the baseline).
-- **Scale-out + dev don't mix.** `syncengine dev` always uses single-process. To test the scale-out split locally, use `docker-compose.serve.yml`.
+- **Scale-out + dev don't mix.** `syncengine dev` always uses single-process. Scale-out runs as separate `edge` and `handlers` processes in production.
 
 ## Links
 
 - Spec: `docs/superpowers/specs/2026-04-17-syncengine-serve-design.md`
 - Serve binary: `packages/serve-bin/`
 - Bun edge: `packages/gateway-bun/`
-- Smoke test: `scripts/smoke-docker.sh`, `scripts/smoke-docker.sh --buses`
