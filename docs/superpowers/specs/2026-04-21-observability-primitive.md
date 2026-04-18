@@ -106,7 +106,9 @@ Environment variables matching the OTel spec (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OT
 
 ### 2. Context-scoped primitive (inside handlers)
 
-Anywhere the framework invokes user code — entity effect, topic handler, webhook `run`, heartbeat `tick` — `ctx` is extended with:
+Handler ctxs that already exist — topic handlers, webhook `run`, heartbeat `tick`, workflow body — are extended with observability methods. Entity handlers are the exception: they are **pure** by design (identical execution on client for optimistic UI and on server for durable writes), so they receive no `ctx`. Entity handlers rely on framework-emitted auto-spans (`entity.<name>.<op>`, added by `instrument.entityEffect`) and declared metrics. A future follow-up may add AsyncLocalStorage-based helpers for user-written spans inside a pure handler, but v1 keeps the surface small.
+
+For the handler types that do have a ctx:
 
 ```ts
 interface ObservabilityCtx {
@@ -143,10 +145,10 @@ export const placeOrder = workflow('placeOrder', async (ctx, order) => {
 });
 ```
 
-Example (entity effect / webhook / heartbeat):
+Example (webhook / heartbeat / topic handler):
 
 ```ts
-// Anywhere outside a workflow, ctx.span is the only wrapper needed.
+// Anywhere outside a workflow that has a ctx, ctx.span wraps work.
 await ctx.span('validate-payload', () => schema.parse(input));
 ```
 

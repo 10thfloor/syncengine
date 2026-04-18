@@ -34,6 +34,8 @@ export { bootSdk, type SdkHandle, type BootSdkOptions } from './sdk';
 export { instrument } from './internal';
 export type { EntityEffectAttrs } from './internal';
 
+export { makeObservabilityCtx, type ObservabilityCtxScope } from './ctx';
+
 import { noopMetric } from './noop';
 import type { MetricFactory } from './types';
 
