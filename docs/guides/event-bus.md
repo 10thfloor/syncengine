@@ -223,6 +223,40 @@ All three compile to the same thing under the hood: Restate's single-writer-per-
 
 Rate-limited subscribers don't burn tokens on `.where()`-rejected events and don't hold Restate virtual-object slots warm while throttled — the gate runs after the predicate and before the POST.
 
+## Flipping buses to in-memory via config
+
+For integration tests that boot the full app (HTTP + RPC + WebSocket) but don't want to run NATS, declare an override file and wire it into `syncengine.config.ts`:
+
+```ts
+// src/events/test/index.ts
+import { override, BusMode } from '@syncengine/core';
+import { orderEvents } from '../orders.bus';
+
+export default [
+    override(orderEvents, { mode: BusMode.inMemory() }),
+];
+```
+
+```ts
+// syncengine.config.ts
+export default config({
+    workspaces: { resolve: ... },
+    services: {
+        overrides: process.env.NODE_ENV === 'test'
+            ? () => import('./src/events/test')
+            : undefined,
+    },
+});
+```
+
+Under `NODE_ENV=test` the boot path loads the module, splits the overrides by `$tag` (service vs bus), and:
+- **Service overrides** land in the `ServiceContainer` — production `payments` stays for prod, test stubs for tests.
+- **Bus overrides** feed a `modeOf(busName)` resolver the bus runtime consults. Buses flipped to `inMemory` skip the JetStream dispatcher entirely; publishes route through an in-process `InMemoryBusDriver` (same implementation the `createBusTestHarness` uses).
+
+Net result: `syncengine start` in a test env boots without a broker. Every `bus.publish(ctx, ...)` on a flipped bus fires subscribers inline, `TerminalError` still routes to `<bus>.dlq`, and subscriber workflows see the same typed `ctx.services` they would in production.
+
+For pure vitest unit tests, use `createBusTestHarness` directly (below) — it's faster and doesn't need a running HTTP server.
+
 ## Testing without NATS
 
 `createBusTestHarness()` from `@syncengine/server/test` stands in for NATS + Restate:

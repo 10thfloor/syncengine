@@ -15,4 +15,13 @@ export default config({
       return url.searchParams.get('ws') ?? 'default';
     },
   },
+  services: {
+    // The overrides module is lazy-imported at boot. In test, it flips
+    // `orderEvents` to BusMode.inMemory() so integration tests run
+    // without NATS. Production boots normally — this import never fires.
+    overrides:
+      process.env.NODE_ENV === 'test'
+        ? () => import('./src/events/test')
+        : undefined,
+  },
 });

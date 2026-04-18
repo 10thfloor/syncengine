@@ -219,6 +219,7 @@ export async function startRestateEndpoint(
     heartbeats: HeartbeatDef[] = [],
     webhooks: WebhookDef[] = [],
     services: AnyService[] = [],
+    serviceOverrides: import('@syncengine/core').AnyServiceOverride[] = [],
 ): Promise<void> {
     const endpoint = restate.endpoint().bind(workspace);
 
@@ -229,10 +230,10 @@ export async function startRestateEndpoint(
 
     // Build the ServiceContainer once at boot so every workflow /
     // heartbeat / webhook invocation sees the same port instances.
-    // Overrides (services/test, services/staging) flow through the
-    // SyncengineConfig.services.overrides pathway — not plumbed here
-    // yet, deferred to a follow-up task.
-    const serviceContainer = new ServiceContainer(services);
+    // Overrides flow in from `SyncengineConfig.services.overrides`
+    // (loaded by the caller via `loadConfigOverrides`), split from
+    // bus overrides by `$tag`.
+    const serviceContainer = new ServiceContainer(services, serviceOverrides);
     const resolve = (defs: readonly AnyService[]) =>
         serviceContainer.resolveAll(defs) as Record<
             string,
@@ -288,10 +289,39 @@ if (appDir) {
     void (async () => {
         const PORT = parseInt(process.env.PORT ?? "9080", 10);
         const { entities, workflows, heartbeats, webhooks, services, buses } = await loadDefinitions(appDir);
-        await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services);
+
+        // Load config + extract overrides. Silently tolerates apps without a
+        // syncengine.config.ts — dev-only harnesses and smoke fixtures skip it.
+        const { loadConfigOverrides, busOverridesToModeOf } = await import('./overrides-loader.js');
+        let appConfig: unknown = null;
+        try {
+            const configMod = await import(/* @vite-ignore */ `${appDir}/syncengine.config`);
+            appConfig = (configMod as { default?: unknown }).default ?? configMod;
+        } catch { /* no config file — that's fine for dev */ }
+        const { serviceOverrides, busOverrides } = await loadConfigOverrides(appConfig);
+
+        await startRestateEndpoint(
+            entities, workflows, PORT, heartbeats, webhooks, services,
+            [...serviceOverrides],
+        );
 
         const { bootBusRuntime } = await import('./bus-boot.js');
-        await bootBusRuntime({ workflows, buses });
+        const overrideModeOf = busOverridesToModeOf(busOverrides);
+        await bootBusRuntime({
+            workflows,
+            buses,
+            // Layer: override > declared. If an override maps this bus,
+            // return its choice; otherwise fall through to the declared
+            // `$mode` by returning the bus-list default (the boot helper
+            // reads bus.$mode.kind for names it doesn't find in modeOf).
+            modeOf: (busName) => {
+                const overridden = overrideModeOf(busName);
+                if (overridden) return overridden;
+                const bus = buses.find((b) => b.$name === busName || b.dlq.$name === busName);
+                if (!bus) return 'nats';
+                return bus.$mode.kind === 'inMemory' ? 'inMemory' : 'nats';
+            },
+        });
     })();
 }
 
@@ -360,4 +390,10 @@ export type {
     DispatcherHandle,
 } from './bus-manager.js';
 export { bootBusRuntime } from './bus-boot.js';
-export type { BootBusRuntimeOptions, BusRuntimeHandle } from './bus-boot.js';
+export type { BootBusRuntimeOptions, BusRuntimeHandle, BusModeResolver } from './bus-boot.js';
+export {
+    loadConfigOverrides,
+    extractOverrides,
+    busOverridesToModeOf,
+} from './overrides-loader.js';
+export type { LoadedOverrides } from './overrides-loader.js';

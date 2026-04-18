@@ -193,7 +193,7 @@ function generateServerEntry(
         `import { fileURLToPath } from 'node:url';`,
         `import { dirname, join } from 'node:path';`,
         ``,
-        `import { startRestateEndpoint, bootBusRuntime } from '@syncengine/server';`,
+        `import { startRestateEndpoint, bootBusRuntime, loadConfigOverrides, busOverridesToModeOf } from '@syncengine/server';`,
         `import { startHttpServer } from '@syncengine/server/serve';`,
         `import { isEntity, isBus, isService } from '@syncengine/core';`,
         `import { isWorkflow, isBusSubscriberWorkflow, isHeartbeat, isWebhook } from '@syncengine/server';`,
@@ -268,10 +268,20 @@ function generateServerEntry(
         ``,
     );
 
+    // Load config overrides — splits by $tag into service vs bus buckets.
+    // Services overrides feed into ServiceContainer at endpoint construction;
+    // bus overrides become a modeOf resolver the bus runtime consults before
+    // deciding NATS vs in-memory routing.
+    lines.push(
+        `const { serviceOverrides, busOverrides } = await loadConfigOverrides(_config);`,
+        `const overrideModeOf = busOverridesToModeOf(busOverrides);`,
+        ``,
+    );
+
     // Start Restate endpoint
     lines.push(
         `const PORT = parseInt(process.env.PORT ?? '9080', 10);`,
-        `await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services);`,
+        `await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services, [...serviceOverrides]);`,
         ``,
     );
 
@@ -283,7 +293,19 @@ function generateServerEntry(
     // own publish path). The helper is shared with dev mode so both
     // paths behave identically — see @syncengine/server/bus-boot.
     lines.push(
-        `await bootBusRuntime({ workflows, buses });`,
+        `await bootBusRuntime({`,
+        `    workflows,`,
+        `    buses,`,
+        `    // Override > declared. When an override maps this bus, honour`,
+        `    // it; otherwise fall through to the bus's own \$mode.`,
+        `    modeOf: (busName) => {`,
+        `        const overridden = overrideModeOf(busName);`,
+        `        if (overridden) return overridden;`,
+        `        const b = buses.find((x) => x.$name === busName || x.dlq.$name === busName);`,
+        `        if (!b) return 'nats';`,
+        `        return b.$mode.kind === 'inMemory' ? 'inMemory' : 'nats';`,
+        `    },`,
+        `});`,
         ``,
     );
 
