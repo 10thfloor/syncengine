@@ -340,7 +340,7 @@ describe('Phase 2.5 store config', () => {
             ).toThrow(/unknown table/);
         });
 
-        it('rejects a table not covered by any channel (when channels set)', () => {
+        it('allows a table not covered by any channel (auto-channeling handles it)', () => {
             const tasks = table('tasks', { id: id() });
             const notes = table('notes', { id: id() });
 
@@ -350,7 +350,7 @@ describe('Phase 2.5 store config', () => {
                     views: [],
                     channels: [{ name: 'team', tables: [tasks] }],
                 }),
-            ).toThrow(/not mapped to any channel/);
+            ).not.toThrow();
         });
 
         it('rejects duplicate channel names', () => {

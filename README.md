@@ -6,6 +6,9 @@
 
 You write pure domain logic. The framework handles sync, state, orchestration, and durability.
 
+[![ci](https://github.com/10thfloor/syncengine/actions/workflows/ci.yml/badge.svg)](https://github.com/10thfloor/syncengine/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 [Documentation](./docs/guides/README.md) · [Examples](./apps) · [License](./LICENSE)
 
 </div>
