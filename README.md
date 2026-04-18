@@ -7,6 +7,7 @@
 You write pure domain logic. The framework handles sync, state, orchestration, and durability.
 
 [![ci](https://github.com/10thfloor/syncengine/actions/workflows/ci.yml/badge.svg)](https://github.com/10thfloor/syncengine/actions/workflows/ci.yml)
+[![jsr](https://jsr.io/badges/@syncengine)](https://jsr.io/@syncengine)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 [Documentation](./docs/guides/README.md) · [Examples](./apps) · [License](./LICENSE)
@@ -22,6 +23,12 @@ cd my-app
 pnpm install
 pnpm dev
 ```
+
+The CLI is a standalone binary — no Node on your PATH required to run
+`syncengine`. The scaffolded app's library deps come from [JSR](https://jsr.io/@syncengine)
+via npm's `npm:@jsr/…` compat specifier, so `pnpm install` / `npm i`
+/ `bun install` all Just Work. Deno users can swap in native
+`jsr:@syncengine/core@^0.1.0` specifiers by hand.
 
 Three processes boot: Restate (durable execution), NATS (transport), Vite
 (dev server). You never talk to any of them directly.
