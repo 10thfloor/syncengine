@@ -22,6 +22,7 @@ import { resolve as resolvePath, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { errors, CliCode, formatError } from '@syncengine/core';
 import type { SyncengineConfig } from '@syncengine/core';
+import { bootSdk, type SdkHandle } from '@syncengine/observe';
 import { parseFlags } from './flags.ts';
 import type { Flags } from './flags.ts';
 import { createServer } from './server.ts';
@@ -103,6 +104,16 @@ async function main(argv: readonly string[]): Promise<void> {
     }
     const config = (await import(configPath)).default as SyncengineConfig;
 
+    // Boot the OTel SDK before any span-emitting code runs. If
+    // config.observability.exporter === false (or env-derived
+    // equivalent) this returns an inert handle and never imports
+    // @opentelemetry/sdk-node at all — keeps the bundled binary lean
+    // for deployments that don't use telemetry.
+    const sdkHandle = await bootSdk({ config: config.observability });
+    if (sdkHandle.enabled) {
+        logger.info({ event: 'observability.ready' });
+    }
+
     // Build the server fetch handler. --dev-errors / --no-dev-errors
     // overrides the NODE_ENV fallback — useful for staging deploys
     // where operators want Restate stack traces without flipping env.
@@ -167,8 +178,9 @@ async function main(argv: readonly string[]): Promise<void> {
     // Mark ready — accept traffic.
     handle.markReady();
 
-    // Install SIGTERM / SIGINT handlers.
-    installShutdownHandlers(server, shutdown, logger);
+    // Install SIGTERM / SIGINT handlers. Pass the SDK handle so the
+    // shutdown path drains any buffered spans / metrics before exit.
+    installShutdownHandlers(server, shutdown, logger, sdkHandle);
 
     // Keep the process alive. Bun.serve holds the event loop open on
     // its own; this Promise is here for clarity.
@@ -234,6 +246,7 @@ function installShutdownHandlers(
     server: ReturnType<typeof Bun.serve>,
     shutdown: ReturnType<typeof createShutdownController>,
     logger: Logger,
+    sdkHandle: SdkHandle,
 ): void {
     if (signalHandlersInstalled) return;
     signalHandlersInstalled = true;
@@ -252,6 +265,17 @@ function installShutdownHandlers(
         // Stop accepting new connections.
         server.stop(false);
         const result = await shutdown.drain();
+        // Drain telemetry after the HTTP inflight drain — the last few
+        // requests' spans are most interesting when debugging a crash
+        // right before termination, so we want them exported.
+        try {
+            await sdkHandle.shutdown();
+        } catch (err) {
+            logger.warn({
+                event: 'observability.shutdown.error',
+                error: err instanceof Error ? err.message : String(err),
+            });
+        }
         logger.info({ event: 'shutdown.done', ...result });
         process.exit(0);
     };

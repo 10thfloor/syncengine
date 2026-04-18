@@ -31,6 +31,7 @@ import topLevelAwait from 'vite-plugin-top-level-await';
 
 import { actorsPlugin, type ActorsPluginOptions } from './actors.ts';
 import { devtoolsPlugin } from './devtools/devtools-plugin.ts';
+import { observabilityPlugin } from './observability.ts';
 import { servicesPlugin } from './services.ts';
 import { workspacesPlugin, type WorkspacesPluginOptions } from './workspaces.ts';
 import { errors, CliCode } from '@syncengine/core';
@@ -97,6 +98,7 @@ export default function syncengine(opts: SyncenginePluginOptions = {}) {
         workspacesPlugin(opts.workspaces ?? {}),
         servicesPlugin(),
         devtoolsPlugin(),
+        observabilityPlugin(),
     ];
 }
 

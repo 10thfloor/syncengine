@@ -325,6 +325,9 @@ importers:
       '@syncengine/http-core':
         specifier: workspace:*
         version: link:../http-core
+      '@syncengine/observe':
+        specifier: workspace:*
+        version: link:../observe
     devDependencies:
       '@types/bun':
         specifier: ^1.1.0
@@ -447,6 +450,9 @@ importers:
       '@syncengine/http-core':
         specifier: workspace:*
         version: link:../http-core
+      '@syncengine/observe':
+        specifier: workspace:*
+        version: link:../observe
       '@syncengine/server':
         specifier: workspace:*
         version: link:../server

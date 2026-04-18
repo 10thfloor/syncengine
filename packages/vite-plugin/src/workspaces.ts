@@ -107,7 +107,7 @@ function candidateConfigPaths(
  * `{ cause }`) so the developer sees the real failure, not a one-line
  * message.
  */
-async function loadConfig(
+export async function loadConfig(
     viteRoot: string,
     server: ViteDevServer,
     opts: WorkspacesPluginOptions,
