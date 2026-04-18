@@ -116,20 +116,30 @@ function runtimeConfigPath(stateDir: string): string {
 
 // ── Read/write ────────────────────────────────────────────────────────────
 
-export function writePorts(stateDir: string, ports: Ports): void {
+/** Atomic write: ensure the dir, serialise, flush. Centralised so every
+ *  state file writes the same way (same indent, same mkdirSync call). */
+function writeStateFile(stateDir: string, path: string, data: unknown): void {
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(portsFilePath(stateDir), JSON.stringify(ports, null, 2));
+    writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
-export function readPorts(stateDir: string): Ports | null {
-    const path = portsFilePath(stateDir);
+/** Returns parsed JSON or null for missing / unparseable — matches the
+ *  "trust nothing, fall back to defaults" pattern every reader wants. */
+function readStateFile<T>(path: string): T | null {
     if (!existsSync(path)) return null;
     try {
-        const parsed = JSON.parse(readFileSync(path, 'utf8')) as Ports;
-        return parsed;
+        return JSON.parse(readFileSync(path, 'utf8')) as T;
     } catch {
         return null;
     }
+}
+
+export function writePorts(stateDir: string, ports: Ports): void {
+    writeStateFile(stateDir, portsFilePath(stateDir), ports);
+}
+
+export function readPorts(stateDir: string): Ports | null {
+    return readStateFile<Ports>(portsFilePath(stateDir));
 }
 
 /** Returns recorded ports if present, otherwise the static defaults. */
@@ -138,23 +148,15 @@ export function readPortsOrDefaults(stateDir: string): Ports {
 }
 
 export function writePids(stateDir: string, pids: Pids): void {
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(pidsFilePath(stateDir), JSON.stringify(pids, null, 2));
+    writeStateFile(stateDir, pidsFilePath(stateDir), pids);
 }
 
 export function readPids(stateDir: string): Pids | null {
-    const path = pidsFilePath(stateDir);
-    if (!existsSync(path)) return null;
-    try {
-        return JSON.parse(readFileSync(path, 'utf8')) as Pids;
-    } catch {
-        return null;
-    }
+    return readStateFile<Pids>(pidsFilePath(stateDir));
 }
 
 export function writeRuntimeConfig(stateDir: string, config: RuntimeConfig): void {
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(runtimeConfigPath(stateDir), JSON.stringify(config, null, 2));
+    writeStateFile(stateDir, runtimeConfigPath(stateDir), config);
 }
 
 export function clearStateFiles(stateDir: string): void {
