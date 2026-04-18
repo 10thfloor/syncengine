@@ -101,6 +101,19 @@ export interface ScalarValueOptions<
     readonly ops?: TOps;
 }
 
+/** Options accepted by every value-def's column factory call site.
+ *  Applies to both scalar and composite forms. */
+export interface ValueColumnOpts<T> {
+    /** Written when a handler omits the field. Must already be a
+     *  branded value from a `.create` factory (or `.unsafe` in tests);
+     *  the framework doesn't re-validate here — defaults are lifted
+     *  at declaration time, not at write time. */
+    readonly default?: T;
+    /** When true, the column accepts `null` in addition to `T`.
+     *  Returned ColumnDef's `nullable` flag is set for storage. */
+    readonly nullable?: boolean;
+}
+
 /** The shape `defineValue` returns for a scalar form. Callable as a
  *  column factory; exposes `.T` for type extraction, named factories,
  *  ops, and the standard surface. */
@@ -110,9 +123,11 @@ export interface ScalarValueDef<
     TCreate extends Record<string, (...args: any[]) => TRaw>,
     TOps extends Record<string, (v: TRaw, ...args: any[]) => unknown>,
 > {
-    /** Callable as a column factory. No options yet — defaults +
-     *  nullability are Phase B surface. */
-    (): ColumnDef<Branded<TRaw, TName>>;
+    /** Callable as a column factory. Accepts defaults + nullability —
+     *  returned `ColumnDef` mirrors the underlying primitive's storage
+     *  (TEXT / INTEGER / etc.) with the value-def attached via
+     *  `$valueRef` so composites + runtime can recurse. */
+    (opts?: ValueColumnOpts<Branded<TRaw, TName>>): ColumnDef<Branded<TRaw, TName>>;
 
     /** Phantom type slot — use `typeof Money.T` or the
      *  `ValueType<typeof Money>` helper to pull out the branded shape. */
@@ -210,10 +225,10 @@ export interface CompositeValueDef<
     TCreate extends Record<string, (...args: any[]) => ShapeOf<S>>,
     TOps extends Record<string, (v: ShapeOf<S>, ...args: any[]) => unknown>,
 > {
-    /** Callable as a column factory. Composite columns store as
-     *  JSON-encoded TEXT — the shape is atomic on the wire (LWW on the
-     *  whole object). */
-    (): ColumnDef<Branded<ShapeOf<S>, TName>>;
+    /** Callable as a column factory. Composite columns are tagged with
+     *  `kind: 'value'` and stored as JSON-in-TEXT — the shape is atomic
+     *  on the wire (LWW on the whole object). */
+    (opts?: ValueColumnOpts<Branded<ShapeOf<S>, TName>>): ColumnDef<Branded<ShapeOf<S>, TName>>;
 
     readonly T: Branded<ShapeOf<S>, TName>;
     readonly $name: TName;
@@ -463,11 +478,13 @@ function defineScalar<
     // validation / rehydration.
     let selfRef: AnyValueDef | null = null;
 
-    const factory = (): ColumnDef<Branded<TRaw, TName>> => {
+    const factory = (opts?: ValueColumnOpts<Branded<TRaw, TName>>): ColumnDef<Branded<TRaw, TName>> => {
         const col = {
             ...column,
             $type: undefined as never,
             $valueRef: selfRef,
+            ...(opts?.default !== undefined ? { default: opts.default } : {}),
+            nullable: opts?.nullable ?? column.nullable,
         } as unknown as ColumnDef<Branded<TRaw, TName>>;
         return col;
     };
@@ -651,15 +668,16 @@ function defineComposite<
 
     let selfRef: AnyValueDef | null = null;
 
-    const factory = (): ColumnDef<Branded<ShapeOf<S>, TName>> => {
+    const factory = (opts?: ValueColumnOpts<Branded<ShapeOf<S>, TName>>): ColumnDef<Branded<ShapeOf<S>, TName>> => {
         const col = {
             $type: undefined as never,
-            kind: 'text' as const,    // JSON-in-TEXT; Phase B1 adds 'value' kind
-            sqlType: 'TEXT',
-            nullable: false,
+            kind: 'value' as const,
+            sqlType: 'TEXT',            // JSON-encoded composite payload
+            nullable: opts?.nullable ?? false,
             primaryKey: false,
             merge: 'lww' as const,
             $valueRef: selfRef,
+            ...(opts?.default !== undefined ? { default: opts.default } : {}),
         } as unknown as ColumnDef<Branded<ShapeOf<S>, TName>>;
         return col;
     };

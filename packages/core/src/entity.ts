@@ -249,6 +249,14 @@ export function buildInitialState<TShape extends EntityStateShape>(
 ): EntityState<TShape> {
   const out: Record<string, unknown> = {};
   for (const [name, col] of Object.entries(shape)) {
+    // Explicit default wins, regardless of nullable/kind — this is the
+    // primary surface for value-object columns (`Money({ default: Money.usd(0) })`)
+    // where the zero-primitive fallback would produce an invalid
+    // branded value. Works for primitive columns too when supplied.
+    if (col.default !== undefined) {
+      out[name] = col.default;
+      continue;
+    }
     if (col.nullable) {
       out[name] = null;
       continue;

@@ -250,6 +250,38 @@ describe('defineValue — composite', () => {
     });
 });
 
+// ── Column factory options (default / nullable) ───────────────────────────
+
+describe('defineValue — column factory options', () => {
+    it('composite column defaults to kind: value', () => {
+        const col = Money();
+        expect(col.kind).toBe('value');
+        expect(col.sqlType).toBe('TEXT');
+        expect(col.nullable).toBe(false);
+    });
+
+    it('scalar column inherits underlying primitive kind', () => {
+        const col = Email();
+        expect(col.kind).toBe('text');
+        expect(col.sqlType).toBe('TEXT');
+    });
+
+    it('{ default } lifts a branded default onto the ColumnDef', () => {
+        const col = Money({ default: Money.create.usd(0) });
+        expect(col.default).toMatchObject({ amount: 0, currency: 'USD' });
+    });
+
+    it('{ nullable: true } flips the nullable flag', () => {
+        const col = Money({ nullable: true });
+        expect(col.nullable).toBe(true);
+    });
+
+    it('$valueRef stamped on every column — composites + parents can recurse', () => {
+        const col = Money() as unknown as { $valueRef: { $name: string } };
+        expect(col.$valueRef.$name).toBe('money');
+    });
+});
+
 // ── Nested composite (Price contains Money) ───────────────────────────────
 
 const Price = defineValue('price', {
