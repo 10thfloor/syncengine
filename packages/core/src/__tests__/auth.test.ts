@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { AuthUser, AccessContext, AccessPolicy } from '../auth';
-import { Access } from '../auth';
+import { Access, USER_PLACEHOLDER } from '../auth';
 
 describe('AuthUser', () => {
     it('can be constructed with id only', () => {
@@ -188,6 +188,12 @@ describe('Access.all', () => {
     it('empty list passes (vacuous all)', () => {
         const policy = Access.all();
         expect(policy.check({ user: null, key: 'x' })).toBe(true);
+    });
+});
+
+describe('USER_PLACEHOLDER', () => {
+    it('is the literal string "$user"', () => {
+        expect(USER_PLACEHOLDER).toBe('$user');
     });
 });
 

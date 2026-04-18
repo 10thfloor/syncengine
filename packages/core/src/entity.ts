@@ -552,10 +552,10 @@ export interface EmitInsert {
 
 /** Helper: for each field in a table's record, make it optional and
  *  widen string columns to accept any `string` (including the `'$key'`
- *  placeholder the entity runtime resolves at publish time). Enum
- *  strictness is intentionally relaxed — handler params are typically
- *  plain `string`, and the real value of this type is catching wrong
- *  field names and kind mismatches (string vs number). */
+ *  and `'$user'` placeholders the entity runtime resolves at publish
+ *  time). Enum strictness is intentionally relaxed — handler params
+ *  are typically plain `string`, and the real value of this type is
+ *  catching wrong field names and kind mismatches (string vs number). */
 type EmitRecord<TCols extends Record<string, ColumnDef<unknown>>> = {
   [K in keyof InferRecord<TCols>]?:
     InferRecord<TCols>[K] extends string

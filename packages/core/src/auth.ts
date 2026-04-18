@@ -54,6 +54,26 @@ export interface AccessPolicy {
     readonly check: (ctx: AccessContext) => boolean;
 }
 
+/**
+ * Placeholder string recognised by the entity runtime in `emit()`
+ * records. Resolves to the authenticated user's `id` at publish time.
+ *
+ * Example — record who bought the item without a handler argument:
+ *
+ *   effects: [
+ *     insert(transactions, {
+ *       productSlug: '$key',
+ *       userId:      '$user',   // resolved server-side from the connection
+ *       amount:      price,
+ *     }),
+ *   ]
+ *
+ * Same lifecycle as `'$key'`: the type system widens `string` columns
+ * to accept the literal, and the entity runtime substitutes the real
+ * value before the row is published to NATS.
+ */
+export const USER_PLACEHOLDER = '$user' as const;
+
 // ── Access DSL ─────────────────────────────────────────────────────────────
 //
 // Composable access predicates. Every value here is either a terminal
