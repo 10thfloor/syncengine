@@ -87,3 +87,50 @@ describe('Access.role', () => {
         expect(policy.check({ user: { id: 'a', roles: ['viewer'] }, key: 'x' })).toBe(false);
     });
 });
+
+describe('Access.owner', () => {
+    it('passes when state.userId equals user.id (default field)', () => {
+        const policy = Access.owner();
+        const ctx: AccessContext<{ userId: string }> = {
+            user: { id: 'alice' },
+            key: 'order-1',
+            state: { userId: 'alice' },
+        };
+        expect(policy.check(ctx)).toBe(true);
+    });
+
+    it('rejects when state.userId differs from user.id', () => {
+        const policy = Access.owner();
+        const ctx: AccessContext<{ userId: string }> = {
+            user: { id: 'alice' },
+            key: 'order-1',
+            state: { userId: 'bob' },
+        };
+        expect(policy.check(ctx)).toBe(false);
+    });
+
+    it('uses the configured field name when provided', () => {
+        const policy = Access.owner('createdBy');
+        const ctx: AccessContext<{ createdBy: string }> = {
+            user: { id: 'alice' },
+            key: 'doc-1',
+            state: { createdBy: 'alice' },
+        };
+        expect(policy.check(ctx)).toBe(true);
+    });
+
+    it('rejects unauthenticated users', () => {
+        const policy = Access.owner();
+        const ctx: AccessContext<{ userId: string }> = {
+            user: null,
+            key: 'order-1',
+            state: { userId: 'alice' },
+        };
+        expect(policy.check(ctx)).toBe(false);
+    });
+
+    it('rejects when state is missing', () => {
+        const policy = Access.owner();
+        expect(policy.check({ user: { id: 'alice' }, key: 'order-1' })).toBe(false);
+    });
+});

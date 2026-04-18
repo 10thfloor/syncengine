@@ -126,9 +126,21 @@ function role(
     return roleTyped(defOrFirst, ...rest);
 }
 
+function owner(field: string = 'userId'): AccessPolicy {
+    return {
+        $kind: 'access',
+        check: (ctx) => {
+            if (!ctx.user || !ctx.state) return false;
+            const fieldValue = (ctx.state as Record<string, unknown>)[field];
+            return fieldValue === ctx.user.id;
+        },
+    };
+}
+
 export const Access = {
     public: publicPolicy,
     authenticated: authenticatedPolicy,
     deny: denyPolicy,
     role,
+    owner,
 };
