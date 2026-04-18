@@ -730,7 +730,7 @@ Expected output (with colors):
 
    hint: Pick an empty directory or a new name.
 
-   → /Users/mk/syncengine/packages/cli/src/init.ts:...
+   → ./packages/cli/src/init.ts:...
    ┄ (N syncengine internals hidden)
 ```
 

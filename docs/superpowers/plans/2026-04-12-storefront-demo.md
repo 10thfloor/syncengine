@@ -118,7 +118,7 @@ export const INITIAL_STOCK: Record<ProductSlug, number> = {
 
 - [ ] **Step 2: Verify the file compiles**
 
-Run: `cd /Users/mk/syncengine && pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
+Run: `pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
 
 Expected: No errors (or only pre-existing unrelated errors).
 
@@ -238,7 +238,7 @@ rm apps/test/src/entities/counter.actor.ts apps/test/src/entities/account.actor.
 
 - [ ] **Step 3: Verify compile**
 
-Run: `cd /Users/mk/syncengine && pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
+Run: `pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
 
 Expected: Errors about App.tsx importing deleted entities (expected — fixed in Task 5).
 
@@ -357,7 +357,7 @@ export const STATUS_COLORS: Record<string, string> = {
 
 - [ ] **Step 2: Verify compile**
 
-Run: `cd /Users/mk/syncengine && pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
+Run: `pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
 
 Expected: Same App.tsx import errors as before (resolved in Task 5).
 
@@ -892,7 +892,7 @@ export default function App() {
 
 - [ ] **Step 2: Verify compile (will fail — tab components don't exist yet)**
 
-Run: `cd /Users/mk/syncengine && pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
+Run: `pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
 
 Expected: Errors about missing `./tabs/*` imports.
 
@@ -992,7 +992,7 @@ const ProductCard = memo(function ProductCard({
 
 - [ ] **Step 2: Verify compile**
 
-Run: `cd /Users/mk/syncengine && pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
+Run: `pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -20`
 
 Expected: Errors about remaining missing tab imports only.
 
@@ -1443,7 +1443,7 @@ export const ActivityTab = memo(function ActivityTab() {
 
 - [ ] **Step 2: Verify full compile**
 
-Run: `cd /Users/mk/syncengine && pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -30`
+Run: `pnpm tsc --noEmit -p apps/test/tsconfig.json 2>&1 | head -30`
 
 Expected: Clean compile (all imports resolved).
 
@@ -1462,7 +1462,7 @@ git commit -m "feat(demo): activity tab — DBSP dashboard with live views"
 
 - [ ] **Step 1: Start the dev server**
 
-Run: `cd /Users/mk/syncengine && pnpm dev`
+Run: `pnpm dev`
 
 Expected: Vite dev server starts, NATS and Restate boot, no errors.
 

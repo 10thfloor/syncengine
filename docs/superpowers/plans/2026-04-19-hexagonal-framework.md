@@ -95,7 +95,7 @@ describe('ServicePort type extraction', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/service.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/service.test.ts`
 Expected: FAIL — module `../service` not found.
 
 - [ ] **Step 3: Implement `service()`, `isService`, `ServiceDef`, `ServicePort`**
@@ -206,12 +206,12 @@ export type { ServiceDef, ServicePort, ServiceName, AnyService } from './service
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/service.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/service.test.ts`
 Expected: All PASS.
 
 - [ ] **Step 7: Run existing tests to verify no regressions**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/`
+Run: `pnpm vitest run packages/core/`
 Expected: All existing tests still pass.
 
 - [ ] **Step 8: Commit**
@@ -288,7 +288,7 @@ describe('override()', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/service.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/service.test.ts`
 Expected: FAIL — `override` not exported.
 
 - [ ] **Step 3: Implement `override()` and `ServiceOverride`**
@@ -376,7 +376,7 @@ export type { ServiceDef, ServicePort, ServiceName, AnyService, ServiceOverride,
 
 - [ ] **Step 5: Run tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/service.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/service.test.ts`
 Expected: All PASS.
 
 - [ ] **Step 6: Commit**
@@ -487,7 +487,7 @@ describe('emit() redesign — { state, effects } form', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/entity.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/entity.test.ts`
 Expected: FAIL — `insert`, `trigger`, `extractTriggers`, `TRIGGER_KEY` not found.
 
 - [ ] **Step 3: Implement `insert()`, `trigger()`, new `emit()` overload, `extractTriggers()`**
@@ -616,12 +616,12 @@ export type { EmitTrigger } from './entity';
 
 - [ ] **Step 5: Run tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/entity.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/entity.test.ts`
 Expected: All PASS (both old and new tests).
 
 - [ ] **Step 6: Run full core test suite**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/`
+Run: `pnpm vitest run packages/core/`
 Expected: All pass — legacy `emit()` callers unaffected.
 
 - [ ] **Step 7: Commit**
@@ -677,7 +677,7 @@ describe('SyncengineConfig.services', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/src/__tests__/service.test.ts`
+Run: `pnpm vitest run packages/core/src/__tests__/service.test.ts`
 Expected: FAIL — `services` not a valid key on `SyncengineConfig`.
 
 - [ ] **Step 3: Add `services` to `SyncengineConfig`**
@@ -711,7 +711,7 @@ export type { ServicesConfig } from './config';
 
 - [ ] **Step 5: Run tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/core/`
+Run: `pnpm vitest run packages/core/`
 Expected: All PASS.
 
 - [ ] **Step 6: Commit**
@@ -811,7 +811,7 @@ describe('ServiceContainer', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/src/__tests__/service-container.test.ts`
+Run: `pnpm vitest run packages/server/src/__tests__/service-container.test.ts`
 Expected: FAIL — module not found.
 
 - [ ] **Step 3: Implement `ServiceContainer`**
@@ -874,7 +874,7 @@ export class ServiceContainer {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/src/__tests__/service-container.test.ts`
+Run: `pnpm vitest run packages/server/src/__tests__/service-container.test.ts`
 Expected: All PASS.
 
 - [ ] **Step 5: Commit**
@@ -932,7 +932,7 @@ describe('defineWorkflow with services', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/src/__tests__/workflow-services.test.ts`
+Run: `pnpm vitest run packages/server/src/__tests__/workflow-services.test.ts`
 Expected: FAIL — `$services` doesn't exist on WorkflowDef, new overload signature doesn't exist.
 
 - [ ] **Step 3: Update `defineWorkflow` to accept services option**
@@ -1002,12 +1002,12 @@ Also update `buildWorkflowObject` to inject services into ctx (the actual inject
 
 - [ ] **Step 4: Run tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/src/__tests__/workflow-services.test.ts`
+Run: `pnpm vitest run packages/server/src/__tests__/workflow-services.test.ts`
 Expected: All PASS.
 
 - [ ] **Step 5: Run existing workflow tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/`
+Run: `pnpm vitest run packages/server/`
 Expected: All pass.
 
 - [ ] **Step 6: Commit**
@@ -1063,7 +1063,7 @@ $services: config.services ?? [],
 
 - [ ] **Step 2: Run full server test suite**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/`
+Run: `pnpm vitest run packages/server/`
 Expected: All PASS — additive change, no existing behavior affected.
 
 - [ ] **Step 3: Commit**
@@ -1135,7 +1135,7 @@ if (triggers) {
 
 - [ ] **Step 2: Run full test suite**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run`
+Run: `pnpm vitest run`
 Expected: All PASS.
 
 - [ ] **Step 3: Commit**
@@ -1352,7 +1352,7 @@ if (appDir) {
 
 - [ ] **Step 4: Run existing tests**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/server/`
+Run: `pnpm vitest run packages/server/`
 Expected: All pass.
 
 - [ ] **Step 5: Commit**
@@ -1398,7 +1398,7 @@ Actually, the simplest change: just add the `.gitkeep` for `services/` since all
 
 - [ ] **Step 2: Run existing CLI tests (if any) or test manually**
 
-Run: `cd /Users/mk/syncengine && pnpm vitest run packages/cli/ 2>/dev/null || echo "No CLI tests"`
+Run: `pnpm vitest run packages/cli/ 2>/dev/null || echo "No CLI tests"`
 
 - [ ] **Step 3: Commit**
 
@@ -1492,7 +1492,7 @@ Wire `add` into the CLI's command routing (the exact location depends on the CLI
 
 ```bash
 cd /tmp && mkdir test-add && cd test-add && mkdir -p src/services
-node /Users/mk/syncengine/packages/cli/src/add.ts service payments
+node ./packages/cli/src/add.ts service payments
 cat src/services/payments.ts
 ```
 
