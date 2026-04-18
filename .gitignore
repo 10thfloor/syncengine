@@ -17,6 +17,9 @@ packages/dbsp-engine/pkg
 .syncengine/
 .superpowers/
 
+# MCP tool state (serena indexer)
+.serena/
+
 # Logs
 logs
 *.log

@@ -5,6 +5,10 @@
 # `dist/` and the Node runtime. Mirrors spec §9a's "build → package"
 # model. The bundled dist/server/index.mjs starts both the Restate
 # H2C endpoint (:9080) and the HTTP server (:3000) in-process.
+#
+# Canonical reference for the single-process Dockerfile. `syncengine init`
+# inlines an equivalent copy in packages/cli/src/init.ts — keep them in
+# sync (and same for Dockerfile.handlers / .dockerignore).
 
 FROM node:22-bookworm-slim
 WORKDIR /app
