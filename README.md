@@ -13,8 +13,10 @@ You write pure domain logic. The framework handles sync, state, orchestration, a
 ## Install
 
 ```bash
-pnpm add @syncengine/core @syncengine/server @syncengine/client @syncengine/cli
-pnpm exec syncengine init
+curl -fsSL https://raw.githubusercontent.com/10thfloor/syncengine/main/install/install.sh | bash
+syncengine init my-app
+cd my-app
+pnpm install
 pnpm dev
 ```
 

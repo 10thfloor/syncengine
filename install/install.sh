@@ -24,7 +24,7 @@ set -euo pipefail
 # REPO is the GitHub "owner/name" where binaries are published. Pinned here
 # until we have a real domain; the installer can also be hosted under a
 # CNAME once DNS exists.
-REPO="__SYNCENGINE_REPO__"
+REPO="10thfloor/syncengine"
 INSTALL_ROOT="${SYNCENGINE_INSTALL:-$HOME/.syncengine}"
 BIN_DIR="$INSTALL_ROOT/bin"
 VERSION="${SYNCENGINE_VERSION:-latest}"

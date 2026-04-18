@@ -11,18 +11,15 @@ Contains the public installer shell script that bootstraps the
 
 ## How it's hosted
 
-For the `curl | bash` flow to work, this script has to be reachable over
-HTTPS at a stable URL. Two options:
+Served via GitHub Raw, zero infra:
 
-1. **GitHub raw** (zero infra): point users at
-   `https://raw.githubusercontent.com/<org>/<repo>/main/install/install.sh`.
-   Works immediately but ties the URL to the repo path.
-2. **Your domain** (CNAME to GitHub Pages or a CDN): e.g.
-   `curl -fsSL https://syncengine.dev/install | bash`. Nicer URL,
-   needs DNS.
+```bash
+curl -fsSL https://raw.githubusercontent.com/10thfloor/syncengine/main/install/install.sh | bash
+```
 
-The `REPO` placeholder in `install.sh` gets its value at release time —
-see `.github/workflows/release.yml`.
+We can front this with a CNAME (`install.syncengine.dev` → GitHub Pages
+or a CDN) later if we want a nicer URL; for now the raw URL is the
+public install endpoint.
 
 ## Testing locally
 
