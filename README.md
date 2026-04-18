@@ -24,15 +24,17 @@ pnpm install
 pnpm dev
 ```
 
-## Hex architecture, by construction
+## A hex-shaped framework
 
-The framework is organized as concentric rings — pure data at the
-center, stateful domain logic in the middle, orchestration and vendor
-SDKs at the edge. Each primitive slots into exactly one ring, and each
-ring depends only on the rings inside it. There's no lint rule to tune
-and no runtime check to fail: the type system enforces the walls for
-you, and the file-suffix convention makes the boundaries visible in
-the file tree.
+The primitives are arranged as concentric rings — pure data at the
+center, stateful domain logic in between, orchestration and vendor
+SDKs at the edge. Inner rings don't know about outer ones, and the
+type system follows the shape, so most layering mistakes surface as
+TypeScript errors rather than runtime bugs. The file-suffix
+convention gives the rings a visible home in your repo.
+
+It's a nudge, not a cage. The goal is to keep each handler small
+enough to reason about — not to win an argument about architecture.
 
 <div align="center">
 
@@ -235,16 +237,35 @@ means three real days, across restarts and deploys.
 ```ts
 // src/workflows/ship-on-pay.workflow.ts
 import { defineWorkflow, on } from '@syncengine/server';
-import { Retry, seconds } from '@syncengine/core';
+import { Retry, seconds, days } from '@syncengine/core';
 import { orderEvents } from '../events/orders.bus';
 import { shipping } from '../services/shipping';
+import { notifications } from '../services/notifications';
 
 export const shipOnPay = defineWorkflow('shipOnPay', {
   on:       on(orderEvents).where(e => e.event === 'paid'),
-  services: [shipping],
+  services: [shipping, notifications],
   retry:    Retry.exponential({ attempts: 2, initial: seconds(1), max: seconds(10) }),
 }, async (ctx, event) => {
-  await ctx.services.shipping.create(event.orderId);
+  // 1. Ship it.
+  const { trackingId } = await ctx.services.shipping.create(event.orderId);
+
+  // 2. Notify the customer.
+  await ctx.services.notifications.sendSlack({
+    channel: '#orders',
+    text:    `order ${event.orderId} shipped (${trackingId})`,
+  });
+
+  // 3. Wait three real days — across restarts, deploys, crashes.
+  await ctx.sleep(days(3));
+
+  // 4. Follow up once the package has had time to arrive.
+  await ctx.services.notifications.sendSlack({
+    channel: '#orders',
+    text:    `how was your order ${event.orderId}? we'd love a review.`,
+  });
+
+  // 5. Announce completion on the bus for anyone else who cares.
   await orderEvents.publish(ctx, {
     orderId: event.orderId,
     event:   'shipped',
@@ -253,9 +274,11 @@ export const shipOnPay = defineWorkflow('shipOnPay', {
 });
 ```
 
-`ctx.services.shipping` is typed, inferred from the `services: [shipping]`
-tuple. Failures with a terminal status route to `orderEvents.dlq`
-automatically.
+`ctx.services.shipping` and `ctx.services.notifications` are typed,
+inferred from the `services: [...]` tuple — no casts. Every `await` is
+a checkpoint: kill the server mid-`ctx.sleep` and the workflow resumes
+on schedule when it comes back up. Failures with a terminal status
+route to `orderEvents.dlq` automatically.
 
 <sub>→ [Guide: Workflows](./docs/guides/workflows.md)</sub>
 
@@ -394,24 +417,6 @@ is the default, not an add-on.
 
 ---
 
-## The shape
-
-```
-      ┌─────── service ───────┐      outside world
-      │  ┌─── workflow ───┐   │      orchestration — durable, retriable
-      │  │  ┌─── bus ──┐  │   │      decoupling — atomic, typed
-      │  │  │  view    │  │   │      derived — incremental, streamed
-      │  │  │  entity  │  │   │      state — pure, single-writer
-      │  │  │  schema  │  │   │      shape — typed, referenced by value
-      │  │  └──────────┘  │   │
-      │  └────────────────┘   │
-      └───────────────────────┘
-```
-
-Each ring depends only on the rings inside it. Entity handlers can't
-reach services, workflows can't mutate tables directly, schema knows
-nothing about the rest. Not a convention — a type-system guarantee.
-
 ## Project layout
 
 File suffixes carry meaning. They tell the framework what each file is,
@@ -484,8 +489,6 @@ directly.
 | Validation        | [Zod](https://zod.dev)                       |
 
 ## Documentation
-
-One guide per primitive, plus the cross-cutting concerns:
 
 - **[Entities](./docs/guides/entities.md)** — state machines, transitions, access
 - **[Tables & views](./docs/guides/tables-and-channels.md)** — schema and DBSP
