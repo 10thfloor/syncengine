@@ -5,8 +5,8 @@
 // so downstream code sees the brand regardless of wire hops.
 
 import { describe, it, expect } from 'vitest';
-import { defineEntity, buildInitialState, validateEntityState, applyHandler } from '../entity';
-import { text, integer } from '../schema';
+import { defineEntity, buildInitialState, validateEntityState, applyHandler, emit, insert } from '../entity';
+import { table, id, text, integer, real } from '../schema';
 import { defineValue } from '../value';
 
 const Money = defineValue('money', {
@@ -102,5 +102,86 @@ describe('entity — value-column state lifecycle', () => {
             customerEmail: null,
         }, 'order');
         expect(v.customerEmail).toBeNull();
+    });
+});
+
+// ── Table insert() validation (Phase D) ───────────────────────────────────
+
+const lineItems = table('lineItems', {
+    id: id(),
+    orderId: text(),
+    price: Money(),
+    label: text(),
+    rate: real({ merge: false }),  // primitive column alongside value columns
+});
+
+describe('insert() effect — value-column validation', () => {
+    it('accepts a branded Money in the record', () => {
+        const result = emit({
+            state: { status: 'draft' as const },
+            effects: [
+                insert(lineItems, {
+                    id: 0,
+                    orderId: 'O1',
+                    price: Money.create.usd(100),
+                    label: 'widget',
+                    rate: 1,
+                }),
+            ],
+        });
+        expect(result.status).toBe('draft');
+    });
+
+    it('rejects an insert with an invalid Money (invariant failure)', () => {
+        expect(() =>
+            emit({
+                state: { status: 'draft' as const },
+                effects: [
+                    insert(lineItems, {
+                        id: 0,
+                        orderId: 'O1',
+                        price: { amount: -1, currency: 'USD' } as never,
+                        label: 'widget',
+                        rate: 1,
+                    }),
+                ],
+            }),
+        ).toThrow(/money.*rejected/i);
+    });
+
+    it('rejects an insert with a plain-object Money when shape is fine but unbranded', () => {
+        // Shape matches and invariant passes, so it accepts — the point
+        // of `.is()` is admissibility, not brand-origin.
+        const result = emit({
+            state: { status: 'draft' as const },
+            effects: [
+                insert(lineItems, {
+                    id: 0,
+                    orderId: 'O1',
+                    price: { amount: 100, currency: 'USD' } as never,
+                    label: 'widget',
+                    rate: 1,
+                }),
+            ],
+        });
+        expect(result.status).toBe('draft');
+    });
+
+    it('primitive columns on the same table are untouched', () => {
+        // Exercises that the validator only inspects `$valueRef`-tagged
+        // columns — doesn't accidentally reject primitives.
+        const result = emit({
+            state: { status: 'draft' as const },
+            effects: [
+                insert(lineItems, {
+                    id: 0,
+                    orderId: 'O1',
+                    price: Money.create.usd(0),
+                    label: 'x'.repeat(1000),  // big string, fine
+                    rate: 1.5,
+                }),
+            ],
+        });
+        expect(result.status).toBe('draft');
     });
 });

@@ -588,6 +588,37 @@ function normalizeInsert(insert: TypedEmitInsert<AnyTable> | LegacyEmitInsert): 
   };
 }
 
+/** Validate every value-object column in a typed insert's record. Skips
+ *  when the emit is the legacy (string-named) form since we can't
+ *  recover the table's column metadata from a bare name.
+ *
+ *  The validator reads `$valueRef` off each column — stamped by
+ *  `defineValue(...)` — and runs the value's `.is()`. Throws with the
+ *  table + column + value-type name so the error points at the
+ *  handler that emitted the bad row. */
+function validateInsertValueColumns(insert: { table: AnyTable; record: Record<string, unknown> }): void {
+  const tableName = insert.table.$name;
+  const columns = (insert.table as unknown as { $columns?: Record<string, ColumnDef<unknown>> }).$columns;
+  if (!columns) return;
+  for (const [colName, col] of Object.entries(columns)) {
+    const ref = (col as { $valueRef?: { is: (x: unknown) => boolean; $name: string } }).$valueRef;
+    if (!ref) continue;
+    if (!(colName in insert.record)) continue; // column omitted — fine
+    const provided = insert.record[colName];
+    // Honour the column's nullable flag — null bypasses validation.
+    if (provided === null && col.nullable) continue;
+    if (!ref.is(provided)) {
+      throw errors.entity(EntityCode.TYPE_MISMATCH, {
+        message:
+          `insert(${tableName}): column '${colName}' (value-type '${ref.$name}') ` +
+          `rejected value ${JSON.stringify(provided)}.`,
+        hint: `Construct via the value's factory (e.g. Money.create.usd(100)).`,
+        context: { table: tableName, field: colName, valueType: ref.$name },
+      });
+    }
+  }
+}
+
 /** Create a typed insert effect for use in `emit({ state, effects })`. */
 export function insert<T extends AnyTable>(
     tableRef: T,
@@ -709,6 +740,10 @@ export function emit<S extends Record<string, unknown>>(
     for (const effect of effects) {
       if (effect.$effect === 'insert') {
         const typed = effect as unknown as { table: AnyTable; record: Record<string, unknown> };
+        // Validate value-object columns BEFORE normalize — gives a
+        // crisp error location ("handler 'pay' emitted an invalid Money
+        // on lineItems.price") instead of failing downstream at persist.
+        validateInsertValueColumns(typed);
         insertEffects.push(normalizeInsert(typed));
       } else if (effect.$effect === 'trigger') {
         const typed = effect as unknown as { workflow: { $name: string }; input: unknown };
