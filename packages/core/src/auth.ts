@@ -161,6 +161,15 @@ function all(...policies: AccessPolicy[]): AccessPolicy {
     };
 }
 
+function where(
+    predicate: (user: AuthUser | null, key: string) => boolean,
+): AccessPolicy {
+    return {
+        $kind: 'access',
+        check: (ctx) => predicate(ctx.user, ctx.key),
+    };
+}
+
 export const Access = {
     public: publicPolicy,
     authenticated: authenticatedPolicy,
@@ -169,4 +178,5 @@ export const Access = {
     owner,
     any,
     all,
+    where,
 };

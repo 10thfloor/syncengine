@@ -190,3 +190,28 @@ describe('Access.all', () => {
         expect(policy.check({ user: null, key: 'x' })).toBe(true);
     });
 });
+
+describe('Access.where', () => {
+    it('passes when the predicate returns true', () => {
+        const policy = Access.where((user, key) => user?.id === 'alice' && key === 'keyboard');
+        expect(policy.check({ user: { id: 'alice' }, key: 'keyboard' })).toBe(true);
+    });
+
+    it('rejects when the predicate returns false', () => {
+        const policy = Access.where((user) => user?.id === 'alice');
+        expect(policy.check({ user: { id: 'bob' }, key: 'keyboard' })).toBe(false);
+    });
+
+    it('passes null user through to the predicate', () => {
+        const policy = Access.where((user) => user === null);
+        expect(policy.check({ user: null, key: 'x' })).toBe(true);
+    });
+
+    it('composes with any() and all()', () => {
+        const isInternalKey = Access.where((_, key) => key.startsWith('internal-'));
+        const policy = Access.all(Access.authenticated, isInternalKey);
+        expect(policy.check({ user: { id: 'a' }, key: 'internal-1' })).toBe(true);
+        expect(policy.check({ user: { id: 'a' }, key: 'public-1' })).toBe(false);
+        expect(policy.check({ user: null, key: 'internal-1' })).toBe(false);
+    });
+});
