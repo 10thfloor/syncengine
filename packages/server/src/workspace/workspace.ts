@@ -208,12 +208,22 @@ export const workspace = restate.object({
       const stream = streamName(workspaceId);
       const subjects = `${subjectPrefix(workspaceId)}.>`;
 
+      // Restate journals anything inside ctx.run; subsequent replays reuse
+      // the recorded value. `new Date()` called outside ctx.run produces a
+      // fresh timestamp on every attempt and trips the deterministic-replay
+      // guard (error 570). All non-deterministic reads (Date.now, uuid,
+      // env, random) must flow through ctx.run here.
+      const createdAt = await ctx.run(
+        'provision-created-at',
+        async () => new Date().toISOString(),
+      );
+
       const state: WorkspaceState = {
         workspaceId,
         tenantId: req.tenantId,
         schemaVersion: 1,
         streamName: stream,
-        createdAt: new Date().toISOString(),
+        createdAt,
         status: "provisioning",
       };
       ctx.set(Keys.STATE, state);
@@ -228,7 +238,11 @@ export const workspace = restate.object({
       ctx.set(Keys.STATE, state);
 
       if (req.creatorUserId) {
-        ctx.set(Keys.MEMBERS, [{ userId: req.creatorUserId, role: 'owner', addedAt: new Date().toISOString() }]);
+        const memberAddedAt = await ctx.run(
+          'provision-creator-added-at',
+          async () => new Date().toISOString(),
+        );
+        ctx.set(Keys.MEMBERS, [{ userId: req.creatorUserId, role: 'owner', addedAt: memberAddedAt }]);
       }
 
       await publishToNats(ctx, "broadcast-workspace-provisioned", "syncengine.workspaces", {
