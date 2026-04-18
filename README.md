@@ -59,7 +59,7 @@ enough to reason about — not to win an argument about architecture.
 
 ## Building blocks
 
-Six primitives in a few lines of code each. Together they're a
+A handful of primitives, each a few lines of code. Together they're a
 hexagonal architecture — schema at the center, services at the edge,
 walls enforced by the type system.
 
@@ -85,6 +85,49 @@ export const transactions = table('transactions', {
 ```
 
 <sub>→ [Guide: Tables & channels](./docs/guides/tables-and-channels.md)</sub>
+
+### Value objects
+
+<sub>`src/values/*.ts` · runs on client + server</sub>
+
+Branded domain types with invariants, factories, and operations. Plug
+into schemas as column types so the brand and the rules reach every
+layer — table rows, entity state, bus payloads, view outputs.
+
+```ts
+// src/values/money.ts
+import { defineValue, integer, text } from '@syncengine/core';
+
+export const Money = defineValue('money', {
+  amount:   integer(),
+  currency: text({ enum: ['USD', 'EUR', 'GBP'] as const }),
+}, {
+  invariant: (v) => v.amount >= 0,
+  create: {
+    usd: (cents: number) => ({ amount: cents, currency: 'USD' as const }),
+    eur: (cents: number) => ({ amount: cents, currency: 'EUR' as const }),
+  },
+  ops: {
+    add:    (a, b) => ({ amount: a.amount + b.amount, currency: a.currency }),
+    format: (m)    => `${m.currency} ${(m.amount / 100).toFixed(2)}`,
+  },
+});
+```
+
+Then drop it into a schema like any other column type:
+
+```ts
+export const products = table('products', {
+  id:    id(),
+  name:  text(),
+  price: Money(),
+});
+```
+
+`Money.usd(1299)` is the only way to construct a valid instance.
+Invariants run at construction; there is no path to a negative Money.
+
+<sub>→ [Guide: Value objects](./docs/guides/value-objects.md)</sub>
 
 ### Views
 
