@@ -1,7 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
+import { TerminalError } from '@restatedev/restate-sdk';
 import { bus, entity, text, emit, publish, BusMode, override, isBusOverride, serviceOverride, service } from '@syncengine/core';
-import { createBusTestHarness } from '../test/bus-harness';
+import { createBusTestHarness, type BusTestHarness } from '../test/bus-harness';
+import { defineWorkflow, on } from '../index';
 
 const schema = z.object({
     orderId: z.string(),
@@ -10,11 +12,13 @@ const schema = z.object({
 const orderEvents = bus('orderEvents', { schema });
 
 describe('createBusTestHarness', () => {
-    let harness = createBusTestHarness();
+    let harness: BusTestHarness;
 
+    beforeEach(() => {
+        harness = createBusTestHarness();
+    });
     afterEach(() => {
         harness.dispose();
-        harness = createBusTestHarness();
     });
 
     it('captures imperative bus.publish(ctx, payload) calls', async () => {
@@ -149,5 +153,153 @@ describe('BusMode + override(bus)', () => {
         expect(() => override({ $tag: 'nope' } as never, { mode: BusMode.nats() })).toThrow(
             /ServiceDef or BusRef/,
         );
+    });
+});
+
+// ── 2b-C2: synchronous subscriber dispatch ───────────────────────────────
+describe('createBusTestHarness — subscriber dispatch', () => {
+    const shipping = service('shipping', {
+        async create(orderId: string): Promise<{ trackingId: string }> {
+            if (orderId.startsWith('fail-')) {
+                throw new Error(`boom on ${orderId}`);
+            }
+            return { trackingId: `trk_${orderId}` };
+        },
+    });
+
+    const shipOnPay = defineWorkflow(
+        'shipOnPay',
+        {
+            on: on(orderEvents).where((e) => e.total > 0),
+            services: [shipping],
+        },
+        async (ctx, event) => {
+            try {
+                await ctx.services.shipping.create(event.orderId);
+            } catch (err) {
+                throw new TerminalError(`shipOnPay failed: ${(err as Error).message}`);
+            }
+        },
+    );
+
+    const alertOnDlq = defineWorkflow(
+        'alertOnDlq',
+        {
+            on: on(orderEvents.dlq),
+        },
+        async (_ctx, _dead) => {
+            // no-op; harness tracks via dispatched.
+        },
+    );
+
+    let harness: BusTestHarness;
+
+    beforeEach(() => {
+        harness = createBusTestHarness({
+            workflows: [shipOnPay, alertOnDlq] as never,
+            services: [shipping],
+        });
+    });
+    afterEach(() => {
+        harness.dispose();
+    });
+
+    it('fires subscribers inline on imperative publish', async () => {
+        await orderEvents.publish(harness.ctx(), { orderId: 'O1', total: 10 });
+        const dispatched = harness.dispatchedFor(shipOnPay);
+        expect(dispatched).toHaveLength(1);
+        expect(dispatched[0]!.outcome).toBe('ok');
+        expect(dispatched[0]!.payload).toMatchObject({ orderId: 'O1', total: 10 });
+    });
+
+    it('honours .where() — predicate rejects before dispatch', async () => {
+        await orderEvents.publish(harness.ctx(), { orderId: 'O2', total: 0 });
+        expect(harness.dispatchedFor(shipOnPay)).toHaveLength(0);
+    });
+
+    it('routes TerminalError to <bus>.dlq with a DeadEvent', async () => {
+        await orderEvents.publish(harness.ctx(), { orderId: 'fail-O3', total: 5 });
+
+        const shipEntries = harness.dispatchedFor(shipOnPay);
+        expect(shipEntries).toHaveLength(1);
+        expect(shipEntries[0]!.outcome).toBe('terminal-error');
+
+        // The DLQ subscriber fired with a DeadEvent.
+        const dlqEntries = harness.dispatchedFor(alertOnDlq);
+        expect(dlqEntries).toHaveLength(1);
+        const dead = dlqEntries[0]!.payload as {
+            original: unknown;
+            error: { message: string };
+            workflow: string;
+        };
+        expect(dead.workflow).toBe('shipOnPay');
+        expect(dead.original).toMatchObject({ orderId: 'fail-O3' });
+        expect(dead.error.message).toMatch(/shipOnPay failed/);
+    });
+
+    it('resolves declared services on ctx.services — missing services throw', () => {
+        const notificationsSvc = service('notifications', {
+            async send() { /* noop */ },
+        });
+        const notifier = defineWorkflow(
+            'notifier',
+            {
+                on: on(orderEvents),
+                services: [notificationsSvc],
+            },
+            async (_ctx, _e) => { /* noop */ },
+        );
+        expect(() =>
+            createBusTestHarness({ workflows: [notifier], services: [] }),
+        ).toThrow(/Service 'notifications' not registered/);
+    });
+
+    it('driveEffects drains publish() effects from an entity return', async () => {
+        const order = entity('order', {
+            state: { status: text({ enum: ['open', 'paid'] as const }) },
+            transitions: { open: ['paid'], paid: [] },
+            handlers: {
+                pay(state, req: { orderId: string }) {
+                    return emit({
+                        state: { ...state, status: 'paid' as const },
+                        effects: [publish(orderEvents, { orderId: req.orderId, total: 100 })],
+                    });
+                },
+            },
+        });
+
+        const result = order.$handlers.pay({ status: 'open' }, { orderId: 'D1' });
+        await harness.driveEffects(result);
+
+        expect(harness.publishedOn(orderEvents)).toHaveLength(1);
+        expect(harness.dispatchedFor(shipOnPay)).toHaveLength(1);
+    });
+
+    it('non-terminal handler errors surface to the test author', async () => {
+        const buggy = defineWorkflow(
+            'buggy',
+            { on: on(orderEvents) },
+            async () => {
+                throw new Error('unexpected bug');
+            },
+        );
+        const h = createBusTestHarness({ workflows: [buggy] });
+        await expect(
+            orderEvents.publish(h.ctx(), { orderId: 'X', total: 1 }),
+        ).rejects.toThrow(/unexpected bug/);
+        h.dispose();
+    });
+
+    it('non-subscriber workflows in the list are ignored', async () => {
+        const saga = defineWorkflow('saga', async () => { /* noop */ });
+        // Should not throw even though `saga` has no $subscription.
+        const h = createBusTestHarness({
+            workflows: [shipOnPay, saga as never],
+            services: [shipping],
+        });
+        await orderEvents.publish(h.ctx(), { orderId: 'Y', total: 1 });
+        expect(h.dispatchedFor(shipOnPay)).toHaveLength(1);
+        expect(h.dispatchedFor('saga')).toHaveLength(0);
+        h.dispose();
     });
 });
