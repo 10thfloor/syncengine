@@ -7,6 +7,21 @@
 > (`BusMode.inMemory`) and power-user control
 > (`JetStream.*` escape hatch).
 
+## Status (as of 2026-04-21)
+
+| Slice | Status | Notes |
+|---|---|---|
+| 2b-A — `.ordered` / `.orderedBy` / `.key` | ✅ shipped (`4be0ead`) | Wire-verified: Restate invocations keyed `orderEvents:O1` not `orderEvents:<seq>`. |
+| 2b-B1 — `Concurrency.*` + `Rate.*` factory surfaces | ✅ shipped (`ac5fdb2`) | `Concurrency.global(n)` wired to `max_ack_pending`. |
+| 2b-B2 — `Rate.*` token-bucket runtime | ✅ shipped (`32fd400`) | Lazy-refill bucket; NAKs with exact `delayMs`. |
+| 2b-B2.5 — `Concurrency.perKey` runtime | ⏸ deferred | Blocked on concurrent-dispatch refactor; per-key capping collapses to 1-in-flight in a serial loop. |
+| 2b-C1 — `BusMode` + `override(bus)` + capturing harness | ✅ shipped (`ad48b0c`) | `@syncengine/server/test` entrypoint. |
+| 2b-C2 — Synchronous subscriber dispatch in harness | ✅ shipped (`631f167`) | Includes DLQ fan-out, `.where` filter, `ctx.services` resolution. |
+| 2b-C3 — Config auto-pathway for bus overrides | ⏸ deferred | vitest users have the direct harness; needed only when someone runs `syncengine start` with test-mode buses. |
+| 2b-D — `JetStream.*` escape hatch | ⏸ deferred | Requires per-bus streams (currently one `WS_<wsId>` stream shared across buses). |
+| 2b-E — Devtools Buses tab | ⏸ deferred | UI work. |
+| 2b-F — `WORKSPACE_DELETED` handling | ⏸ deferred | Waits on workspace lifecycle teardown broadcast. |
+
 ## Scope (ordered by DX impact)
 
 ### 2b-A. `on()` modifiers — ordering + dedup family

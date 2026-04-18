@@ -189,19 +189,64 @@ Dispatchers start in parallel via `Promise.allSettled`. One subscriber failing t
 
 `BusManager` installs `SIGTERM` / `SIGINT` handlers that drain every dispatcher. Set `SYNCENGINE_NO_BUS_SIGNALS=1` to skip this — the scale-out serve binary already owns shutdown through its shared controller.
 
-## Phase 2 preview (what's still ahead)
+## Subscription modifiers
 
-- `.orderedBy(fn)`, `.ordered()`, `.concurrency(n)`, `.rate(Rate.perSecond(n))`, `.key(fn)` on `on()`.
-- `Layer 3` `JetStream.*` escape hatch for every NATS option.
-- `BusMode.inMemory()` + `override()` for tests without a running NATS.
-- Devtools "Buses" tab with live tail + DLQ inspector.
-- Scale-out smoke (emit from edge, handler consumes).
-- Subscriber workflow `ctx.services` injection (the hex-service wiring that workflows in non-bus code paths already have — bus-subscriber workflows currently see `ctx.services === undefined`).
-- Terminal-vs-retriable classification in the dispatcher (Restate 1.6 returns `TerminalError` as HTTP 500 with a JSON body; the DLQ path waits on the classifier).
+Every modifier composes; later calls override earlier ones of the same kind. Pure-value, manifest-serialisable — the builder returns a fresh `Subscription<T>` each call.
+
+```ts
+on(orderEvents)
+    .where(e => e.event === 'paid')
+    .orderedBy(e => e.orderId)
+    .concurrency(Concurrency.global(10))
+    .rate(Rate.perSecond(50))
+    .from(From.latest())
+```
+
+### Ordering family
+
+| Modifier | Restate invocation id | Semantics |
+|---|---|---|
+| _(default)_ | `${busName}:${seq}` | Exactly-once per JetStream seq; full parallelism. |
+| `.ordered()` | `${busName}:singleton` | Single in-flight invocation; redeliveries collapse. |
+| `.orderedBy(fn)` | `${busName}:${fn(event)}` | One in-flight per key — keys run in parallel, same-key serialises. |
+| `.key(fn)` | `fn(event)` | User owns the whole id (no `${busName}:` prefix). |
+
+All three compile to the same thing under the hood: Restate's single-writer-per-virtual-object-key gives the serialisation for free. `.ordered()` is exactly `.orderedBy(() => 'singleton')`.
+
+### Throttles
+
+| Modifier | Wire mechanism |
+|---|---|
+| `.concurrency(Concurrency.global(n))` | `max_ack_pending = n` on the durable JetStream consumer. |
+| `.concurrency(Concurrency.perKey(n))` | ⏸ deferred — blocked on concurrent-dispatch refactor. |
+| `.rate(Rate.perSecond(n))` _(also `.perMinute` / `.perHour`)_ | Lazy-refill token bucket in the dispatcher; NAKs with exact `delayMs` when empty so JetStream re-delivers at the right time. |
+
+Rate-limited subscribers don't burn tokens on `.where()`-rejected events and don't hold Restate virtual-object slots warm while throttled — the gate runs after the predicate and before the POST.
+
+## Testing without NATS
+
+`createBusTestHarness()` from `@syncengine/server/test` stands in for NATS + Restate:
+
+```ts
+import { createBusTestHarness } from '@syncengine/server/test';
+import { shipOnPay } from './workflows/ship-on-pay.workflow';
+import { shipping } from './services/shipping';
+
+const harness = createBusTestHarness({
+    workflows: [shipOnPay],
+    services: [shipping],
+});
+
+await orderEvents.publish(harness.ctx(), { orderId: 'O1', event: 'paid', total: 10, at: 0 });
+
+expect(harness.dispatchedFor(shipOnPay)).toHaveLength(1);
+```
+
+Capture-only methods (`publishedOn(bus)`, `capturePublishEffects(state)`) work without any `workflows` list — handy for asserting "did my entity publish?" in pure unit tests. TerminalError from a subscriber routes to `<bus>.dlq` just like in production; DLQ subscribers fire in the same pass.
 
 ## Links
 
 - Spec: `docs/superpowers/specs/2026-04-20-event-bus-design.md`
-- Plan: `docs/superpowers/plans/2026-04-20-event-bus.md`
+- Plans: `docs/superpowers/plans/2026-04-20-event-bus.md` (Phase 1), `...-phase-2a.md`, `...-phase-2b.md`
 - Migration: `docs/migrations/2026-04-20-trigger-to-publish.md`
-- Demo: `apps/test/src/events/orders.bus.ts` + `apps/test/src/workflows/ship-on-pay.workflow.ts`
+- Demo: `apps/test/src/events/orders.bus.ts` + workflows under `apps/test/src/workflows/`
