@@ -134,3 +134,59 @@ describe('Access.owner', () => {
         expect(policy.check({ user: { id: 'alice' }, key: 'order-1' })).toBe(false);
     });
 });
+
+describe('Access.any', () => {
+    it('passes when at least one policy passes', () => {
+        const policy = Access.any(Access.deny, Access.authenticated);
+        expect(policy.check({ user: { id: 'a' }, key: 'x' })).toBe(true);
+    });
+
+    it('rejects when every policy rejects', () => {
+        const policy = Access.any(Access.deny, Access.deny);
+        expect(policy.check({ user: { id: 'a' }, key: 'x' })).toBe(false);
+    });
+
+    it('short-circuits on first pass', () => {
+        let evaluated = 0;
+        const countingPolicy: AccessPolicy = {
+            $kind: 'access',
+            check: () => { evaluated++; return true; },
+        };
+        const policy = Access.any(countingPolicy, countingPolicy);
+        policy.check({ user: null, key: 'x' });
+        expect(evaluated).toBe(1);
+    });
+
+    it('empty list rejects (vacuous any)', () => {
+        const policy = Access.any();
+        expect(policy.check({ user: { id: 'a' }, key: 'x' })).toBe(false);
+    });
+});
+
+describe('Access.all', () => {
+    it('passes when every policy passes', () => {
+        const policy = Access.all(Access.public, Access.authenticated);
+        expect(policy.check({ user: { id: 'a' }, key: 'x' })).toBe(true);
+    });
+
+    it('rejects when any policy rejects', () => {
+        const policy = Access.all(Access.authenticated, Access.deny);
+        expect(policy.check({ user: { id: 'a' }, key: 'x' })).toBe(false);
+    });
+
+    it('short-circuits on first reject', () => {
+        let evaluated = 0;
+        const countingPolicy: AccessPolicy = {
+            $kind: 'access',
+            check: () => { evaluated++; return false; },
+        };
+        const policy = Access.all(countingPolicy, countingPolicy);
+        policy.check({ user: null, key: 'x' });
+        expect(evaluated).toBe(1);
+    });
+
+    it('empty list passes (vacuous all)', () => {
+        const policy = Access.all();
+        expect(policy.check({ user: null, key: 'x' })).toBe(true);
+    });
+});

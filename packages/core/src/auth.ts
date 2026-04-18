@@ -137,10 +137,36 @@ function owner(field: string = 'userId'): AccessPolicy {
     };
 }
 
+function any(...policies: AccessPolicy[]): AccessPolicy {
+    return {
+        $kind: 'access',
+        check: (ctx) => {
+            for (const p of policies) {
+                if (p.check(ctx)) return true;
+            }
+            return false;
+        },
+    };
+}
+
+function all(...policies: AccessPolicy[]): AccessPolicy {
+    return {
+        $kind: 'access',
+        check: (ctx) => {
+            for (const p of policies) {
+                if (!p.check(ctx)) return false;
+            }
+            return true;
+        },
+    };
+}
+
 export const Access = {
     public: publicPolicy,
     authenticated: authenticatedPolicy,
     deny: denyPolicy,
     role,
     owner,
+    any,
+    all,
 };
