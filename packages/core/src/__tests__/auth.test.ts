@@ -57,3 +57,33 @@ describe('Access.deny', () => {
         expect(Access.deny.check({ user: { id: 'a' }, key: 'x' })).toBe(false);
     });
 });
+
+describe('Access.role', () => {
+    it('bare-string form: passes when user has any of the listed roles', () => {
+        const policy = Access.role('admin', 'member');
+        expect(policy.check({ user: { id: 'a', roles: ['member'] }, key: 'x' })).toBe(true);
+        expect(policy.check({ user: { id: 'a', roles: ['admin'] }, key: 'x' })).toBe(true);
+    });
+
+    it('bare-string form: rejects when user lacks every listed role', () => {
+        const policy = Access.role('admin');
+        expect(policy.check({ user: { id: 'a', roles: ['viewer'] }, key: 'x' })).toBe(false);
+    });
+
+    it('rejects unauthenticated users', () => {
+        const policy = Access.role('admin');
+        expect(policy.check({ user: null, key: 'x' })).toBe(false);
+    });
+
+    it('rejects users with no roles set', () => {
+        const policy = Access.role('admin');
+        expect(policy.check({ user: { id: 'a' }, key: 'x' })).toBe(false);
+    });
+
+    it('value-def form: accepts a def with $enum plus role strings from the enum', () => {
+        const RoleDef = { $enum: ['owner', 'admin', 'member', 'viewer'] as const };
+        const policy = Access.role(RoleDef, 'admin');
+        expect(policy.check({ user: { id: 'a', roles: ['admin'] }, key: 'x' })).toBe(true);
+        expect(policy.check({ user: { id: 'a', roles: ['viewer'] }, key: 'x' })).toBe(false);
+    });
+});

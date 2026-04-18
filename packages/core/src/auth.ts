@@ -77,8 +77,58 @@ const denyPolicy: AccessPolicy = {
     check: () => false,
 };
 
+/**
+ * Minimal shape a value-object-like def exposes to give `Access.role` a
+ * typed role list. Any object with `$enum: readonly string[]` works —
+ * a real `defineValue(..., text({ enum: [...] }))` result satisfies
+ * this once it's updated to surface `$enum` (deferred to the value-
+ * object integration plan).
+ */
+export interface RoleEnumCarrier<E extends readonly string[]> {
+    readonly $enum: E;
+}
+
+function roleBare(...allowed: [string, ...string[]]): AccessPolicy {
+    return {
+        $kind: 'access',
+        check: (ctx) => {
+            if (!ctx.user?.roles) return false;
+            return allowed.some((r) => ctx.user!.roles!.includes(r));
+        },
+    };
+}
+
+function roleTyped<E extends readonly string[]>(
+    _def: RoleEnumCarrier<E>,
+    ...allowed: E[number][]
+): AccessPolicy {
+    return {
+        $kind: 'access',
+        check: (ctx) => {
+            if (!ctx.user?.roles) return false;
+            return allowed.some((r) => ctx.user!.roles!.includes(r));
+        },
+    };
+}
+
+function role<E extends readonly string[]>(
+    def: RoleEnumCarrier<E>,
+    ...allowed: E[number][]
+): AccessPolicy;
+function role(...allowed: [string, ...string[]]): AccessPolicy;
+function role(
+    defOrFirst: RoleEnumCarrier<readonly string[]> | string,
+    ...rest: string[]
+): AccessPolicy {
+    if (typeof defOrFirst === 'string') {
+        return roleBare(defOrFirst, ...rest);
+    }
+    return roleTyped(defOrFirst, ...rest);
+}
+
 export const Access = {
     public: publicPolicy,
     authenticated: authenticatedPolicy,
     deny: denyPolicy,
+    role,
 };
