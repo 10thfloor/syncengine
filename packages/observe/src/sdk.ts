@@ -35,7 +35,7 @@ import {
 
 import type { ObservabilityConfig } from '@syncengine/core';
 
-import { buildResource } from './resource.ts';
+import { buildResource } from './resource';
 
 export interface SdkHandle {
     readonly enabled: boolean;

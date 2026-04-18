@@ -45,10 +45,10 @@ import {
     type EmitPublish,
     type EmitTrigger,
 } from "@syncengine/core";
+import { instrument } from '@syncengine/observe';
 import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
 import { WORKFLOW_OBJECT_PREFIX } from './workflow.js';
 
-const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
 
 const STATE_KEY = "state";
 const SOURCE_KEY = "source";
@@ -163,7 +163,11 @@ async function runHandler(
 /** Publish every `publish(bus, payload)` effect to NATS JetStream. The
  *  subject shape matches the one gateway-core's BusDispatcher listens on
  *  (`ws.<wsId>.bus.<busName>`) so subscriber workflows wake up via their
- *  durable consumer. */
+ *  durable consumer.
+ *
+ *  Uses `js.publish()` (JetStream publish) instead of NATS core `nc.publish()`
+ *  so we get a `PubAck` confirming the message was durably persisted to the
+ *  stream. If the ack fails, `ctx.run` throws and Restate retries the handler. */
 async function publishBusEvents(
     ctx: restate.ObjectContext,
     workspaceId: string,
@@ -173,11 +177,9 @@ async function publishBusEvents(
         const subject = `ws.${workspaceId}.bus.${pub.bus.$name}`;
         const body = JSON.stringify(pub.payload);
         await ctx.run(`bus:${pub.bus.$name}:publish`, async () => {
-            const { connect } = await import("@nats-io/transport-node");
-            const nc = await connect({ servers: NATS_URL });
-            nc.publish(subject, body);
-            await nc.flush();
-            await nc.close();
+            const { getJetStream } = await import("./workspace/nats-client.js");
+            const js = await getJetStream();
+            await js.publish(subject, body);
         });
     }
 }
@@ -194,8 +196,8 @@ async function publishState(
 ): Promise<void> {
     const subject = `ws.${workspaceId}.entity.${entityName}.${entityKey}.state`;
     await ctx.run("publish entity state", async () => {
-        const { connect } = await import("@nats-io/transport-node");
-        const nc = await connect({ servers: NATS_URL });
+        const { getNatsConnection } = await import("./workspace/nats-client.js");
+        const nc = await getNatsConnection();
         nc.publish(subject, JSON.stringify({
             type: "ENTITY_STATE",
             entity: entityName,
@@ -203,7 +205,6 @@ async function publishState(
             state,
         }));
         await nc.flush();
-        await nc.close();
     });
 }
 
@@ -222,10 +223,10 @@ async function publishTableDeltas(
     // replay produces identical values. ctx.rand is deterministic.
     const nonces = inserts.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
     await ctx.run("publish entity table deltas", async () => {
-        const { connect } = await import("@nats-io/transport-node");
-        const nc = await connect({ servers: NATS_URL });
+        const { getJetStream } = await import("./workspace/nats-client.js");
+        const js = await getJetStream();
         for (let i = 0; i < inserts.length; i++) {
-            nc.publish(subject, JSON.stringify({
+            await js.publish(subject, JSON.stringify({
                 type: "INSERT",
                 table: inserts[i]!.table,
                 record: inserts[i]!.record,
@@ -233,8 +234,6 @@ async function publishTableDeltas(
                 _nonce: nonces[i],
             }));
         }
-        await nc.flush();
-        await nc.close();
     });
 }
 
@@ -315,7 +314,11 @@ function buildHandlerBag(entity: AnyEntity): Record<
                 : args === undefined || args === null
                     ? []
                     : [args];
-            return runHandler(ctx, entity, name, argList);
+            const { workspaceId } = splitObjectKey(ctx.key);
+            return instrument.entityEffect(
+                { workspace: workspaceId, name: entity.$name, op: name },
+                () => runHandler(ctx, entity, name, argList),
+            );
         };
     }
 

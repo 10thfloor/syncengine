@@ -14,8 +14,8 @@ export {
     ATTR_TOPIC,
     ATTR_INVOCATION,
     ATTR_DEDUP_HIT,
-} from './semantic.ts';
-export type { Primitive, SyncengineAttrKey } from './semantic.ts';
+} from './semantic';
+export type { Primitive, SyncengineAttrKey } from './semantic';
 
 export type {
     Attrs,
@@ -26,10 +26,16 @@ export type {
     MetricFactory,
     MetricOptions,
     ObservabilityCtx,
-} from './types.ts';
+    ObservabilityConfig,
+} from './types';
 
-import { noopMetric } from './noop.ts';
-import type { MetricFactory } from './types.ts';
+export { bootSdk, type SdkHandle, type BootSdkOptions } from './sdk';
+
+export { instrument } from './internal';
+export type { EntityEffectAttrs } from './internal';
+
+import { noopMetric } from './noop';
+import type { MetricFactory } from './types';
 
 /**
  * Declared metric factory. Phase A binds this to the noop factory so

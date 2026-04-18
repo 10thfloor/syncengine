@@ -13,7 +13,7 @@ import type {
     MetricFactory,
     MetricOptions,
     ObservabilityCtx,
-} from './types.ts';
+} from './types';
 
 // ── ctx ────────────────────────────────────────────────────────────────────
 

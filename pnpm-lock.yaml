@@ -372,6 +372,9 @@ importers:
       '@syncengine/http-core':
         specifier: workspace:*
         version: link:../http-core
+      '@syncengine/observe':
+        specifier: workspace:*
+        version: link:../observe
       ws:
         specifier: ^8.20.0
         version: 8.20.0

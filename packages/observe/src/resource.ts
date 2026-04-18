@@ -17,7 +17,7 @@ import {
 } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 
-import type { ObservabilityConfig } from './types.ts';
+import type { ObservabilityConfig } from './types';
 
 export function buildResource(config: ObservabilityConfig | undefined): Resource {
     let resource = defaultResource();
