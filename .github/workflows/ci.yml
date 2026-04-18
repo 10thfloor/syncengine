@@ -39,6 +39,13 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
 
+      # @syncengine/observe's tests use `bun:test` imports and Bun's
+      # built-in test runner. Pin to match dev machines.
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3
+
       # wasm-pack is needed by the postinstall hook that builds the
       # DBSP engine. Pinned version to match what contributors install.
       - name: setup rust toolchain
