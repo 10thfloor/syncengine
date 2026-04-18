@@ -33,6 +33,12 @@ type system follows the shape, so most layering mistakes surface as
 TypeScript errors rather than runtime bugs. The file-suffix
 convention gives the rings a visible home in your repo.
 
+This is the classic **ports-and-adapters** pattern. Your domain
+declares ports — services are the outbound ones; webhooks and the
+client are inbound — and the runtime wires adapters behind them. In
+tests you swap in mocks; in production, real SDKs. The code on
+either side of the seam never changes.
+
 <div align="center">
 
 <img src="./docs/assets/hex-rings.svg" alt="Concentric architecture rings — schema (center) → entity → view → bus → workflow → service (edge)" width="380" height="380" />
@@ -307,13 +313,14 @@ route to `orderEvents.dlq` automatically.
 
 <sub>→ [Guide: Workflows](./docs/guides/workflows.md)</sub>
 
-### Services
+### Services — ports and adapters
 
 <sub>`src/services/*.ts` · server-only</sub>
 
 The outermost ring. Everything that talks to a vendor SDK, a payment
-gateway, an email provider — declared as a port, implemented as an
-adapter. Workflows depend on the port; the runtime injects the adapter.
+gateway, an email provider. Each service declaration is a **port** —
+an interface your domain depends on. The file body is its default
+**adapter**.
 
 ```ts
 // src/services/shipping.ts
@@ -326,8 +333,10 @@ export const shipping = service('shipping', {
 });
 ```
 
-Mock in tests via `override(shipping, { ... })`. The workflow code never
-changes.
+Swap the adapter with `override(shipping, { create: async () => ({ trackingId: 'fake' }) })`
+in tests, or in `syncengine.config.ts` to point prod at a staging
+environment. Workflows only ever see the port; they can't tell the
+difference.
 
 <sub>→ [Guide: Services](./docs/guides/services.md)</sub>
 
