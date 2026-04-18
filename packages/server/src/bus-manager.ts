@@ -44,6 +44,7 @@ import {
     type RetryConfig,
 } from '@syncengine/core';
 import { isBusSubscriberWorkflow, type WorkflowDef } from './workflow.js';
+import { deriveInvocationId } from './bus-on.js';
 
 /** Handle produced by the dispatcher factory. Matches the contract
  *  `@syncengine/gateway-core`'s `BusDispatcher` implements. */
@@ -214,6 +215,7 @@ export class BusManager {
         key: string,
     ): Promise<void> {
         const busName = sub.$subscription.bus.$name;
+        const keying = sub.$subscription.keying;
         const cfg: BusDispatcherConfig = {
             natsUrl: this.config.natsUrl,
             restateUrl: this.config.restateUrl,
@@ -226,6 +228,11 @@ export class BusManager {
                 : {}),
             cursor: sub.$subscription.cursor ?? { kind: 'latest' },
             retry: sub.$retry ?? this.config.defaultRetry ?? DEFAULT_RETRY,
+            // `keying` is a pure (seq, event) → string function —
+            // `deriveInvocationId` resolves the kind variant once and
+            // the dispatcher just calls it on every message.
+            invocationIdOf: (seq: bigint, event: unknown) =>
+                deriveInvocationId(busName, seq, event, keying as never),
         };
         const handle = this.config.dispatcherFactory(cfg);
         this.handles.set(key, handle);

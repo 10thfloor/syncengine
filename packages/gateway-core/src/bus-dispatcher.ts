@@ -58,6 +58,15 @@ export interface BusDispatcherConfig {
     /** Name of the DLQ bus to publish to when Restate returns a
      *  terminal error. Typically `${busName}.dlq`. */
     readonly dlqBusName: string;
+    /** How to derive Restate's invocation id from the incoming event.
+     *  The framework resolves the `Subscription<T>.keying` variant to
+     *  a concrete function in `BusManager` before constructing the
+     *  dispatcher — the dispatcher just calls it per message.
+     *
+     *  Default (when omitted): `${busName}:${seq}` — exactly-once
+     *  processing per JetStream seq, no ordering. Matches Phase 2a
+     *  behaviour. */
+    readonly invocationIdOf?: (seq: bigint, event: unknown) => string;
 }
 
 type RestateOutcome =
@@ -220,7 +229,9 @@ export class BusDispatcher {
             return;
         }
 
-        const invocationId = `${busName}:${m.seq}`;
+        const invocationId = this.config.invocationIdOf
+            ? this.config.invocationIdOf(BigInt(m.seq), event)
+            : `${busName}:${m.seq}`;
         let outcome: RestateOutcome;
         try {
             outcome = await postToRestate(
