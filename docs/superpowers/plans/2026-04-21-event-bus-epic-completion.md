@@ -105,7 +105,7 @@ Complete surface covers:
 | Slice | Status | Why |
 |---|---|---|
 | `Concurrency.perKey(n)` | Deferred | The dispatch loop is serial, so per-key capping collapses to 1-in-flight. Needs a concurrent-dispatch refactor (not just a counter). Throws at boot with an actionable message. |
-| Config auto-pathway for `override(bus)` | Deferred | vitest users have `createBusTestHarness()` directly; the "run `syncengine start` with test-mode buses" case hasn't been asked for. Open to reviving if the need materialises. |
+| Config auto-pathway for `override(bus)` | ✅ shipped after the 2026-04-21 epic closeout (`c456743`, `ad1448d`) | `loadConfigOverrides` splits `services.overrides` results by `$tag`; `busOverridesToModeOf` feeds `bootBusRuntime.modeOf`. In-memory subscribers bypass JetStream entirely. `InMemoryBusDriver` extracted for harness + production to share one dispatch implementation. |
 | Layer 3 `JetStream.*` escape hatch | Deferred | Requires per-bus streams — today every bus shares the single `WS_<wsId>` stream. Architectural shift; revisit if a user hits a hard Layer 2 limit. |
 | Devtools Buses tab | Deferred | UI work; the `jsz` admin endpoint + Restate's own dashboards already give enough visibility for Phase 2. |
 | `WORKSPACE_DELETED` handling | Deferred | Waits on a broader workspace-lifecycle feature — `workspace.teardown` doesn't broadcast yet. |
