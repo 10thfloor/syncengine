@@ -83,10 +83,47 @@ export interface ServicesConfig {
     readonly overrides?: () => Promise<Record<string, unknown>>;
 }
 
+/**
+ * Observability configuration. Read at boot by `@syncengine/serve` and
+ * `@syncengine/vite-plugin`, passed to `bootSdk` in `@syncengine/observe`.
+ *
+ * All fields optional. With no config at all, and no OTEL_* env vars set,
+ * the framework still boots the SDK and uses OTLP/HTTP defaults
+ * (localhost:4318) — users point it at a real APM by setting
+ * `OTEL_EXPORTER_OTLP_ENDPOINT` or overriding `exporter` here.
+ *
+ * The type lives in core (not observe) so adding `observability` to
+ * `config()` doesn't require a runtime dependency on OTel for projects
+ * that never touch the observe package directly.
+ */
+export interface ObservabilityConfig {
+    /** Overrides `OTEL_SERVICE_NAME`. Falls back to the service-name
+     *  detector or `'syncengine-app'`. */
+    readonly serviceName?: string;
+    /** Source of truth for enable / disable.
+     *  - `'otlp'` (default) boots the SDK with OTLP/HTTP exporters.
+     *  - `false` disables entirely — seam helpers stay noops. */
+    readonly exporter?: 'otlp' | false;
+    /** Extra resource attributes merged on top of auto-detected ones. */
+    readonly resource?: Readonly<Record<string, string | number | boolean>>;
+    /** Parent-based sampler ratio. Defaults: 1.0 in non-production,
+     *  0.1 in production. */
+    readonly sampling?: { readonly ratio: number };
+    /** Opt in to exporting entity field values on spans. Off by default —
+     *  privacy-by-default; entity column *names* are always exported,
+     *  values require opt-in. */
+    readonly captureFieldValues?: boolean;
+    /** Opt-in auto-instrumentation list. Currently supported: `'fetch'`
+     *  (phase D4) — patches global fetch for outbound traceparent
+     *  propagation. Default: `[]`. */
+    readonly autoInstrument?: readonly 'fetch'[];
+}
+
 export interface SyncengineConfig {
     readonly workspaces: WorkspacesConfig;
     readonly auth?: AuthConfig;
     readonly services?: ServicesConfig;
+    readonly observability?: ObservabilityConfig;
 }
 
 /**

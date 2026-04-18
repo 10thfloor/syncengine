@@ -139,6 +139,7 @@ export type {
     AuthConfig,
     AuthVerifyContext,
     ServicesConfig,
+    ObservabilityConfig,
 } from './config';
 export type {
     EmitInsert,

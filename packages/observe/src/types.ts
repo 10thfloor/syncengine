@@ -50,25 +50,7 @@ export interface MetricFactory {
     gauge(name: string, opts?: MetricOptions): GaugeHandle;
 }
 
-/**
- * User-facing configuration block. Passed as `config({ observability: ... })`
- * in `syncengine.config.ts`; consumed by `bootSdk` in `serve` and
- * `vite-plugin`. Kept in this package so `@syncengine/core` can re-export
- * the type without pulling in OTel at type-check time (A3).
- */
-export interface ObservabilityConfig {
-    /** Overrides `OTEL_SERVICE_NAME`. Falls back to `'syncengine-app'`. */
-    readonly serviceName?: string;
-    /** Source of truth for turning telemetry on / off.
-     *  - `'otlp'` (default) boots the Node SDK with OTLP/HTTP exporters.
-     *  - `false` disables entirely — no SDK is started, seam helpers stay noops. */
-    readonly exporter?: 'otlp' | false;
-    /** Extra resource attributes merged on top of auto-detected ones. */
-    readonly resource?: Readonly<Record<string, string | number | boolean>>;
-    /** Parent-based sampler ratio. Defaults: 1.0 in non-production, 0.1 in production. */
-    readonly sampling?: { readonly ratio: number };
-    /** Opt in to exporting entity field values on spans. Off by default. */
-    readonly captureFieldValues?: boolean;
-    /** Opt-in auto-instrumentation. Currently supported: 'fetch' (phase D4). */
-    readonly autoInstrument?: readonly 'fetch'[];
-}
+// ObservabilityConfig lives in @syncengine/core (it's user-facing config);
+// imported here as a type so bootSdk and friends can consume it without a
+// circular runtime dependency. See `packages/core/src/config.ts`.
+export type { ObservabilityConfig } from '@syncengine/core';
