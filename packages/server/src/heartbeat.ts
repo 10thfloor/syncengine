@@ -10,7 +10,7 @@
 
 import * as restate from '@restatedev/restate-sdk';
 import { errors, SchemaCode } from '@syncengine/core';
-import type { AnyService } from '@syncengine/core';
+import type { AnyService, ServicesOf } from '@syncengine/core';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -20,27 +20,32 @@ export type HeartbeatTrigger = 'boot' | 'manual';
 /**
  * Deterministic timestamp helpers + the enclosing run metadata. Inherits
  * all Restate WorkflowContext primitives (ctx.sleep, ctx.run, ctx.date.now,
- * entityRef, etc.).
+ * entityRef, etc.). `TServices` mirrors the tuple passed to
+ * `heartbeat('...', { services: [...] })` so `ctx.services.foo` is typed
+ * without casts — see `ServicesOf` in @syncengine/core.
  */
-export interface HeartbeatContext extends restate.WorkflowContext {
-    readonly name: string;
-    readonly scope: HeartbeatScope;
-    readonly scopeKey: string;
-    readonly runNumber: number;
-    readonly trigger: HeartbeatTrigger;
-}
+export type HeartbeatContext<TServices extends readonly AnyService[] = readonly []> =
+    restate.WorkflowContext & {
+        readonly name: string;
+        readonly scope: HeartbeatScope;
+        readonly scopeKey: string;
+        readonly runNumber: number;
+        readonly trigger: HeartbeatTrigger;
+        readonly services: ServicesOf<TServices>;
+    };
 
-export type HeartbeatHandler = (ctx: HeartbeatContext) => Promise<void>;
+export type HeartbeatHandler<TServices extends readonly AnyService[] = readonly []> =
+    (ctx: HeartbeatContext<TServices>) => Promise<void>;
 
-export interface HeartbeatConfig {
+export interface HeartbeatConfig<TServices extends readonly AnyService[] = readonly AnyService[]> {
     trigger?: HeartbeatTrigger;
     scope?: HeartbeatScope;
     every: number | string;
     maxRuns?: number;
     runAtStart?: boolean;
     /** Services required by this heartbeat handler. */
-    services?: readonly AnyService[];
-    run: HeartbeatHandler;
+    services?: TServices;
+    run: HeartbeatHandler<TServices>;
 }
 
 /**
@@ -94,9 +99,12 @@ export function isHeartbeat(value: unknown): value is HeartbeatDef {
     );
 }
 
-export function heartbeat<const TName extends string>(
+export function heartbeat<
+    const TName extends string,
+    const TServices extends readonly AnyService[] = readonly [],
+>(
     name: TName,
-    config: HeartbeatConfig,
+    config: HeartbeatConfig<TServices>,
 ): HeartbeatDef<TName> {
     validateName(name);
     const every = parseInterval(config.every, name);
@@ -121,7 +129,9 @@ export function heartbeat<const TName extends string>(
         $maxRuns: maxRuns,
         $runAtStart: config.runAtStart ?? false,
         $services: config.services ?? [],
-        $handler: config.run,
+        // $handler is stored as the services-agnostic form; heartbeat-workflow.ts
+        // casts ctx to the typed bag just before invocation.
+        $handler: config.run as HeartbeatHandler,
     };
 }
 

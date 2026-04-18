@@ -341,6 +341,7 @@ export {
     runInBusContext,
     installBusPublisher,
     uninstallBusPublisher,
+    getInstalledBusNc,
     busContextStorage,
 } from './bus-context.js';
 export type { BusContext } from './bus-context.js';

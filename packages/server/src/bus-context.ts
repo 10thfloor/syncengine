@@ -48,15 +48,31 @@ export function runInBusContext<R>(
     return busContextStorage.run(ctx, fn);
 }
 
+/** Module-level NATS handle established at boot by the generated
+ *  server entry (`installBusPublisher(nc)`). Workflow / heartbeat /
+ *  webhook wrappers read it to build the ALS frame before invoking
+ *  the user handler — so `bus.publish(ctx, ...)` inside user code
+ *  always sees a populated `BusContext` without the caller having
+ *  to thread the nc themselves. */
+let installedNc: NatsConnection | null = null;
+
+export function getInstalledBusNc(): NatsConnection | null {
+    return installedNc;
+}
+
 /**
  * Wire `@syncengine/core`'s bus publisher to NATS. Call once at
  * server boot. Subsequent calls replace the previous publisher.
  *
- * Pass `null` to detach — useful between tests to restore the
- * "no publisher" state so `bus.publish()` fails loudly if the ALS
- * frame is missing.
+ * The NATS connection argument is optional — leaving it undefined
+ * keeps the "ALS-only" behaviour (tests that manually wrap calls in
+ * `runInBusContext({ workspaceId, nc }, ...)` don't need a module
+ * handle). Production callers pass their shared `NatsConnection`
+ * so subscriber workflows / heartbeats / webhooks can do imperative
+ * `bus.publish(ctx, payload)` without per-handler boilerplate.
  */
-export function installBusPublisher(): void {
+export function installBusPublisher(nc?: NatsConnection): void {
+    if (nc) installedNc = nc;
     setBusPublisher(async (_ctx: BusPublishCtx, busName: string, payload: unknown) => {
         const bc = busContextStorage.getStore();
         if (!bc) {
@@ -77,6 +93,7 @@ export function installBusPublisher(): void {
 }
 
 export function uninstallBusPublisher(): void {
+    installedNc = null;
     setBusPublisher(null);
 }
 

@@ -1,10 +1,22 @@
 import * as restate from '@restatedev/restate-sdk';
 import { errors, SchemaCode } from '@syncengine/core';
-import type { AnyService, RetryConfig } from '@syncengine/core';
+import type { AnyService, RetryConfig, ServicesOf } from '@syncengine/core';
 import type { Subscription } from './bus-on.js';
+import { getInstalledBusNc, runInBusContext } from './bus-context.js';
 
-export interface WorkflowOptions<TInput = unknown> {
-    readonly services?: readonly AnyService[];
+/** Restate's WorkflowContext augmented with the framework-injected
+ *  `services` bag. `TServices` is the tuple the user passed to
+ *  `defineWorkflow({ services: [...] }, ...)`; `ServicesOf` maps it to
+ *  `{ [$name]: ServicePort<T> }`. The empty-tuple default is what
+ *  non-hex workflows see (just the Restate primitives). */
+export type WorkflowCtx<TServices extends readonly AnyService[] = readonly []> =
+    restate.WorkflowContext & { readonly services: ServicesOf<TServices> };
+
+export interface WorkflowOptions<
+    TInput = unknown,
+    TServices extends readonly AnyService[] = readonly AnyService[],
+> {
+    readonly services?: TServices;
     /** When set, this workflow is a bus subscriber. The server
      *  bootstrap spawns a `BusDispatcher` per subscriber at load
      *  time; messages flow → filter → Restate invocation with
@@ -48,19 +60,23 @@ export function isWorkflow(value: unknown): value is WorkflowDef {
 
 export const WORKFLOW_OBJECT_PREFIX = 'workflow_';
 
-export function defineWorkflow<const TName extends string, TInput>(
+export function defineWorkflow<
+    const TName extends string,
+    TInput,
+    const TServices extends readonly AnyService[] = readonly [],
+>(
     name: TName,
-    options: WorkflowOptions<TInput>,
-    handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
+    options: WorkflowOptions<TInput, TServices>,
+    handler: (ctx: WorkflowCtx<TServices>, input: TInput) => Promise<void>,
 ): WorkflowDef<TName, TInput>;
 export function defineWorkflow<const TName extends string, TInput>(
     name: TName,
-    handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
+    handler: (ctx: WorkflowCtx, input: TInput) => Promise<void>,
 ): WorkflowDef<TName, TInput>;
 export function defineWorkflow<const TName extends string, TInput>(
     name: TName,
-    optionsOrHandler: WorkflowOptions<TInput> | ((ctx: restate.WorkflowContext, input: TInput) => Promise<void>),
-    maybeHandler?: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
+    optionsOrHandler: WorkflowOptions<TInput> | ((ctx: WorkflowCtx, input: TInput) => Promise<void>),
+    maybeHandler?: (ctx: WorkflowCtx, input: TInput) => Promise<void>,
 ): WorkflowDef<TName, TInput> {
     if (!name || typeof name !== 'string') {
         throw errors.schema(SchemaCode.INVALID_WORKFLOW_NAME, {
@@ -76,7 +92,7 @@ export function defineWorkflow<const TName extends string, TInput>(
         });
     }
 
-    let handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>;
+    let handler: (ctx: WorkflowCtx, input: TInput) => Promise<void>;
     let services: readonly AnyService[] = [];
     let subscription: Subscription<TInput> | undefined;
     let retry: RetryConfig | undefined;
@@ -90,10 +106,15 @@ export function defineWorkflow<const TName extends string, TInput>(
         handler = maybeHandler!;
     }
 
+    // $handler's storage type is Restate's bare WorkflowContext — that's
+    // what Restate invokes us with. The services bag is attached by
+    // wrapWorkflowHandler just before the user handler runs, so the cast
+    // here crosses exactly one boundary and narrows again inside the
+    // wrapper.
     return {
         $tag: 'workflow',
         $name: name,
-        $handler: handler,
+        $handler: handler as (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
         $services: services,
         ...(subscription ? { $subscription: subscription } : {}),
         ...(retry ? { $retry: retry } : {}),
@@ -102,16 +123,39 @@ export function defineWorkflow<const TName extends string, TInput>(
 
 export type ResolvedServices = Record<string, Record<string, (...args: unknown[]) => Promise<unknown>>>;
 
-/** Wrap a user workflow handler with `ctx.services` injection. Exported
- *  so unit tests can exercise the injection without the Restate SDK's
- *  opaque workflow() wrapper. */
+/** Wrap a user workflow handler with two framework concerns:
+ *    1. `ctx.services` injection — the resolved hex-adapter port bag
+ *       matching the workflow's declared `services: [...]`.
+ *    2. `BusContext` ALS frame — so imperative `bus.publish(ctx, ...)`
+ *       inside the handler has a workspace id + NATS handle to publish
+ *       through without the user threading either explicitly.
+ *
+ *  The ALS frame is only established when a module-level NATS handle
+ *  was registered via `installBusPublisher(nc)`; unit tests that
+ *  don't install a publisher simply run the handler directly (same as
+ *  pre-2a behaviour), and tests that exercise publishing wrap
+ *  manually in `runInBusContext`.
+ *
+ *  Exported so unit tests can exercise the injection path without the
+ *  Restate SDK's opaque `workflow()` wrapper. */
 export function wrapWorkflowHandler<TInput>(
     userHandler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
     services: ResolvedServices,
 ): (ctx: restate.WorkflowContext, input: TInput) => Promise<void> {
     return async (ctx, input) => {
         (ctx as unknown as { services: ResolvedServices }).services = services;
-        await userHandler(ctx, input);
+        const nc = getInstalledBusNc();
+        if (!nc) {
+            await userHandler(ctx, input);
+            return;
+        }
+        // Subscriber workflows are keyed `${workspaceId}/${invocationId}`
+        // (see BusDispatcher.postToRestate), so the workspace id is the
+        // slice before the first '/'. Non-subscriber workflows still
+        // receive a workspace-scoped key through `workflow.start`.
+        const key = (ctx as unknown as { key?: string }).key ?? '';
+        const workspaceId = key.split('/')[0] || 'default';
+        await runInBusContext({ workspaceId, nc }, () => userHandler(ctx, input));
     };
 }
 

@@ -12,7 +12,7 @@
 
 import * as restate from '@restatedev/restate-sdk';
 import { errors, SchemaCode } from '@syncengine/core';
-import type { AnyService } from '@syncengine/core';
+import type { AnyService, ServicesOf } from '@syncengine/core';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -36,20 +36,25 @@ export type CustomVerifyFn = (req: Request, rawBody: string) => Promise<VerifyRe
 
 export type VerifyConfig = HmacVerifyConfig | CustomVerifyFn;
 
-export interface WebhookContext extends restate.WorkflowContext {
-    readonly name: string;
-    readonly idempotencyKey: string;
-    readonly workspace: string;
-    /** Request headers at the time of receipt (lower-cased names). */
-    readonly headers: ReadonlyMap<string, string>;
-}
+export type WebhookContext<TServices extends readonly AnyService[] = readonly []> =
+    restate.WorkflowContext & {
+        readonly name: string;
+        readonly idempotencyKey: string;
+        readonly workspace: string;
+        /** Request headers at the time of receipt (lower-cased names). */
+        readonly headers: ReadonlyMap<string, string>;
+        readonly services: ServicesOf<TServices>;
+    };
 
-export type WebhookHandler<TPayload = unknown> = (
-    ctx: WebhookContext,
-    payload: TPayload,
-) => Promise<void>;
+export type WebhookHandler<
+    TPayload = unknown,
+    TServices extends readonly AnyService[] = readonly [],
+> = (ctx: WebhookContext<TServices>, payload: TPayload) => Promise<void>;
 
-export interface WebhookConfig<TPayload = unknown> {
+export interface WebhookConfig<
+    TPayload = unknown,
+    TServices extends readonly AnyService[] = readonly AnyService[],
+> {
     /** URL path appended to `/webhooks`. */
     path: string;
     verify: VerifyConfig;
@@ -63,8 +68,8 @@ export interface WebhookConfig<TPayload = unknown> {
      *  completion. Default 409. Some strict senders only accept 2xx. */
     onDuplicate?: '200' | '409';
     /** Services required by this webhook handler. */
-    readonly services?: readonly AnyService[];
-    run: WebhookHandler<TPayload>;
+    readonly services?: TServices;
+    run: WebhookHandler<TPayload, TServices>;
 }
 
 export interface WebhookDef<TName extends string = string> {
@@ -91,9 +96,13 @@ export function isWebhook(value: unknown): value is WebhookDef {
     );
 }
 
-export function webhook<const TName extends string, TPayload = unknown>(
+export function webhook<
+    const TName extends string,
+    TPayload = unknown,
+    const TServices extends readonly AnyService[] = readonly [],
+>(
     name: TName,
-    config: WebhookConfig<TPayload>,
+    config: WebhookConfig<TPayload, TServices>,
 ): WebhookDef<TName> {
     validateName(name);
     validatePath(config.path, name);

@@ -45,6 +45,23 @@ export type ServiceName<S> = S extends ServiceDef<infer N, any> ? N : never;
 /** Wildcard type for any service definition. */
 export type AnyService = ServiceDef<string, Record<string, (...args: any[]) => Promise<any>>>;
 
+/**
+ * Map a tuple of service definitions to the `ctx.services` shape the
+ * framework injects at runtime. Keys come from each `$name`, values are
+ * the corresponding `ServicePort<T>` — so a workflow declared with
+ * `services: [shipping, notifications]` sees
+ *   `ctx.services.shipping.create(...)` / `ctx.services.notifications.sendSlack(...)`
+ * with full parameter and return typing, no casting.
+ *
+ * The tuple must be marked `const` at the call site (the framework's
+ * `defineWorkflow` / `heartbeat` / `webhook` signatures use
+ * `const TServices extends readonly AnyService[]`) so TypeScript keeps
+ * each element's literal `$name` instead of widening to `string`.
+ */
+export type ServicesOf<T extends readonly AnyService[]> = {
+    readonly [S in T[number] as S['$name']]: ServicePort<S>;
+};
+
 // ── service() ──────────────────────────────────────────────────────────────
 
 /**

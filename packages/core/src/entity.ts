@@ -647,7 +647,7 @@ export function publish<T>(
  */
 /** New form: `emit({ state, effects })` — carries both inserts and triggers. */
 export function emit<S extends Record<string, unknown>>(
-  opts: { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> },
+  opts: { state: S; effects: ReadonlyArray<{ readonly $effect: string }> },
 ): S;
 /** Legacy form: `emit(state, ...inserts)` — typed table references. */
 export function emit<S extends Record<string, unknown>, T extends AnyTable>(
@@ -660,7 +660,7 @@ export function emit<S extends Record<string, unknown>>(
   ...inserts: LegacyEmitInsert[]
 ): S;
 export function emit<S extends Record<string, unknown>>(
-  stateOrOpts: S | { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> },
+  stateOrOpts: S | { state: S; effects: ReadonlyArray<{ readonly $effect: string }> },
   ...inserts: (TypedEmitInsert<AnyTable> | LegacyEmitInsert)[]
 ): S {
   // Detect new { state, effects } form
@@ -671,7 +671,7 @@ export function emit<S extends Record<string, unknown>>(
     'effects' in stateOrOpts &&
     Array.isArray((stateOrOpts as { effects: unknown }).effects)
   ) {
-    const { state, effects } = stateOrOpts as { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> };
+    const { state, effects } = stateOrOpts as { state: S; effects: ReadonlyArray<{ readonly $effect: string }> };
     const wrapped = { ...state };
 
     // Separate effects into inserts, triggers, and publishes
