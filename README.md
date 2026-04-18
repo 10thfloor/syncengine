@@ -33,27 +33,9 @@ type system follows the shape, so most layering mistakes surface as
 TypeScript errors rather than runtime bugs. The file-suffix
 convention gives the rings a visible home in your repo.
 
-It's a nudge, not a cage. The goal is to keep each handler small
-enough to reason about — not to win an argument about architecture.
-
 <div align="center">
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 420" width="380" height="380" role="img" aria-label="Concentric architecture rings from schema at the center to service at the edge">
-  <circle cx="210" cy="210" r="200" fill="#ef4444" />
-  <circle cx="210" cy="210" r="168" fill="#f97316" />
-  <circle cx="210" cy="210" r="136" fill="#eab308" />
-  <circle cx="210" cy="210" r="104" fill="#22c55e" />
-  <circle cx="210" cy="210" r="72"  fill="#6366f1" />
-  <circle cx="210" cy="210" r="40"  fill="#f472b6" />
-  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="600" fill="#ffffff" text-anchor="middle">
-    <text x="210" y="26">service</text>
-    <text x="210" y="58">workflow</text>
-    <text x="210" y="90">bus</text>
-    <text x="210" y="122">view</text>
-    <text x="210" y="154">entity</text>
-    <text x="210" y="215">schema</text>
-  </g>
-</svg>
+<img src="./docs/assets/hex-rings.svg" alt="Concentric architecture rings — schema (center) → entity → view → bus → workflow → service (edge)" width="380" height="380" />
 
 </div>
 
