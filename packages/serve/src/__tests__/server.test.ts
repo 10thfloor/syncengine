@@ -101,4 +101,41 @@ describe('createServer', () => {
         );
         expect(res.status).toBe(405);
     });
+
+    // ── x-request-id (design §6) ─────────────────────────────────────────
+
+    it('echoes x-request-id on /_health when supplied', async () => {
+        const server = await build();
+        const res = await server.fetch(
+            new Request('http://localhost/_health', {
+                headers: { 'x-request-id': 'probe-123' },
+            }),
+        );
+        expect(res.headers.get('x-request-id')).toBe('probe-123');
+    });
+
+    it('generates x-request-id on /_health when not supplied', async () => {
+        const server = await build();
+        const res = await server.fetch(new Request('http://localhost/_health'));
+        expect(res.headers.get('x-request-id')).toBeTruthy();
+        expect(res.headers.get('x-request-id')!.length).toBeGreaterThan(8);
+    });
+
+    it('echoes x-request-id on /_ready when supplied', async () => {
+        const server = await build();
+        const res = await server.fetch(
+            new Request('http://localhost/_ready', {
+                headers: { 'x-request-id': 'probe-ready-456' },
+            }),
+        );
+        expect(res.headers.get('x-request-id')).toBe('probe-ready-456');
+    });
+
+    it('attaches x-request-id on static-file responses', async () => {
+        const server = await build();
+        const res = await server.fetch(
+            new Request('http://localhost/app-abcdef12.js'),
+        );
+        expect(res.headers.get('x-request-id')).toBeTruthy();
+    });
 });

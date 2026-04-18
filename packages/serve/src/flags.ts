@@ -11,6 +11,9 @@ export interface Flags {
     readonly shutdownDrainMs: number;
     readonly assetsPrefix: string;
     readonly maxBodyBytes: number;
+    /** Tri-state: true forces dev-style error bodies, false forces
+     *  production "see logs" bodies, null means "inherit from NODE_ENV". */
+    readonly devErrors: boolean | null;
 }
 
 export const DEFAULT_FLAGS: Flags = Object.freeze({
@@ -23,6 +26,7 @@ export const DEFAULT_FLAGS: Flags = Object.freeze({
     shutdownDrainMs: 15000,
     assetsPrefix: '/assets/',
     maxBodyBytes: 1_048_576,
+    devErrors: null,
 });
 
 const LOG_LEVELS: readonly LogLevel[] = ['error', 'warn', 'info', 'debug'];
@@ -45,6 +49,7 @@ export function parseFlags(argv: readonly string[]): Flags {
     let shutdownDrainMs = DEFAULT_FLAGS.shutdownDrainMs;
     let assetsPrefix = DEFAULT_FLAGS.assetsPrefix;
     let maxBodyBytes = DEFAULT_FLAGS.maxBodyBytes;
+    let devErrors: boolean | null = DEFAULT_FLAGS.devErrors;
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i]!;
@@ -108,6 +113,20 @@ export function parseFlags(argv: readonly string[]): Flags {
             case '--max-body-bytes':
                 maxBodyBytes = parseNonNegativeInt(getValue(), '--max-body-bytes');
                 break;
+            case '--dev-errors':
+                // Boolean toggles; no value expected even in --flag=value
+                // form (we reject --dev-errors=foo to stay strict).
+                if (inlineValue !== undefined) {
+                    throw new Error(`${name} does not take a value`);
+                }
+                devErrors = true;
+                break;
+            case '--no-dev-errors':
+                if (inlineValue !== undefined) {
+                    throw new Error(`${name} does not take a value`);
+                }
+                devErrors = false;
+                break;
             default:
                 throw new Error(`unknown flag: ${name}`);
         }
@@ -123,6 +142,7 @@ export function parseFlags(argv: readonly string[]): Flags {
         shutdownDrainMs,
         assetsPrefix,
         maxBodyBytes,
+        devErrors,
     };
 }
 

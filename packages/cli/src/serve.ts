@@ -1,24 +1,31 @@
 /**
  * `syncengine serve` — spawn the production HTTP server binary.
  *
- * Thin wrapper around `@syncengine/serve-bin`: resolves a binary path
- * (from cache, local compile, or future release download) and spawns
- * it with the user's args. The binary itself does the real work; this
- * command is just plumbing.
+ * Thin wrapper around `@syncengine/serve-bin`: resolves a Resolution
+ * (compiled binary path or a monorepo source path) and dispatches on
+ * its kind. The previous version folded the source case into a
+ * `BUN::<path>` sentinel baked into the binary path string; this split
+ * the decoding between the resolver and the spawner. The Resolution
+ * union is the single source of truth now — resolver emits it, spawn
+ * dispatches on it.
  */
 
 import { spawn as spawnProcess } from 'node:child_process';
 import { errors, CliCode, formatError, SyncEngineError } from '@syncengine/core';
 
+export type RunResolution =
+    | { readonly kind: 'binary'; readonly path: string }
+    | { readonly kind: 'source'; readonly path: string };
+
 export interface RunServeOptions {
-    readonly resolveBinary: () => Promise<string>;
-    readonly spawn: (binary: string, args: readonly string[]) => Promise<number>;
+    readonly resolve: () => Promise<RunResolution>;
+    readonly spawn: (res: RunResolution, args: readonly string[]) => Promise<number>;
     readonly stderr?: (msg: string) => void;
 }
 
 /**
- * Test-friendly entry: pass in `resolveBinary`, `spawn`, and optionally
- * a `stderr` writer. Returns the process exit code.
+ * Test-friendly entry: pass in `resolve`, `spawn`, and optionally a
+ * `stderr` writer. Returns the process exit code.
  */
 export async function runServe(
     args: readonly string[],
@@ -26,9 +33,9 @@ export async function runServe(
 ): Promise<number> {
     const stderr = opts.stderr ?? ((msg: string) => process.stderr.write(msg));
 
-    let binary: string;
+    let resolution: RunResolution;
     try {
-        binary = await opts.resolveBinary();
+        resolution = await opts.resolve();
     } catch (err) {
         const sErr = err instanceof SyncEngineError
             ? err
@@ -40,7 +47,7 @@ export async function runServe(
         return 1;
     }
 
-    return opts.spawn(binary, args);
+    return opts.spawn(resolution, args);
 }
 
 /**
@@ -50,26 +57,20 @@ export async function runServe(
 export async function serveCommand(args: readonly string[]): Promise<void> {
     const { resolveServe } = await import('@syncengine/serve-bin');
     const code = await runServe(args, {
-        resolveBinary: async () => {
-            const resolution = await resolveServe();
-            // The runServe contract is "spawn this as a binary." For a
-            // source Resolution, we hand back a bun-wrapper path and
-            // prepend the source path in the spawn. Easiest way: format
-            // a sentinel string the spawn step recognizes.
-            return resolution.kind === 'source'
-                ? `BUN::${resolution.path}`
-                : resolution.path;
-        },
+        resolve: resolveServe,
         spawn: runBinary,
     });
     if (code !== 0) process.exit(code);
 }
 
-function runBinary(binaryOrSentinel: string, args: readonly string[]): Promise<number> {
-    // Source-run path: invoke bun directly with the TS entrypoint.
-    const [cmd, cmdArgs] = binaryOrSentinel.startsWith('BUN::')
-        ? (['bun', ['run', binaryOrSentinel.slice(5), ...args]] as const)
-        : ([binaryOrSentinel, [...args]] as const);
+function runBinary(
+    res: RunResolution,
+    args: readonly string[],
+): Promise<number> {
+    const [cmd, cmdArgs] =
+        res.kind === 'source'
+            ? (['bun', ['run', res.path, ...args]] as const)
+            : ([res.path, [...args]] as const);
 
     return new Promise((resolve, reject) => {
         const child = spawnProcess(cmd, cmdArgs as string[], { stdio: 'inherit' });

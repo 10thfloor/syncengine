@@ -81,7 +81,12 @@ async function main(argv: readonly string[]): Promise<void> {
     }
     const config = (await import(configPath)).default as SyncengineConfig;
 
-    // Build the server fetch handler.
+    // Build the server fetch handler. --dev-errors / --no-dev-errors
+    // overrides the NODE_ENV fallback — useful for staging deploys
+    // where operators want Restate stack traces without flipping env.
+    const devMode = flags.devErrors !== null
+        ? flags.devErrors
+        : process.env.NODE_ENV !== 'production';
     const handle = await createServer({
         distDir,
         config,
@@ -90,7 +95,7 @@ async function main(argv: readonly string[]): Promise<void> {
         ...(gatewayUrl ? { gatewayUrl } : {}),
         assetsPrefix: flags.assetsPrefix,
         resolveTimeoutMs: flags.resolveTimeoutMs,
-        devMode: process.env.NODE_ENV !== 'production',
+        devMode,
     });
 
     // Track inflight requests so SIGTERM can drain them.

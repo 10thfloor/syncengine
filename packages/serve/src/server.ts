@@ -66,17 +66,23 @@ export async function createServer(opts: CreateServerOptions): Promise<ServerHan
         async fetch(req: Request): Promise<Response> {
             const url = new URL(req.url);
             const path = url.pathname;
+            // One request id per request — echo the caller's if present,
+            // otherwise mint a fresh UUID. Handlers that already stamp it
+            // (html) win because we only set() on responses missing it.
+            const requestId =
+                req.headers.get('x-request-id') ?? crypto.randomUUID();
 
-            if (path === '/_health') return healthHandler(req);
-            if (path === '/_ready') return readiness.handler(req);
-
-            // Static handler returns null for paths that aren't its
-            // business (no extension, non-asset-prefix, or wrong
-            // method). Fall through to HTML in that case.
-            const staticRes = await staticHandler(req);
-            if (staticRes) return staticRes;
-
-            return htmlHandler(req);
+            let res: Response;
+            if (path === '/_health') res = await healthHandler(req);
+            else if (path === '/_ready') res = await readiness.handler(req);
+            else {
+                const staticRes = await staticHandler(req);
+                res = staticRes ?? (await htmlHandler(req));
+            }
+            if (!res.headers.has('x-request-id')) {
+                res.headers.set('x-request-id', requestId);
+            }
+            return res;
         },
         markReady: readiness.markReady,
     };

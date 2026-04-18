@@ -117,4 +117,16 @@ describe('parseFlags', () => {
     it('rejects multiple positional arguments', () => {
         expect(() => parseFlags(['./a', './b'])).toThrow(/positional/i);
     });
+
+    it('defaults --dev-errors to null (derive from NODE_ENV at runtime)', () => {
+        expect(parseFlags([]).devErrors).toBeNull();
+    });
+
+    it('parses --dev-errors as true', () => {
+        expect(parseFlags(['--dev-errors']).devErrors).toBe(true);
+    });
+
+    it('parses --no-dev-errors as false', () => {
+        expect(parseFlags(['--no-dev-errors']).devErrors).toBe(false);
+    });
 });
