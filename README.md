@@ -26,18 +26,15 @@ pnpm dev
 
 ## A hex-shaped framework
 
-The primitives are arranged as concentric rings — pure data at the
-center, stateful domain logic in between, orchestration and vendor
-SDKs at the edge. Inner rings don't know about outer ones, and the
-type system follows the shape, so most layering mistakes surface as
-TypeScript errors rather than runtime bugs. The file-suffix
-convention gives the rings a visible home in your repo.
+Six rings: pure data at the center, domain logic and orchestration
+in between, vendor SDKs at the edge. Inner rings never import outer
+ones, and TypeScript enforces it — layer-crossing mistakes fail at
+compile time, not in production.
 
-This is the classic **ports-and-adapters** pattern. Your domain
-declares ports — services are the outbound ones; webhooks and the
-client are inbound — and the runtime wires adapters behind them. In
-tests you swap in mocks; in production, real SDKs. The code on
-either side of the seam never changes.
+Underneath, this is **ports and adapters**: services are outbound
+ports, webhooks and the client are inbound, and the runtime wires
+real adapters in production and mocks in tests. The domain never
+notices.
 
 <div align="center">
 
