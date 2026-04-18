@@ -69,7 +69,7 @@ Phase A — Foundation
          ▼
 Phase B — First vertical slice (entity effect end-to-end)
   ├── B1 instrument.entityEffect + entity-runtime call site
-  ├── B2 ObservabilityCtx factory (span/metric/mark) + wire into entity ctx
+  ├── B2 ObservabilityCtx factory (span/metric/mark) — built, not yet wired
   └── B3 SDK boot wired into serve + vite-plugin
          │
          ▼  [Checkpoint 1: real APM sees entity spans]
@@ -221,31 +221,38 @@ Phase E — Verification + docs
 
 ---
 
-### Task B2: `ObservabilityCtx` factory + wire into entity ctx
+### Task B2: `ObservabilityCtx` factory (no entity-ctx wiring)
 
-**Description:** Build the ctx extension (`span`, `metric`, `mark`) and splice it into the context object the entity runtime hands to user effects. Workflow ctx is NOT touched yet — that's C4. This task adds the factory and proves it works in the entity path.
+**Description:** Build the ctx extension (`span`, `metric`, `mark`) in observe. Does NOT wire into the entity runtime — entity handlers are deliberately pure (identical client/server execution for optimistic UI) and have no ctx to extend. Entity handlers' observability story is: framework-emitted `entity.<name>.<op>` span from B1, declared metrics (D1), and optionally AsyncLocalStorage-based helpers in a future follow-up. The factory itself is needed now because Phase C wires it into workflow / webhook / heartbeat / topic handler ctxs, and having it unit-tested in isolation de-risks those call-site tasks.
 
 **Acceptance criteria:**
 - [ ] `packages/observe/src/ctx.ts` exports `makeObservabilityCtx({ workspace, user, primitive, name })` returning `{ span, metric, mark }`.
-- [ ] `span<T>(name, fn, attrs?)` creates a child span, runs fn, auto-merges workspace/user/primitive/name, records exceptions, returns fn's result.
-- [ ] `metric(name, value, attrs?)` records an ad-hoc metric reading via the global meter.
-- [ ] `mark(name, attrs?)` calls `addEvent` on the active span.
-- [ ] Entity-runtime passes ctx extension into user effects.
-- [ ] Unit tests cover: nested spans, thrown exception, no active span (metric still works, mark is a silent no-op), attr merge precedence (auto-tags can't be overwritten).
+- [ ] `span<T>(name, fn, attrs?)` creates a child span (child of current active span if one exists), runs fn, auto-merges workspace/user/primitive/name, records exceptions + sets ERROR status, returns fn's result.
+- [ ] `metric(name, value, attrs?)` records an ad-hoc metric reading via the global meter; auto-merges the ctx's workspace/user/primitive/name onto the attributes.
+- [ ] `mark(name, attrs?)` calls `addEvent` on the active span; silent no-op when there is no active span.
+- [ ] Auto-tags can't be overwritten by caller-supplied attrs (workspace/user/primitive/name are merged last over user attrs).
+- [ ] Disabled-path (no SDK booted): span/metric/mark all pass through without throwing.
+- [ ] Unit tests cover: span creation + auto-tags, nested spans, thrown exception path, attr merge precedence, `mark` silent outside a span, disabled-path pass-through.
 
 **Verification:**
 - [ ] `pnpm --filter @syncengine/observe test` passes.
-- [ ] Entity-runtime integration test shows a parent→child span when user code calls `ctx.span`.
+- [ ] Workspace typecheck clean.
 
 **Dependencies:** B1
 
 **Files likely touched:**
 - `packages/observe/src/ctx.ts`
 - `packages/observe/src/__tests__/ctx.test.ts`
-- `packages/server/src/entity-runtime.ts` (pass ctx in)
-- `packages/server/src/__tests__/entity-runtime.observe.test.ts` (extend with ctx.span assertion)
+- `packages/observe/src/index.ts` (export `makeObservabilityCtx`)
 
 **Estimated scope:** M
+
+**Out of scope for B2 (deferred):**
+- Wiring the factory into workflow ctx → Task C4.
+- Wiring into webhook `run` ctx → Task C5.
+- Wiring into heartbeat tick ctx → Task C6.
+- Wiring into topic handler ctx → Task C3.
+- ALS-based helpers for pure entity handlers → post-v1 follow-up.
 
 ---
 
@@ -278,9 +285,9 @@ Phase E — Verification + docs
 
 - [ ] `pnpm -w build` clean.
 - [ ] `pnpm -w test` clean.
-- [ ] Running `apps/test` with a local OTLP collector shows entity effect spans with workspace/user/primitive/name attributes.
-- [ ] `ctx.span` inside a user entity effect produces a nested span in the trace.
+- [ ] Running `apps/test` with a local OTLP collector shows entity effect spans with workspace/primitive/name/op attributes.
 - [ ] `exporter: false` path asserted to have zero span exports (benchmarked — see risk mitigation).
+- [ ] ObservabilityCtx factory exists and is unit-tested; wiring into non-pure handler ctxs deferred to Phase C per-seam.
 - [ ] Review with human before proceeding to Phase C.
 
 ---

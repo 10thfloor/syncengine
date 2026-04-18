@@ -18,7 +18,8 @@
   "dependencies": {
     "@syncengine/core": "workspace:*",
     "@syncengine/gateway-core": "workspace:*",
-    "@syncengine/http-core": "workspace:*"
+    "@syncengine/http-core": "workspace:*",
+    "@syncengine/observe": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",
