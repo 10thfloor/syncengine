@@ -52,8 +52,9 @@ walls enforced by the type system.
 
 <sub>`src/schema.ts` · runs on client + server</sub>
 
-Typed tables. No ORM, no migrations, no connection string. Every other
-primitive references these columns by value — rename one here, the
+Typed tables. No ORM, no connection string — you declare the shape in
+TypeScript and the framework handles the rest. Every other primitive
+references these columns by value, so renaming one here means the
 compiler catches every caller.
 
 ```ts

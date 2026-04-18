@@ -27,7 +27,7 @@ any of them directly.
 
 ## 1. Schema — the domain model
 
-Tables are typed storage. No ORM, no migrations, no connection string.
+Tables are typed storage. No ORM, no connection string.
 
 ```ts
 // src/schema.ts
