@@ -194,11 +194,9 @@ export async function loadDefinitions(appDir: string): Promise<{
         }
     }
 
-    if (entities.length === 0 && heartbeats.length === 0) {
-        console.warn(
-            `[workspace-service] appDir=${appDir} but no .actor.ts or .heartbeat.ts files found under src/`,
-        );
-    }
+    // A fresh app legitimately has no entities or heartbeats — suppress
+    // the warning. Users hit a concrete error the moment they try to use
+    // one that wasn't discovered.
 
     // Orphan-bus warning: every BusRef without at least one subscriber
     // workflow has its published events piling up in JetStream until

@@ -32,6 +32,18 @@ export function banner(msg: string): void {
     process.stdout.write(`${color('syncengine')}▸${RESET} ${msg}\n`);
 }
 
+/**
+ * Known-noisy lines that fire on every dev boot from subprocess SDKs.
+ * Filtering here rather than in every caller keeps the dev output
+ * legible without requiring each consumer to know which warnings are
+ * harmless-in-dev.
+ */
+const DEV_NOISE = [
+    // Restate Node SDK — logs on every boot when no identity key is set.
+    // Always true in local dev; user can't act on it.
+    'Accepting requests without validating request signatures',
+];
+
 /** Prefix every line of `stream` with [name] in the process's color. */
 function streamLines(name: string, stream: Readable | null): void {
     if (!stream) return;
@@ -39,6 +51,7 @@ function streamLines(name: string, stream: Readable | null): void {
     const rl = createInterface({ input: stream, crlfDelay: Infinity });
     rl.on('line', (line: string) => {
         if (!line) return;
+        if (DEV_NOISE.some((needle) => line.includes(needle))) return;
         process.stdout.write(`${prefix} ${line}\n`);
     });
 }
@@ -58,6 +71,13 @@ export interface ManagedProcess {
 export interface SpawnManagedOptions extends SpawnOptions {
     /** Logical name for log prefixing and shutdown ordering. */
     name: string;
+    /**
+     * When true, drop the child's stdout/stderr entirely — no log lines
+     * reach the terminal. Used for chatty infrastructure processes
+     * (nats, restate) whose startup output is noise in the default dev
+     * view. Exit-code reporting still surfaces via the exit handler.
+     */
+    silent?: boolean;
 }
 
 /**
@@ -70,16 +90,20 @@ export function spawnManaged(
     args: string[],
     opts: SpawnManagedOptions,
 ): ManagedProcess {
-    const { name, ...spawnOpts } = opts;
+    const { name, silent, ...spawnOpts } = opts;
 
     const child = spawn(command, args, {
         detached: process.platform !== 'win32',
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: silent
+            ? ['ignore', 'ignore', 'ignore']
+            : ['ignore', 'pipe', 'pipe'],
         ...spawnOpts,
     });
 
-    streamLines(name, child.stdout);
-    streamLines(name, child.stderr);
+    if (!silent) {
+        streamLines(name, child.stdout);
+        streamLines(name, child.stderr);
+    }
 
     child.on('exit', (code, signal) => {
         if (code !== null && code !== 0) {

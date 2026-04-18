@@ -94,6 +94,7 @@ Usage:
 
 Flags:
   --fresh                         Wipe .syncengine/dev/ before starting (dev only)
+  --verbose, -v                   Stream raw nats + restate logs (dev only)
 
 Environment:
   SYNCENGINE_NATS_URL             NATS WebSocket URL (production)

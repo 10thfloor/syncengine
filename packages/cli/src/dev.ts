@@ -63,6 +63,7 @@ import { errors, CliCode } from '@syncengine/core';
 export async function devCommand(args: string[]): Promise<void> {
     const fresh = args.includes('--fresh');
     const rawNats = args.includes('--raw-nats');
+    const verbose = args.includes('--verbose') || args.includes('-v');
     const repoRoot = await findAppRoot();
     const stateDir = stateDirFor(repoRoot);
 
@@ -126,7 +127,7 @@ export async function devCommand(args: string[]): Promise<void> {
     });
 
     try {
-        await boot(processes, stateDir, repoRoot, ports, rawNats);
+        await boot(processes, stateDir, repoRoot, ports, rawNats, verbose);
         // Everything is up — record the full pid set for `syncengine down`.
         writePids(stateDir, buildPidsSnapshot(processes));
     } catch (err) {
@@ -155,6 +156,7 @@ async function boot(
     repoRoot: string,
     ports: Ports,
     rawNats: boolean,
+    verbose: boolean,
 ): Promise<void> {
     // 1+2. NATS and Restate (parallel — they're independent)
     banner('starting nats-server and restate-server');
@@ -163,6 +165,7 @@ async function boot(
     const nats = spawnManaged(natsPath, ['-c', natsConfPath], {
         name: 'nats',
         cwd: repoRoot,
+        silent: !verbose,
     });
     processes.push(nats);
 
@@ -178,6 +181,7 @@ async function boot(
         {
             name: 'restate',
             cwd: repoRoot,
+            silent: !verbose,
             env: {
                 ...process.env,
                 RESTATE_LOG_FILTER: process.env.RESTATE_LOG_FILTER ?? 'warn,restate=info',
@@ -225,6 +229,12 @@ async function boot(
             PORT: String(ports.workspace),
             NATS_URL: `nats://127.0.0.1:${ports.natsClient}`,
             SYNCENGINE_APP_DIR: appDir,
+            // Restate Node SDK defaults to INFO — spams every workflow
+            // invocation start/end + "Accepting requests without verifying
+            // signatures" on every boot. In quiet mode (default) raise to
+            // WARN so only genuine warnings and errors surface. Users can
+            // still override with their own RESTATE_LOGGING env.
+            RESTATE_LOGGING: process.env.RESTATE_LOGGING ?? (verbose ? 'INFO' : 'WARN'),
         },
     });
     processes.push(workspace);
