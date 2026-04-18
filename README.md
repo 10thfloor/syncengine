@@ -533,6 +533,7 @@ directly.
 
 - **[Entities](./docs/guides/entities.md)** — state machines, transitions, access
 - **[Tables & views](./docs/guides/tables-and-channels.md)** — schema and DBSP
+- **[Migrations](./docs/guides/migrations.md)** — evolving the client SQLite schema safely
 - **[Event bus](./docs/guides/event-bus.md)** — delivery, ordering, DLQ
 - **[Workflows](./docs/guides/workflows.md)** — durability, retries, sleep
 - **[Services](./docs/guides/services.md)** — ports and adapters

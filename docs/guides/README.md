@@ -8,6 +8,7 @@ Practical docs for building with syncengine primitives. Each guide opens with "w
 |---|---|
 | [entities.md](entities.md) | Actor-model state objects with pure handlers + state machines |
 | [tables-and-channels.md](tables-and-channels.md) | CRDT-synced tables + channel routing for NATS subjects |
+| [migrations.md](migrations.md) | Client SQLite schema evolution — addColumn, rename, drop, addTable |
 | [topics.md](topics.md) | Ephemeral pub/sub — cursors, presence, typing |
 | [event-bus.md](event-bus.md) | Durable server-only domain events with subscribers, modifiers, and DLQ |
 | [workflows.md](workflows.md) | Restate-durable orchestration across entities + services |
