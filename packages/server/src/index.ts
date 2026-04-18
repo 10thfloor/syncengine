@@ -278,15 +278,46 @@ export async function startRestateEndpoint(
 // ── Direct execution (dev mode via tsx watch) ──────────────────────────────
 //
 // When this file is run directly (`tsx watch src/index.ts`), it reads
-// SYNCENGINE_APP_DIR, loads entities, and starts the endpoint. In
-// production the build system imports the exported functions instead.
+// SYNCENGINE_APP_DIR, loads entities, starts the endpoint, and boots the
+// bus runtime so dev mode has the same end-to-end publish → subscriber
+// pipeline as `syncengine build` + `syncengine start`. In production the
+// build system generates an entry that mirrors this wiring.
 
 const appDir = process.env.SYNCENGINE_APP_DIR;
 if (appDir) {
     void (async () => {
         const PORT = parseInt(process.env.PORT ?? "9080", 10);
-        const { entities, workflows, heartbeats, webhooks, services } = await loadDefinitions(appDir);
+        const { entities, workflows, heartbeats, webhooks, services, buses } = await loadDefinitions(appDir);
         await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services);
+
+        // Bus runtime — only spin up if there are subscribers or declared
+        // buses. Matches the generated-entry gate in packages/cli/src/build.ts.
+        const hasSubscribers = workflows.some(isBusSubscriberWorkflow);
+        if (hasSubscribers || buses.length > 0) {
+            const { BusManager, realDispatcherFactory } = await import('./bus-manager.js');
+            const { installBusPublisher } = await import('./bus-context.js');
+            const { connectNats } = await import('@syncengine/gateway-core');
+
+            const natsUrl = process.env.SYNCENGINE_NATS_URL ?? 'ws://localhost:9222';
+            const restateUrl = process.env.SYNCENGINE_RESTATE_URL ?? 'http://localhost:8080';
+            const busManager = new BusManager({
+                natsUrl,
+                restateUrl,
+                workflows,
+                dispatcherFactory: realDispatcherFactory,
+                installSignalHandlers: process.env.SYNCENGINE_NO_BUS_SIGNALS !== '1',
+            });
+            await busManager.start();
+            try {
+                const nc = await connectNats(natsUrl);
+                installBusPublisher(nc);
+                await busManager.attachToNats(nc);
+                console.log('[syncengine] bus runtime attached to ' + natsUrl);
+            } catch (err) {
+                console.warn('[syncengine] bus runtime could not attach to NATS: ' +
+                    (err instanceof Error ? err.message : String(err)));
+            }
+        }
     })();
 }
 
