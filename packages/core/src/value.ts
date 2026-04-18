@@ -697,6 +697,135 @@ function defineComposite<
     return def;
 }
 
+// ── op(ValueRef, fn) — cross-value-returning op marker ────────────────────
+//
+// Composite ops that return the SAME shape as the value def auto-rebrand
+// at the runtime (see `defineComposite`'s wrappedOps). Ops that return a
+// DIFFERENT value type (e.g. `Price.ops.total` → `Money`) can't be
+// detected by shape match against the parent, so the framework leaves
+// them alone — the caller only gets a branded value if they routed the
+// return through the target value's `.ops` / `.create`.
+//
+// `op(Money, fn)` makes that explicit: the returned function runs `fn`,
+// validates the result against `Money.is`, and stamps the brand via
+// `Money.unsafe`. If `fn` already routed through a Money API, the
+// validation is a cheap no-op; if it returned a raw shape, the framework
+// brands it; if it returned something invalid, the throw points at the
+// op name.
+
+export interface ValueMarker<T> {
+    readonly $name: string;
+    readonly T: T;
+    is(x: unknown): boolean;
+    unsafe(raw: never): unknown;
+}
+
+export function op<
+    V extends ValueMarker<unknown>,
+    TArgs extends any[],
+>(
+    ref: V,
+    fn: (...args: TArgs) => unknown,
+): (...args: TArgs) => V['T'] {
+    return (...args: TArgs): V['T'] => {
+        const result = fn(...args);
+        if (!ref.is(result)) {
+            throw errors.schema(SchemaCode.INVALID_VALUE, {
+                message: `op(${ref.$name}): return value rejected by ${ref.$name}.is`,
+                hint: `Ensure the op constructs a valid ${ref.$name} (via create or another op that returns one).`,
+                context: { value: ref.$name, returned: result as unknown },
+            });
+        }
+        return (ref.unsafe as (raw: unknown) => unknown)(result) as V['T'];
+    };
+}
+
+// ── withArgs([schemas], fn) — auto-validate handler args ──────────────────
+//
+// Wraps an entity handler so its positional args are validated against a
+// tuple of value-defs / zod schemas before the handler body runs.
+// Closes the "handler args arrive unbranded" gap that TypeScript's
+// runtime-type-erasure prevents the framework from closing automatically.
+//
+//   pay: withArgs([Money, Email], (state, price, email) => {
+//     // price is Money.T, email is Email.T — both validated + branded
+//   })
+//
+// Value-def args: validated via `.is`, stamped via `.unsafe`. Zod args:
+// validated via `.parse` (throws on mismatch with zod's own error).
+// Plain primitives / objects with no schema-like shape pass through —
+// `withArgs([Money])` validates only the first arg.
+
+type ArgOf<T> =
+    T extends { readonly T: infer U } ? U :
+    T extends { parse(x: unknown): infer U } ? U :
+    never;
+
+type ArgsOf<T extends readonly unknown[]> = {
+    [K in keyof T]: ArgOf<T[K]>;
+};
+
+interface ValueDefLike {
+    readonly $name: string;
+    readonly is: (x: unknown) => boolean;
+    readonly unsafe: (raw: unknown) => unknown;
+}
+
+interface ZodLike {
+    readonly parse: (x: unknown) => unknown;
+}
+
+function isValueDefLike(s: unknown): s is ValueDefLike {
+    // Value defs are callable (as column factories) so `typeof` is
+    // 'function', not 'object'. Duck-type on the public surface.
+    if (s === null || (typeof s !== 'object' && typeof s !== 'function')) return false;
+    const v = s as ValueDefLike;
+    return (
+        typeof v.$name === 'string' &&
+        typeof v.is === 'function' &&
+        typeof v.unsafe === 'function'
+    );
+}
+
+function isZodLike(s: unknown): s is ZodLike {
+    if (s === null || (typeof s !== 'object' && typeof s !== 'function')) return false;
+    return typeof (s as ZodLike).parse === 'function';
+}
+
+export function withArgs<
+    const TSchemas extends readonly unknown[],
+    TState,
+    TReturn,
+>(
+    schemas: TSchemas,
+    fn: (state: TState, ...args: ArgsOf<TSchemas>) => TReturn,
+): (state: TState, ...args: ArgsOf<TSchemas>) => TReturn {
+    const wrapped = (state: TState, ...args: unknown[]): TReturn => {
+        const validated: unknown[] = args.slice();
+        for (let i = 0; i < schemas.length; i++) {
+            const schema = schemas[i];
+            const arg = args[i];
+            if (isValueDefLike(schema)) {
+                if (!schema.is(arg)) {
+                    throw errors.schema(SchemaCode.INVALID_VALUE, {
+                        message:
+                            `withArgs: arg #${i} (expected ${schema.$name}) ` +
+                            `rejected value ${JSON.stringify(arg)}`,
+                        hint: `Construct via ${schema.$name}.create.<fn>(...) at the call site.`,
+                        context: { arg: i, valueType: schema.$name },
+                    });
+                }
+                validated[i] = schema.unsafe(arg);
+            } else if (isZodLike(schema)) {
+                validated[i] = schema.parse(arg);
+            }
+            // else — passthrough (user declared neither a value def nor a zod)
+        }
+        return fn(state, ...(validated as ArgsOf<TSchemas>));
+    };
+    return wrapped as unknown as (state: TState, ...args: ArgsOf<TSchemas>) => TReturn;
+}
+
 function validateName(name: string): void {
     if (!name || typeof name !== 'string') {
         throw errors.schema(SchemaCode.INVALID_VALUE_NAME, {

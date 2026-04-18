@@ -18,6 +18,8 @@ import {
     buildInitialState,
     validateEntityState,
     applyHandler,
+    op,
+    withArgs,
 } from '@syncengine/core';
 import { defineWorkflow, on } from '@syncengine/server';
 import {
@@ -177,5 +179,50 @@ describe('value objects — kitchen sink (entity + table + bus)', () => {
         const validated = validateEntityState(orderAgg.$state, jsonArrived, 'vo_order');
         expect(Money.is(validated.total)).toBe(true);
         expect(Email.is(validated.customerEmail)).toBe(true);
+    });
+});
+
+// ── Polish slice — op() + withArgs() demo ─────────────────────────────────
+
+describe('value objects — op() + withArgs() polish', () => {
+    it('op(Money, fn) rebrands a raw-shape return', () => {
+        // Realistic kitchen-sink usage: a doubling op on Money defined
+        // via op() so the framework validates + brands the result
+        // without the user routing through `Money.ops.scale`.
+        const double = op(Money, (m: ReturnType<typeof Money.create.usd>) => ({
+            amount: m.amount * 2,
+            currency: m.currency,
+        }));
+        const out = double(Money.create.usd(50));
+        expect(Money.is(out)).toBe(true);
+        expect(out.amount).toBe(100);
+    });
+
+    it('withArgs validates value-def args at the handler boundary', () => {
+        type S = { total: ReturnType<typeof Money.create.usd> };
+
+        const pay = withArgs(
+            [Money, Email] as const,
+            (state: S, price, email) => ({
+                total: Money.ops.add(state.total, price),
+                customerEmail: email,
+            }),
+        );
+
+        const s0: S = { total: Money.create.usd(0) };
+        const s1 = pay(
+            s0,
+            { amount: 100, currency: 'USD' } as never,        // plain-JSON inbound
+            'alice@example.com' as never,                     // plain string inbound
+        );
+        expect(Money.is(s1.total)).toBe(true);
+        expect(s1.total.amount).toBe(100);
+        expect(Email.is(s1.customerEmail)).toBe(true);
+    });
+
+    it('withArgs rejects an invalid Email at the boundary', () => {
+        type S = object;
+        const h = withArgs([Email] as const, (_state: S, email) => ({ email }));
+        expect(() => h({}, 'not-an-email' as never)).toThrow(/rejected/);
     });
 });

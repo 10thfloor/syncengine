@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
 import { text, integer } from '../schema';
-import { defineValue } from '../value';
+import { defineValue, op, withArgs } from '../value';
 
 // ── Minimal brand-only scalars ─────────────────────────────────────────────
 
@@ -343,6 +344,116 @@ describe('defineValue — nested composite', () => {
         expect(parsed.amount).toMatchObject({ amount: 1999, currency: 'USD' });
         expect(parsed.taxRate).toBe(8);
     });
+});
+
+// ── op() — cross-value-returning op marker ────────────────────────────────
+
+describe('op() — cross-value returns', () => {
+    it('wraps a fn that returns another value type — auto-rebrands', () => {
+        // Price uses Money internally. The composite auto-rebrand in
+        // `defineValue` only detects Price's own shape; for `total` to
+        // return a branded Money, the user marks it with `op(Money, fn)`.
+        const shippedTotal = op(Money, (p: ReturnType<typeof Price.create.withTax>) =>
+            Money.ops.scale(p.amount, 1 + p.taxRate / 100),
+        );
+        const p = Price.create.withTax(Money.create.usd(1000), 10);
+        const out = shippedTotal(p);
+        expect(Money.is(out)).toBe(true);
+        expect(out.amount).toBe(1100);
+    });
+
+    it('rebrands a raw-shape return', () => {
+        // Fn returns a plain object matching Money's shape — the marker
+        // re-runs the invariant + stamps the brand.
+        const fakeTotal = op(Money, (p: ReturnType<typeof Money.create.usd>) => ({
+            amount: p.amount * 2,
+            currency: p.currency,
+        }));
+        const out = fakeTotal(Money.create.usd(50));
+        expect(Money.is(out)).toBe(true);
+        expect(out.amount).toBe(100);
+    });
+
+    it('throws with the value name when the return fails validation', () => {
+        const bad = op(Money, () => ({ amount: -1, currency: 'USD' }));
+        expect(() => bad()).toThrow(/money.*rejected/i);
+    });
+
+    it('chains — value ops can themselves use op() markers', () => {
+        // An op that returns a Price from a Money input.
+        const promote = op(Price, (m: ReturnType<typeof Money.create.usd>) =>
+            Price.create.withTax(m, 0),
+        );
+        const p = promote(Money.create.usd(100));
+        expect(Price.is(p)).toBe(true);
+        expect(Money.is(p.amount)).toBe(true);
+    });
+});
+
+// ── withArgs() — handler-arg validation ──────────────────────────────────
+
+describe('withArgs() — declarative handler arg validation', () => {
+    it('validates value-def args and stamps the brand', () => {
+        type State = { total: ReturnType<typeof Money.create.usd> };
+        const handler = withArgs(
+            [Money] as const,
+            (state: State, price) => ({ total: Money.ops.add(state.total, price) }),
+        );
+        const initial: State = { total: Money.create.usd(0) };
+        const next = handler(initial, Money.create.usd(1999));
+        expect(Money.is(next.total)).toBe(true);
+        expect(next.total.amount).toBe(1999);
+    });
+
+    it('rejects an unbranded arg that fails the invariant', () => {
+        type State = { total: ReturnType<typeof Money.create.usd> };
+        const handler = withArgs(
+            [Money] as const,
+            (_state: State, price) => ({ total: price }),
+        );
+        expect(() => handler(
+            { total: Money.create.usd(0) },
+            { amount: -1, currency: 'USD' } as never,
+        )).toThrow(/rejected/);
+    });
+
+    it('passes validated, rebranded args into the handler body', () => {
+        // Plain-JSON-shaped arg → handler receives a branded, re-stamped
+        // Money. Verifies rehydration semantics match validateEntityState.
+        let saw: unknown;
+        const handler = withArgs(
+            [Money] as const,
+            (_state: object, price) => { saw = price; return {}; },
+        );
+        handler({}, { amount: 100, currency: 'USD' } as never);
+        expect(Money.is(saw)).toBe(true);
+    });
+
+    it('mixes value-defs and zod schemas', () => {
+        const handler = withArgs(
+            [Money, z.string()] as const,
+            (_state: object, price, label) => ({ price, label }),
+        );
+        const out = handler(
+            {},
+            Money.create.usd(100),
+            'widget',
+        );
+        expect(Money.is(out.price)).toBe(true);
+        expect(out.label).toBe('widget');
+    });
+
+    it('zod rejects invalid args', () => {
+        const handler = withArgs(
+            [z.string()] as const,
+            (_state: object, label) => ({ label }),
+        );
+        expect(() => handler({}, 42 as never)).toThrow();
+    });
+
+    // (The declarative contract is "all args have schemas". If a user
+    //  needs to pass extra unvalidated data, they thread it through a
+    //  z.any() schema at the right slot.)
 });
 
 describe('defineValue — name validation', () => {

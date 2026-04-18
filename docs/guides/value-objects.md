@@ -205,6 +205,90 @@ const bad = Money.unsafe({ amount: -1, currency: 'USD' });
 
 Tests use `unsafe` to produce deliberately-invalid fixtures that verify handler rejection paths. Production code should never call it — the name is the linter.
 
+## Cross-value-returning ops — `op(ReturnRef, fn)`
+
+Composite auto-rebrand detects the parent's own shape. Ops that return a **different** value type need the `op()` marker:
+
+```ts
+const Price = defineValue('price', { amount: Money(), taxRate: real() }, {
+  ops: {
+    // Returns Money, not Price — wrap in op(Money, ...) so the
+    // framework validates + brands the result.
+    total: op(Money, (p) => Money.ops.scale(p.amount, 1 + p.taxRate)),
+  },
+});
+```
+
+Without `op(Money, ...)`, the op return flows through untouched — if `fn` already went through `Money.ops.scale`, it's already branded; but a raw `{amount, currency}` return would stay unbranded. `op()` is the explicit contract: "this op returns a Money".
+
+The marker also lets you write ops whose body produces a raw shape and have the framework re-validate:
+
+```ts
+ops: {
+  total: op(Money, (p) => ({
+    amount: Math.round(p.amount.amount * (1 + p.taxRate)),
+    currency: p.amount.currency,
+  })),
+}
+```
+
+## Handler-arg validation — `withArgs([schemas], fn)`
+
+TypeScript erases types at runtime, so the framework can't auto-validate inbound handler args against the declared parameter types. `withArgs` declares them as value-defs or zod schemas at the call site:
+
+```ts
+import { withArgs } from '@syncengine/core';
+
+handlers: {
+  addItem: withArgs(
+    [Money, z.string()] as const,
+    (state, price, label) => {
+      // price is Money.T — validated + branded before we get here
+      // label is string — validated by zod
+      return emit({ ... });
+    },
+  ),
+  pay: withArgs(
+    [Email] as const,
+    (state, email) => ({ status: 'paid' as const, customerEmail: email }),
+  ),
+}
+```
+
+- **Value-def args** — validated via `.is`, stamped via `.unsafe`. Invalid args throw with the value name and the rejected value.
+- **Zod args** — validated via `.parse`. Zod's own error shape surfaces.
+- **Types flow both ways** — `withArgs([Money, z.string()], fn)` types `fn` as `(state, Money.T, string) => ...`. No duplicated declarations.
+
+`withArgs` replaces the `Money.is(arg) ? arg : Money.unsafe(arg)` ceremony inside handler bodies. Drop it in everywhere handlers take value-typed args.
+
+## Querying composite fields (view escape hatch)
+
+Composite value columns store as JSON-in-TEXT. For per-field filtering without the future indexing primitive, declare a view that extracts the fields:
+
+```ts
+export const ordersByCurrency = view('ordersByCurrency', {
+  from: [lineItems],
+}).pipe(({ lineItems }) =>
+  lineItems.map(row => ({
+    ...row,
+    currency: JSON.parse(row.price).currency as 'USD' | 'EUR' | 'GBP',
+  })),
+);
+```
+
+The view materialises the extracted field; filters / aggregates run on the derived column. Good enough for most cases; `Money({ index: ['amount'] })` generating a SQLite generated column lands as a future slice if demand materialises.
+
+## Evolving value shapes
+
+Value shape changes are breaking for data already serialized in the old shape. Prefer additive-only evolution:
+
+- **Adding an optional field** — old data parses fine (field becomes `undefined`). Safe.
+- **Adding a required field** — old data fails the zod schema. Breaking; needs a migration.
+- **Renaming a field** — breaking; needs a migration.
+- **Tightening the invariant** — old data may fail `.is()` after rehydration. Breaking.
+
+When a breaking change lands, route through the existing migrations system (`packages/core/src/migrations.ts`) and write an upgrader that walks stored state + bus payloads. A first-class `defineValue` migration API is a follow-up once the first real version bump hits.
+
 ## Footguns
 
 - **Composite columns aren't queryable per component.** Storage is JSON-in-TEXT, atomic. If you need to filter on `amount` or `currency` separately, either use two scalar columns (Money.Amount + Money.Currency — defeats the point) or wait for the future indexing escape hatch.
