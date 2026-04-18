@@ -1,84 +1,50 @@
-import { describe, it, expect } from 'vitest';
-import { planConfigBundle } from '../config-bundle.ts';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildConfigBundle } from '../config-bundle.ts';
+import { SyncEngineError } from '@syncengine/core';
 
-describe('planConfigBundle', () => {
-    it('returns an esbuild plan when a user config path is provided', () => {
-        const plan = planConfigBundle({
-            configPath: 'syncengine.config.ts',
-            distDir: '/repo/apps/notepad/dist',
-            appDir: '/repo/apps/notepad',
-        });
+describe('buildConfigBundle', () => {
+    let appDir: string;
 
-        expect(plan.kind).toBe('esbuild');
-        if (plan.kind !== 'esbuild') return;
-        expect(plan.args).toContain('syncengine.config.ts');
-        expect(plan.args).toContain('--bundle');
-        expect(plan.args).toContain('--platform=node');
-        expect(plan.args).toContain('--format=esm');
-        expect(plan.args).toContain('--target=node22');
-        expect(plan.args.some((a) => a.startsWith('--outfile='))).toBe(true);
-        expect(plan.args.some((a) => a.endsWith('/dist/server/config.mjs'))).toBe(true);
+    beforeEach(() => {
+        appDir = mkdtempSync(join(tmpdir(), 'syncengine-config-bundle-'));
     });
 
-    it('targets the outfile under distDir/server/config.mjs', () => {
-        const plan = planConfigBundle({
-            configPath: 'syncengine.config.ts',
-            distDir: '/repo/apps/x/dist',
-            appDir: '/repo/apps/x',
-        });
-        if (plan.kind !== 'esbuild') throw new Error('expected esbuild plan');
-        const outfile = plan.args.find((a) => a.startsWith('--outfile='));
-        expect(outfile).toBe('--outfile=/repo/apps/x/dist/server/config.mjs');
+    afterEach(() => {
+        rmSync(appDir, { recursive: true, force: true });
     });
 
-    it('preserves the user configPath exactly as passed in (relative or absolute)', () => {
-        const absolute = planConfigBundle({
-            configPath: '/repo/apps/x/syncengine.config.ts',
-            distDir: '/repo/apps/x/dist',
-            appDir: '/repo/apps/x',
-        });
-        if (absolute.kind !== 'esbuild') throw new Error('expected esbuild plan');
-        expect(absolute.args).toContain('/repo/apps/x/syncengine.config.ts');
-
-        const relative = planConfigBundle({
-            configPath: 'syncengine.config.ts',
-            distDir: '/repo/apps/x/dist',
-            appDir: '/repo/apps/x',
-        });
-        if (relative.kind !== 'esbuild') throw new Error('expected esbuild plan');
-        expect(relative.args).toContain('syncengine.config.ts');
-    });
-
-    it('returns a stub plan when no config path is provided', () => {
-        const plan = planConfigBundle({
+    it('emits a stub when no config path is provided', async () => {
+        const distDir = join(appDir, 'dist');
+        const result = await buildConfigBundle({
             configPath: null,
-            distDir: '/repo/apps/x/dist',
-            appDir: '/repo/apps/x',
+            distDir,
+            appDir,
         });
 
-        expect(plan.kind).toBe('stub');
-        if (plan.kind !== 'stub') return;
-        expect(plan.outPath).toBe('/repo/apps/x/dist/server/config.mjs');
-        // Stub must emit the SyncengineConfig default-export shape the
-        // serve binary dynamic-imports. Must include `workspaces.resolve`
-        // returning a usable fallback (typically 'default') and should
-        // NOT include auth (optional; serve binary tolerates omitted).
-        expect(plan.content).toContain('export default');
-        expect(plan.content).toContain('workspaces');
-        expect(plan.content).toContain('resolve');
+        expect(result.kind).toBe('stub');
+        expect(result.outPath).toBe(join(distDir, 'server', 'config.mjs'));
+        expect(existsSync(result.outPath)).toBe(true);
+
+        const content = readFileSync(result.outPath, 'utf8');
+        expect(content).toContain('export default');
+        expect(content).toContain('workspaces');
+        expect(content).toContain('resolve');
     });
 
-    it('stub content evaluates to a valid SyncengineConfig with resolve() returning a non-empty string', async () => {
-        const plan = planConfigBundle({
+    it('stub evaluates to a valid SyncengineConfig whose resolve() returns a non-empty string', async () => {
+        const distDir = join(appDir, 'dist');
+        const result = await buildConfigBundle({
             configPath: null,
-            distDir: '/tmp/dist',
-            appDir: '/tmp',
+            distDir,
+            appDir,
         });
-        if (plan.kind !== 'stub') throw new Error('expected stub plan');
 
-        // Evaluate the stub as an ES module via a data URL.
+        const content = readFileSync(result.outPath, 'utf8');
         const dataUrl = 'data:text/javascript;base64,' +
-            Buffer.from(plan.content, 'utf8').toString('base64');
+            Buffer.from(content, 'utf8').toString('base64');
         const mod = await import(dataUrl) as {
             default: {
                 workspaces: {
@@ -86,26 +52,102 @@ describe('planConfigBundle', () => {
                 };
             };
         };
-        const result = await mod.default.workspaces.resolve({
+        const ws = await mod.default.workspaces.resolve({
             request: new Request('http://localhost/'),
             user: { id: 'anonymous' },
         });
-        expect(typeof result).toBe('string');
-        expect(result.length).toBeGreaterThan(0);
+        expect(typeof ws).toBe('string');
+        expect(ws.length).toBeGreaterThan(0);
     });
 
-    it('esbuild plan does NOT include the runtime-config alias used by the main server bundle', () => {
-        // Config files should never import virtual:syncengine/runtime-config.
-        // If someone does, esbuild should fail (rather than silently resolving
-        // to a stub). So no alias should appear in the config bundle args.
-        const plan = planConfigBundle({
-            configPath: 'syncengine.config.ts',
-            distDir: '/repo/dist',
-            appDir: '/repo',
-        });
-        if (plan.kind !== 'esbuild') throw new Error('expected esbuild plan');
-        expect(plan.args.some((a) =>
-            a.includes('virtual:syncengine/runtime-config'),
-        )).toBe(false);
+    it('bundles a user config to dist/server/config.mjs', async () => {
+        const configPath = join(appDir, 'syncengine.config.ts');
+        writeFileSync(configPath, `
+            export default {
+                workspaces: {
+                    resolve: () => 'alpha',
+                },
+            };
+        `);
+        const distDir = join(appDir, 'dist');
+
+        const result = await buildConfigBundle({ configPath, distDir, appDir });
+
+        expect(result.kind).toBe('esbuild');
+        expect(result.outPath).toBe(join(distDir, 'server', 'config.mjs'));
+        expect(existsSync(result.outPath)).toBe(true);
+
+        const dataUrl = 'data:text/javascript;base64,' +
+            Buffer.from(readFileSync(result.outPath, 'utf8'), 'utf8').toString('base64');
+        const mod = await import(dataUrl) as {
+            default: { workspaces: { resolve: () => string } };
+        };
+        expect(mod.default.workspaces.resolve()).toBe('alpha');
+    });
+
+    it('rejects a user config that imports a native .node module', async () => {
+        // Fake a "native module" — esbuild only sees the import path's suffix,
+        // so a zero-byte file with .node is enough to trigger the guard.
+        const nativePath = join(appDir, 'fake-native.node');
+        writeFileSync(nativePath, '');
+
+        const configPath = join(appDir, 'syncengine.config.ts');
+        writeFileSync(configPath, `
+            import nativeMod from './fake-native.node';
+            export default {
+                workspaces: { resolve: () => 'x' },
+                _native: nativeMod,
+            };
+        `);
+        const distDir = join(appDir, 'dist');
+
+        await expect(
+            buildConfigBundle({ configPath, distDir, appDir }),
+        ).rejects.toThrow();
+
+        // Should never have written the bundle.
+        expect(existsSync(join(distDir, 'server', 'config.mjs'))).toBe(false);
+    });
+
+    it('native-import rejection surfaces a SyncEngineError with CliCode.NATIVE_IMPORT_REJECTED', async () => {
+        const nativePath = join(appDir, 'fake-native.node');
+        writeFileSync(nativePath, '');
+
+        const configPath = join(appDir, 'syncengine.config.ts');
+        writeFileSync(configPath, `
+            import './fake-native.node';
+            export default { workspaces: { resolve: () => 'x' } };
+        `);
+        const distDir = join(appDir, 'dist');
+
+        let caught: unknown;
+        try {
+            await buildConfigBundle({ configPath, distDir, appDir });
+        } catch (err) {
+            caught = err;
+        }
+        expect(caught).toBeDefined();
+
+        // esbuild wraps plugin errors — dig for the SyncEngineError cause.
+        const findSyncErr = (e: unknown): SyncEngineError | null => {
+            if (e instanceof SyncEngineError) return e;
+            if (e && typeof e === 'object') {
+                const anyE = e as { cause?: unknown; errors?: Array<{ detail?: unknown }> };
+                if (anyE.cause) {
+                    const fromCause = findSyncErr(anyE.cause);
+                    if (fromCause) return fromCause;
+                }
+                if (Array.isArray(anyE.errors)) {
+                    for (const inner of anyE.errors) {
+                        const fromDetail = findSyncErr(inner?.detail);
+                        if (fromDetail) return fromDetail;
+                    }
+                }
+            }
+            return null;
+        };
+        const sErr = findSyncErr(caught);
+        expect(sErr).not.toBeNull();
+        expect(sErr?.code).toBe('NATIVE_IMPORT_REJECTED');
     });
 });
