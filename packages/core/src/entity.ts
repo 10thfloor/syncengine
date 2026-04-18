@@ -195,6 +195,25 @@ export function validateEntityState<TShape extends EntityStateShape>(
         context: { entity: entityName, field: name },
       });
     }
+    // Value-object columns: delegate shape + invariant to the value
+    // def's `.is()`, then restamp the brand via `.unsafe(...)` so the
+    // persisted state carries the brand chain after rehydration. This
+    // is the server- and client-side path (`applyHandler` feeds into
+    // here, as does the client's optimistic rebase).
+    const valueRef = (col as { $valueRef?: { is: (x: unknown) => boolean; unsafe: (x: unknown) => unknown; $name: string } }).$valueRef;
+    if (valueRef) {
+      if (!valueRef.is(value)) {
+        throw errors.entity(EntityCode.TYPE_MISMATCH, {
+          message:
+            `Entity '${entityName}': column '${name}' (value-type '${valueRef.$name}') ` +
+            `rejected value ${JSON.stringify(value)}.`,
+          hint: `Construct via the value object's factory (e.g. Money.create.usd(100)).`,
+          context: { entity: entityName, field: name, valueType: valueRef.$name },
+        });
+      }
+      out[name] = valueRef.unsafe(value);
+      continue;
+    }
     const expectedType = jsTypeForKind(col.kind);
     if (expectedType && typeof value !== expectedType) {
       throw errors.entity(EntityCode.TYPE_MISMATCH, {
