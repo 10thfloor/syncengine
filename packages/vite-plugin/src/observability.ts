@@ -50,13 +50,25 @@ export function observabilityPlugin(): Plugin {
                 config = { workspaces: { resolve: () => 'default' } };
             }
 
-            handle = await bootSdk({ config: config.observability });
+            // In dev, skip OTel entirely unless the user has opted in —
+            // either via `observability:` in syncengine.config.ts, or by
+            // setting OTEL_EXPORTER_OTLP_ENDPOINT (the standard env
+            // signal that a collector is listening). This keeps the dev
+            // server's startup path free of the sdk-node dynamic-import
+            // chain, which races Vite's SSR module runner on some
+            // versions of Vite 6.x.
+            const wantsObservability =
+                config.observability !== undefined ||
+                process.env.OTEL_EXPORTER_OTLP_ENDPOINT !== undefined;
 
-            if (handle.enabled) {
-                server.config.logger.info(
-                    '[syncengine] observability: OTel SDK ready',
-                    { timestamp: true },
-                );
+            if (wantsObservability) {
+                handle = await bootSdk({ config: config.observability });
+                if (handle.enabled) {
+                    server.config.logger.info(
+                        '[syncengine] observability: OTel SDK ready',
+                        { timestamp: true },
+                    );
+                }
             }
 
             // Discover and SSR-load `.metrics.ts` files so module-level

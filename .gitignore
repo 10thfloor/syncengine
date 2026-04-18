@@ -20,6 +20,9 @@ packages/dbsp-engine/pkg
 # MCP tool state (serena indexer)
 .serena/
 
+# Local scaffold target for init dogfooding
+apps/scratch-test/
+
 # Logs
 logs
 *.log

@@ -144,6 +144,7 @@ function scaffoldProject(target: string, name: string, useWorkspace: boolean): v
         dependencies: {
             '@syncengine/client': depVersion,
             '@syncengine/core': depVersion,
+            '@syncengine/server': depVersion,
             'react': '^19.0.0',
             'react-dom': '^19.0.0',
         },
@@ -154,7 +155,7 @@ function scaffoldProject(target: string, name: string, useWorkspace: boolean): v
             '@types/react-dom': '^19.0.0',
             '@vitejs/plugin-react': '^4.0.0',
             'typescript': '~5.9.0',
-            'vite': '^6.0.0',
+            'vite': '6.4.2',
             'vite-plugin-wasm': '^3.0.0',
             'vite-plugin-top-level-await': '^1.0.0',
         },
