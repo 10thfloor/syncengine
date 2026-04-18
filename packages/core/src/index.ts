@@ -96,6 +96,10 @@ export { override as serviceOverride } from './service';
 export { BusMode, isBusOverride } from './bus-mode';
 export type { BusOverride, AnyBusOverride } from './bus-mode';
 
+// ── Value Objects (branded domain types) ──────────────────────────────────
+export { defineValue } from './value';
+export type { Brand, Branded, ValueType, ScalarValueDef, ScalarValueOptions } from './value';
+
 // ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
 export {
     entity,
