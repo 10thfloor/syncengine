@@ -24,25 +24,40 @@ pnpm install
 pnpm dev
 ```
 
-The CLI is a standalone binary — no Node on your PATH required to run
-`syncengine`. The scaffolded app's library deps come from [JSR](https://jsr.io/@syncengine)
-via npm's `npm:@jsr/…` compat specifier, so `pnpm install` / `npm i`
-/ `bun install` all Just Work. Deno users can swap in native
-`jsr:@syncengine/core@^0.1.0` specifiers by hand.
+## Hex architecture, by construction
 
-Three processes boot: Restate (durable execution), NATS (transport), Vite
-(dev server). You never talk to any of them directly.
+The framework is organized as concentric rings — pure data at the
+center, stateful domain logic in the middle, orchestration and vendor
+SDKs at the edge. Each primitive slots into exactly one ring, and each
+ring depends only on the rings inside it. There's no lint rule to tune
+and no runtime check to fail: the type system enforces the walls for
+you, and the file-suffix convention makes the boundaries visible in
+the file tree.
 
-```
-  restate   virtual objects loaded
-  nats      streams created
-  dbsp      views materialized
-  vite      http://localhost:5173
-```
+<div align="center">
 
-## What you write
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 420" width="380" height="380" role="img" aria-label="Concentric architecture rings from schema at the center to service at the edge">
+  <circle cx="210" cy="210" r="200" fill="#ef4444" />
+  <circle cx="210" cy="210" r="168" fill="#f97316" />
+  <circle cx="210" cy="210" r="136" fill="#eab308" />
+  <circle cx="210" cy="210" r="104" fill="#22c55e" />
+  <circle cx="210" cy="210" r="72"  fill="#6366f1" />
+  <circle cx="210" cy="210" r="40"  fill="#f472b6" />
+  <g font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="14" font-weight="600" fill="#ffffff" text-anchor="middle">
+    <text x="210" y="26">service</text>
+    <text x="210" y="58">workflow</text>
+    <text x="210" y="90">bus</text>
+    <text x="210" y="122">view</text>
+    <text x="210" y="154">entity</text>
+    <text x="210" y="215">schema</text>
+  </g>
+</svg>
 
-Six primitives. Each one a few lines of code. Together they're a
+</div>
+
+## Building blocks
+
+Six primitives in a few lines of code each. Together they're a
 hexagonal architecture — schema at the center, services at the edge,
 walls enforced by the type system.
 
