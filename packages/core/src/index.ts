@@ -86,8 +86,15 @@ export { generateNatsPermissions } from './nats-acl';
 export type { RoleSpec, Roles, NatsPermissions } from './nats-acl';
 
 // ── Service DSL (hex architecture — driven ports) ────────────────────────
-export { service, isService, override, isServiceOverride } from './service';
+export { service, isService, isServiceOverride } from './service';
 export type { ServiceDef, ServicePort, ServiceName, ServicesOf, AnyService, ServiceOverride, AnyServiceOverride } from './service';
+// Polymorphic override() — handles ServiceDef and BusRef targets.
+// The service-only form re-exports under `serviceOverride` for callers
+// that want the narrow overload without TS's overload resolution.
+export { override } from './overrides';
+export { override as serviceOverride } from './service';
+export { BusMode, isBusOverride } from './bus-mode';
+export type { BusOverride, AnyBusOverride } from './bus-mode';
 
 // ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
 export {

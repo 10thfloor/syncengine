@@ -21,6 +21,7 @@ import {
     Retention, Delivery, Storage,
     type RetentionConfig, type DeliveryConfig, type StorageConfig,
 } from './bus-config';
+import { BusMode } from './bus-mode';
 
 // ── Naming rules ───────────────────────────────────────────────────────────
 
@@ -98,6 +99,9 @@ export interface BusPublishCtx {
 export interface BusRef<T> {
     readonly $tag: 'bus';
     readonly $name: string;
+    /** Driver selection. Default `BusMode.nats()`; flip to
+     *  `BusMode.inMemory()` for tests that shouldn't talk to NATS. */
+    readonly $mode: import('./bus-mode').BusMode;
     readonly $schema: ZodType<T>;
     readonly $config: BusConfig;
     /** Auto-generated DLQ bus sharing this bus's lifecycle. Its schema
@@ -116,6 +120,10 @@ export interface BusOptions<T> {
     readonly delivery?: DeliveryConfig;
     readonly storage?: StorageConfig;
     readonly dedupWindow?: Duration;
+    /** Driver selection. Omit (or pass `BusMode.nats()`) for the
+     *  production JetStream path; pass `BusMode.inMemory()` for
+     *  test-mode buses that never touch NATS. */
+    readonly mode?: import('./bus-mode').BusMode;
 }
 
 // ── Publisher wiring seam (@syncengine/server hooks in via T5) ─────────────
@@ -174,7 +182,11 @@ function attachPublish<T>(ref: Omit<BusRef<T>, 'publish'>): BusRef<T> {
     return full;
 }
 
-function buildDlqRef<T>(parentName: string, parentSchema: ZodType<T>): BusRef<DeadEvent<T>> {
+function buildDlqRef<T>(
+    parentName: string,
+    parentSchema: ZodType<T>,
+    parentMode: import('./bus-mode').BusMode,
+): BusRef<DeadEvent<T>> {
     const dlqName = `${parentName}.dlq`;
     const dlqSchema = deadEventSchema(parentSchema);
     const dlqConfig = applyDefaults({
@@ -183,11 +195,15 @@ function buildDlqRef<T>(parentName: string, parentSchema: ZodType<T>): BusRef<De
     });
 
     // Build the object first, then make its own .dlq point at itself.
+    // The DLQ inherits its parent's mode — an in-memory bus's DLQ is
+    // also in-memory; a NATS bus's DLQ is NATS. Otherwise a test that
+    // asserts on TerminalError wouldn't see its DeadEvent captured.
     const self = {
         $tag: 'bus' as const,
         $name: dlqName,
         $schema: dlqSchema,
         $config: dlqConfig,
+        $mode: parentMode,
     } as unknown as BusRef<DeadEvent<T>>;
     (self as unknown as { dlq: BusRef<DeadEvent<T>> }).dlq = self;
     return attachPublish(self);
@@ -196,12 +212,14 @@ function buildDlqRef<T>(parentName: string, parentSchema: ZodType<T>): BusRef<De
 export function bus<T>(name: string, opts: BusOptions<T>): BusRef<T> {
     validateBusName(name);
     const config = applyDefaults(opts);
-    const dlq = buildDlqRef(name, opts.schema);
+    const mode = opts.mode ?? BusMode.nats();
+    const dlq = buildDlqRef(name, opts.schema, mode);
     return attachPublish({
         $tag: 'bus',
         $name: name,
         $schema: opts.schema,
         $config: config,
+        $mode: mode,
         dlq,
     });
 }
