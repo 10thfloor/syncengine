@@ -1,0 +1,57 @@
+# Publish the four library packages to JSR on every `v*` tag.
+#
+# Needs a one-time scope claim at jsr.io/@syncengine before the first
+# run. After that, JSR's OIDC flow authenticates GitHub Actions with no
+# long-lived token — `id-token: write` is the only permission required.
+#
+# Safety note: no user-controlled inputs are interpolated into run:
+# steps. Only static strings and pinned action refs are used.
+
+name: publish-jsr
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: publish to JSR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: install
+        run: pnpm install --frozen-lockfile
+
+      - name: publish @syncengine/core
+        run: pnpx jsr publish --allow-slow-types
+        working-directory: packages/core
+
+      - name: publish @syncengine/vite-plugin
+        run: pnpx jsr publish --allow-slow-types
+        working-directory: packages/vite-plugin
+
+      - name: publish @syncengine/server
+        run: pnpx jsr publish --allow-slow-types
+        working-directory: packages/server
+
+      - name: publish @syncengine/client
+        run: pnpx jsr publish --allow-slow-types
+        working-directory: packages/client

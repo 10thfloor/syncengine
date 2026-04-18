@@ -128,7 +128,15 @@ function write(dir: string, relPath: string, content: string): void {
 // ── Scaffold project ─────────────────────────────────────────────────────
 
 function scaffoldProject(target: string, name: string, useWorkspace: boolean): void {
-    const depVersion = useWorkspace ? 'workspace:*' : 'latest';
+    // Inside the monorepo: resolve to the live source via workspace:*.
+    // Outside: resolve from JSR via npm's `npm:@jsr/...` compat specifier.
+    // The compat form works on every package manager (pnpm/npm/yarn/bun)
+    // without requiring JSR-aware versions. Deno users can swap in
+    // `jsr:@syncengine/core@^0.1.0` by hand.
+    const coreDep       = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__core@^0.1.0';
+    const clientDep     = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__client@^0.1.0';
+    const serverDep     = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__server@^0.1.0';
+    const vitePluginDep = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__vite-plugin@^0.1.0';
 
     // ── package.json
     write(target, 'package.json', JSON.stringify({
@@ -142,14 +150,14 @@ function scaffoldProject(target: string, name: string, useWorkspace: boolean): v
             start: 'syncengine start',
         },
         dependencies: {
-            '@syncengine/client': depVersion,
-            '@syncengine/core': depVersion,
-            '@syncengine/server': depVersion,
+            '@syncengine/client': clientDep,
+            '@syncengine/core': coreDep,
+            '@syncengine/server': serverDep,
             'react': '^19.0.0',
             'react-dom': '^19.0.0',
         },
         devDependencies: {
-            '@syncengine/vite-plugin': depVersion,
+            '@syncengine/vite-plugin': vitePluginDep,
             '@types/react': '^19.0.0',
             '@types/react-dom': '^19.0.0',
             '@vitejs/plugin-react': '^4.0.0',

@@ -1,0 +1,24 @@
+{
+  "name": "@syncengine/core",
+  "version": "0.1.0",
+  "description": "syncengine core primitives — entity, bus, table, topic, workflow, service, value",
+  "exports": {
+    ".": "./src/index.ts",
+    "./internal": "./src/internal/index.ts",
+    "./http": "./src/http.ts"
+  },
+  "publish": {
+    "include": [
+      "src/**/*.ts",
+      "README.md",
+      "LICENSE",
+      "package.json",
+      "jsr.json"
+    ],
+    "exclude": [
+      "src/**/__tests__",
+      "src/**/*.test.ts",
+      "src/**/*.spec.ts"
+    ]
+  }
+}

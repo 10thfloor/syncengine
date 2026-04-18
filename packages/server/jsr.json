@@ -1,0 +1,25 @@
+{
+  "name": "@syncengine/server",
+  "version": "0.1.0",
+  "description": "syncengine server runtime — defineWorkflow, heartbeat, webhook, entity runtime, bus dispatcher",
+  "exports": {
+    ".": "./src/index.ts",
+    "./workspace": "./src/workspace/workspace.ts",
+    "./serve": "./src/serve.ts",
+    "./test": "./src/test/index.ts"
+  },
+  "publish": {
+    "include": [
+      "src/**/*.ts",
+      "README.md",
+      "LICENSE",
+      "package.json",
+      "jsr.json"
+    ],
+    "exclude": [
+      "src/**/__tests__",
+      "src/**/*.test.ts",
+      "src/**/*.spec.ts"
+    ]
+  }
+}
