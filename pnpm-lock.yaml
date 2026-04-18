@@ -101,7 +101,7 @@ importers:
         specifier: ~5.9.0
         version: 5.9.3
       vite:
-        specifier: ^6.0.0
+        specifier: 6.4.2
         version: 6.4.2(@types/node@25.6.0)(tsx@4.21.0)
       vite-plugin-top-level-await:
         specifier: ^1.0.0
