@@ -36,7 +36,7 @@
 //     OrdersTab uses `useView({ allOrders })` to list orders, then each
 //     row opens its own `useEntity` subscription for live status updates.
 
-import { entity, integer, real, text, emit, publish, Access } from '@syncengine/core';
+import { entity, integer, real, text, emit, insert, publish, Access } from '@syncengine/core';
 import { orderIndex } from '../schema';
 import { orderEvents, OrderEvent } from '../events/orders.bus';
 
@@ -84,8 +84,8 @@ export const order = entity('order', {
     // Emits a row into `orderIndex` so the order appears in the
     // allOrders view. '$key' resolves to the entity key (order UUID).
     place(state, userId: string, productSlug: string, price: number, now: number) {
-      return emit(
-        {
+      return emit({
+        state: {
           ...state,
           status: 'placed' as const,
           userId,
@@ -93,17 +93,16 @@ export const order = entity('order', {
           price,
           createdAt: now,
         },
-        {
-          table: orderIndex,
-          record: {
+        effects: [
+          insert(orderIndex, {
             orderId: '$key',
             productSlug,
             userId,
             price,
             createdAt: now,
-          },
-        },
-      );
+          }),
+        ],
+      });
     },
 
     // ── Fulfillment transitions (OrdersTab advance button) ──────────

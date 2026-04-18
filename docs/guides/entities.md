@@ -37,10 +37,12 @@ export const order = defineEntity('order', {
   },
   handlers: {
     place(state, userId: string, total: number, now: number) {
-      return emit(
-        { ...state, status: 'placed' as const, total, createdAt: now },
-        { table: orderIndex, record: { orderId: '$key', userId, total, createdAt: now } },
-      );
+      return emit({
+        state: { ...state, status: 'placed' as const, total, createdAt: now },
+        effects: [
+          insert(orderIndex, { orderId: '$key', userId, total, createdAt: now }),
+        ],
+      });
     },
     pay(state)  { return { ...state, status: 'paid' as const }; },
     ship(state) { return { ...state, status: 'shipped' as const }; },
@@ -71,23 +73,14 @@ handlers: {
 
 ## Effects: `emit()`
 
-When a handler needs to do more than mutate state, wrap the return in `emit()`. Two forms:
+When a handler needs to do more than mutate state, wrap the return in `emit({ state, effects })`. Every effect builder (`insert()`, `publish()`) returns a tagged value; pass them in the `effects` array:
 
-**Legacy form** (inserts into tables):
-```ts
-return emit(
-  { ...state, status: 'placed' as const },
-  { table: orderIndex, record: { orderId: '$key', total: state.total } },
-);
-```
-
-**New form** (any effect type, including publishes):
 ```ts
 return emit({
   state: { ...state, status: 'paid' as const },
   effects: [
+    insert(orderIndex, { orderId: '$key', total: state.total }),
     publish(orderEvents, { orderId: state.id, event: 'paid', at: now }),
-    // more effects here — framework persists state + dispatches effects atomically
   ],
 });
 ```

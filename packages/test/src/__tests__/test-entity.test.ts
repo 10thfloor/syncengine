@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { entity, integer, text, real, emit } from '@syncengine/core';
+import { entity, integer, text, real, emit, insert, table, id } from '@syncengine/core';
 import { testEntity } from '../test-entity.js';
 
 // -- Minimal test entities (mirrors the demo patterns) -----------------------
@@ -13,6 +13,12 @@ const counter = entity('counter', {
     },
 });
 
+const orders = table('orders', {
+    id:     id(),
+    amount: real(),
+    status: text(),
+});
+
 const STATUSES = ['draft', 'placed', 'shipped'] as const;
 const ledger = entity('ledger', {
     state: {
@@ -22,10 +28,10 @@ const ledger = entity('ledger', {
     handlers: {
         place(state, amount: number) {
             if (state.status !== 'draft') throw new Error('Already placed');
-            return emit(
-                { ...state, status: 'placed' as const, total: amount },
-                { table: 'orders', record: { amount, status: 'placed' } },
-            );
+            return emit({
+                state: { ...state, status: 'placed' as const, total: amount },
+                effects: [insert(orders, { amount, status: 'placed' })],
+            });
         },
         ship(state) {
             if (state.status !== 'placed') throw new Error('Not placed');

@@ -108,10 +108,12 @@ Tables don't have `.write(...)` APIs. You write by emitting from entity handlers
 ```ts
 handlers: {
   place(state, userId: string, now: number) {
-    return emit(
-      { ...state, status: 'placed' as const },
-      { table: orderIndex, record: { orderId: '$key', userId, createdAt: now } },
-    );
+    return emit({
+      state: { ...state, status: 'placed' as const },
+      effects: [
+        insert(orderIndex, { orderId: '$key', userId, createdAt: now }),
+      ],
+    });
   },
 }
 ```

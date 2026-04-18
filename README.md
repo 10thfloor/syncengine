@@ -148,7 +148,7 @@ key, replayable after crashes.
 
 ```ts
 // src/entities/inventory.actor.ts
-import { entity, integer, emit } from '@syncengine/core';
+import { entity, integer, emit, insert } from '@syncengine/core';
 import { transactions } from '../schema';
 
 export const inventory = entity('inventory', {
@@ -159,19 +159,21 @@ export const inventory = entity('inventory', {
     },
     sell(state, userId: string, price: number, now: number) {
       if (state.stock <= 0) throw new Error('out of stock');
-      return emit(
-        { ...state, stock: state.stock - 1 },
-        { table: transactions, record: {
+      return emit({
+        state: { ...state, stock: state.stock - 1 },
+        effects: [
+          insert(transactions, {
             productSlug: '$key', userId, amount: price, timestamp: now,
-        }},
-      );
+          }),
+        ],
+      });
     },
   },
 });
 ```
 
-`emit(state, effect)` is atomic. The state transition and the row write
-commit together, or neither does.
+`emit({ state, effects })` is atomic. The state transition and every
+declared effect — inserts, publishes — commit together, or none do.
 
 <sub>→ [Guide: Entities](./docs/guides/entities.md)</sub>
 
@@ -220,9 +222,10 @@ import { z } from 'zod';
 
 export const orderEvents = bus('orderEvents', {
   schema: z.object({
-    orderId: z.string(),
-    event:   z.enum(['placed', 'paid', 'shipped']),
-    total:   z.number(),
+    orderId:       z.string(),
+    event:         z.enum(['placed', 'paid', 'shipped']),
+    total:         z.number(),
+    customerEmail: z.string().email(),
   }),
   retention: Retention.durableFor(days(30)),
   delivery:  Delivery.fanout(),
@@ -240,9 +243,10 @@ pay(state, req: { orderId: string; at: number }) {
     state: { ...state, status: 'paid' as const },
     effects: [
       publish(orderEvents, {
-        orderId: req.orderId,
-        event:   'paid',
-        total:   state.total,
+        orderId:       req.orderId,
+        event:         'paid',
+        total:         state.total,
+        customerEmail: state.customerEmail,
       }),
     ],
   });
@@ -268,43 +272,46 @@ import { defineWorkflow, on } from '@syncengine/server';
 import { Retry, seconds, days } from '@syncengine/core';
 import { orderEvents } from '../events/orders.bus';
 import { shipping } from '../services/shipping';
-import { notifications } from '../services/notifications';
+import { email } from '../services/email';
 
 export const shipOnPay = defineWorkflow('shipOnPay', {
   on:       on(orderEvents).where(e => e.event === 'paid'),
-  services: [shipping, notifications],
+  services: [shipping, email],
   retry:    Retry.exponential({ attempts: 2, initial: seconds(1), max: seconds(10) }),
 }, async (ctx, event) => {
   // 1. Ship it.
   const { trackingId } = await ctx.services.shipping.create(event.orderId);
 
-  // 2. Notify the customer.
-  await ctx.services.notifications.sendSlack({
-    channel: '#orders',
-    text:    `order ${event.orderId} shipped (${trackingId})`,
+  // 2. Confirm to the customer right away.
+  await ctx.services.email.send({
+    to:      event.customerEmail,
+    subject: `Your order is on its way`,
+    body:    `Tracking: ${trackingId}`,
   });
 
   // 3. Wait three real days — across restarts, deploys, crashes.
   await ctx.sleep(days(3));
 
   // 4. Follow up once the package has had time to arrive.
-  await ctx.services.notifications.sendSlack({
-    channel: '#orders',
-    text:    `how was your order ${event.orderId}? we'd love a review.`,
+  await ctx.services.email.send({
+    to:      event.customerEmail,
+    subject: `How was your order?`,
+    body:    `We'd love a review — takes 30 seconds.`,
   });
 
   // 5. Announce completion on the bus for anyone else who cares.
   await orderEvents.publish(ctx, {
-    orderId: event.orderId,
-    event:   'shipped',
-    total:   event.total,
+    orderId:       event.orderId,
+    event:         'shipped',
+    total:         event.total,
+    customerEmail: event.customerEmail,
   });
 });
 ```
 
-`ctx.services.shipping` and `ctx.services.notifications` are typed,
-inferred from the `services: [...]` tuple — no casts. Every `await` is
-a checkpoint: kill the server mid-`ctx.sleep` and the workflow resumes
+`ctx.services.shipping` and `ctx.services.email` are typed, inferred
+from the `services: [...]` tuple — no casts. Every `await` is a
+checkpoint: kill the server mid-`ctx.sleep` and the workflow resumes
 on schedule when it comes back up. Failures with a terminal status
 route to `orderEvents.dlq` automatically.
 
@@ -319,21 +326,23 @@ gateway, an email provider. Each service declaration is a **port** —
 an interface your domain depends on. The file body is its default
 **adapter**.
 
+The workflow above depends on two ports. Here's one of them:
+
 ```ts
-// src/services/shipping.ts
+// src/services/email.ts
 import { service } from '@syncengine/core';
 
-export const shipping = service('shipping', {
-  async create(orderId: string): Promise<{ trackingId: string }> {
-    return { trackingId: `trk_${orderId}` };
+export const email = service('email', {
+  async send(msg: { to: string; subject: string; body: string }): Promise<void> {
+    // Stubbed adapter — in prod, swap for SendGrid / Resend / SES.
+    console.log(`[email] ${msg.to} — ${msg.subject}`);
   },
 });
 ```
 
-Swap the adapter with `override(shipping, { create: async () => ({ trackingId: 'fake' }) })`
-in tests, or in `syncengine.config.ts` to point prod at a staging
-environment. Workflows only ever see the port; they can't tell the
-difference.
+Override the adapter in tests with `override(email, { send: async () => {} })`,
+or in `syncengine.config.ts` to point prod at a real provider. The
+workflow only ever sees the port; it can't tell the difference.
 
 <sub>→ [Guide: Services](./docs/guides/services.md)</sub>
 

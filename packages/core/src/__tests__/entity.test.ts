@@ -674,15 +674,6 @@ describe('emit() redesign — { state, effects } form', () => {
         expect(extractTriggers(result)).toBeUndefined();
     });
 
-    it('legacy emit(state, ...inserts) still works', () => {
-        const result = emit(
-            { count: 1 },
-            { table: notes, record: { body: 'legacy' } },
-        );
-        expect(result.count).toBe(1);
-        expect(extractEmits(result)).toHaveLength(1);
-    });
-
     it('triggers survive applyHandler validation', () => {
         const fakeWorkflow = { $tag: 'workflow' as const, $name: 'test', $handler: async () => {} };
         const e = defineEntity('triggerTest', {

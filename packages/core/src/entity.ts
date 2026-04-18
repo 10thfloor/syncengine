@@ -545,13 +545,13 @@ export function isEntity(x: unknown): x is AnyEntity {
 // instead, which preserves inference. See the review commit message
 // for the full rationale.
 
-// ── emit() — entity → table bridge ──────────────────────────────────────────
+// ── emit() — entity → effects bridge ────────────────────────────────────────
 //
-// `emit(newState, ...inserts)` lets a handler return new state AND declare
-// table rows that should be published as INSERT deltas to the sync pipeline.
-// The entity runtime extracts the inserts via `extractEmits()`, publishes
-// them to NATS, and persists only the clean state (Symbol keys are invisible
-// to JSON.stringify so they never leak into Restate's storage).
+// `emit({ state, effects })` lets a handler return new state AND declare
+// side-effects — table inserts via `insert()`, bus publishes via
+// `publish()`, workflow invocations via the deprecated `trigger()`. The
+// entity runtime extracts each effect from the return value, persists
+// the clean state, and dispatches the effects atomically.
 //
 // Handlers stay pure — `emit()` is just a return-value wrapper, not a
 // side-effecting call. The framework does the I/O.
@@ -594,28 +594,12 @@ type EmitRecord<TCols extends Record<string, ColumnDef<unknown>>> = {
       : InferRecord<TCols>[K];
 };
 
-/** A typed emit insert — validates the record shape against the target
- *  table's columns at compile time. */
-export interface TypedEmitInsert<T extends AnyTable> {
-  readonly table: T;
-  readonly record: EmitRecord<T['$columns']>;
-}
-
-/** @deprecated Use table references instead of string table names.
- *  Will be removed in a future major version. */
-export interface LegacyEmitInsert {
-  readonly table: string;
-  readonly record: Record<string, unknown>;
-}
-
-/** Normalize a typed or legacy emit insert to the runtime form. */
-function normalizeInsert(insert: TypedEmitInsert<AnyTable> | LegacyEmitInsert): EmitInsert {
-  if (typeof insert.table === 'string') {
-    return insert as EmitInsert;
-  }
+/** Normalize an `insert()` effect to its runtime form (table name as a
+ *  string + record shape). */
+function normalizeInsert(effect: { table: AnyTable; record: Record<string, unknown> }): EmitInsert {
   return {
-    table: (insert.table as AnyTable).$name,
-    record: insert.record as Record<string, unknown>,
+    table: effect.table.$name,
+    record: effect.record,
   };
 }
 
@@ -715,115 +699,78 @@ export function publish<T>(
 }
 
 /**
- * Wrap a handler's return state with table inserts that the entity
- * runtime will publish to the sync pipeline. The returned object IS
- * the new state — it just has a hidden Symbol property the framework
- * reads.
+ * Wrap a handler's return state with side-effects the entity runtime
+ * will dispatch atomically with the state write. Pass `state` alongside
+ * an `effects` array built from `insert(table, record)` and/or
+ * `publish(bus, payload)`. The returned object IS the new state — it
+ * just carries hidden Symbol properties the framework reads.
  *
- * All inserts in a single `emit()` call must target the same table
- * (the `T` generic is shared across the rest parameter). For
- * multi-table emits, use separate `emit()` calls or the legacy
- * string-based form.
+ * Non-enumerable Symbols: they must NOT survive
+ * `{ ...base, ...result }` spreading in `applyHandler`, otherwise
+ * stale effects bleed through to the next action during client-side
+ * `rebase`. `applyHandler` extracts effects from the raw handler
+ * result BEFORE the spread and re-attaches them to the validated
+ * output. JSON.stringify ignores all Symbols.
  *
  * ```ts
  * handlers: {
- *   transfer: (state, toId, amount) => emit(
- *     { ...state, balance: state.balance - amount },
- *     { table: transactions, record: { to: toId, amount } },
- *   ),
+ *   transfer: (state, toId, amount) => emit({
+ *     state: { ...state, balance: state.balance - amount },
+ *     effects: [insert(transactions, { to: toId, amount })],
+ *   }),
  * }
  * ```
  */
-/** New form: `emit({ state, effects })` — carries both inserts and triggers. */
 export function emit<S extends Record<string, unknown>>(
   opts: { state: S; effects: ReadonlyArray<{ readonly $effect: string }> },
-): S;
-/** Legacy form: `emit(state, ...inserts)` — typed table references. */
-export function emit<S extends Record<string, unknown>, T extends AnyTable>(
-  state: S,
-  ...inserts: TypedEmitInsert<T>[]
-): S;
-/** @deprecated Use table references instead of string table names. */
-export function emit<S extends Record<string, unknown>>(
-  state: S,
-  ...inserts: LegacyEmitInsert[]
-): S;
-export function emit<S extends Record<string, unknown>>(
-  stateOrOpts: S | { state: S; effects: ReadonlyArray<{ readonly $effect: string }> },
-  ...inserts: (TypedEmitInsert<AnyTable> | LegacyEmitInsert)[]
 ): S {
-  // Detect new { state, effects } form
-  if (
-    typeof stateOrOpts === 'object' &&
-    stateOrOpts !== null &&
-    'state' in stateOrOpts &&
-    'effects' in stateOrOpts &&
-    Array.isArray((stateOrOpts as { effects: unknown }).effects)
-  ) {
-    const { state, effects } = stateOrOpts as { state: S; effects: ReadonlyArray<{ readonly $effect: string }> };
-    const wrapped = { ...state };
+  const { state, effects } = opts;
+  const wrapped = { ...state };
 
-    // Separate effects into inserts, triggers, and publishes
-    const insertEffects: EmitInsert[] = [];
-    const triggerEffects: EmitTrigger[] = [];
-    const publishEffects: EmitPublish[] = [];
+  const insertEffects: EmitInsert[] = [];
+  const triggerEffects: EmitTrigger[] = [];
+  const publishEffects: EmitPublish[] = [];
 
-    for (const effect of effects) {
-      if (effect.$effect === 'insert') {
-        const typed = effect as unknown as { table: AnyTable; record: Record<string, unknown> };
-        // Validate value-object columns BEFORE normalize — gives a
-        // crisp error location ("handler 'pay' emitted an invalid Money
-        // on lineItems.price") instead of failing downstream at persist.
-        validateInsertValueColumns(typed);
-        insertEffects.push(normalizeInsert(typed));
-      } else if (effect.$effect === 'trigger') {
-        const typed = effect as unknown as { workflow: { $name: string }; input: unknown };
-        triggerEffects.push({ workflow: typed.workflow.$name, input: typed.input });
-      } else if (effect.$effect === 'publish') {
-        publishEffects.push(effect as unknown as EmitPublish);
-      }
+  for (const effect of effects) {
+    if (effect.$effect === 'insert') {
+      const typed = effect as unknown as { table: AnyTable; record: Record<string, unknown> };
+      // Validate value-object columns BEFORE normalize — gives a
+      // crisp error location ("handler 'pay' emitted an invalid Money
+      // on lineItems.price") instead of failing downstream at persist.
+      validateInsertValueColumns(typed);
+      insertEffects.push(normalizeInsert(typed));
+    } else if (effect.$effect === 'trigger') {
+      const typed = effect as unknown as { workflow: { $name: string }; input: unknown };
+      triggerEffects.push({ workflow: typed.workflow.$name, input: typed.input });
+    } else if (effect.$effect === 'publish') {
+      publishEffects.push(effect as unknown as EmitPublish);
     }
-
-    if (insertEffects.length > 0) {
-      Object.defineProperty(wrapped, EMIT_KEY, {
-        value: insertEffects,
-        enumerable: false,
-        configurable: true,
-      });
-    }
-
-    if (triggerEffects.length > 0) {
-      Object.defineProperty(wrapped, TRIGGER_KEY, {
-        value: triggerEffects,
-        enumerable: false,
-        configurable: true,
-      });
-    }
-
-    if (publishEffects.length > 0) {
-      Object.defineProperty(wrapped, PUBLISH_KEY, {
-        value: publishEffects,
-        enumerable: false,
-        configurable: true,
-      });
-    }
-
-    return wrapped as S;
   }
 
-  // Legacy form: emit(state, ...inserts)
-  const wrapped = { ...(stateOrOpts as S) };
-  const normalized = inserts.map(normalizeInsert);
-  // Non-enumerable: the symbol must NOT survive `{ ...base, ...result }`
-  // spreading in `applyHandler`, otherwise stale emits bleed through to
-  // the next action during client-side `rebase`. `applyHandler` extracts
-  // emits from the raw handler result BEFORE the spread and re-attaches
-  // them to the validated output. JSON.stringify ignores all Symbols.
-  Object.defineProperty(wrapped, EMIT_KEY, {
-    value: normalized,
-    enumerable: false,
-    configurable: true,
-  });
+  if (insertEffects.length > 0) {
+    Object.defineProperty(wrapped, EMIT_KEY, {
+      value: insertEffects,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (triggerEffects.length > 0) {
+    Object.defineProperty(wrapped, TRIGGER_KEY, {
+      value: triggerEffects,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (publishEffects.length > 0) {
+    Object.defineProperty(wrapped, PUBLISH_KEY, {
+      value: publishEffects,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
   return wrapped as S;
 }
 

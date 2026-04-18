@@ -3,7 +3,7 @@ import { createTestStore, type TestStore } from '../index.js';
 import {
     table, id, text, integer, real,
     view, sum, count, max,
-    entity, emit, EntityError,
+    entity, emit, insert, EntityError,
 } from '@syncengine/core';
 
 // ── Test schema ─────────────────────────────────────────────────────────────
@@ -52,10 +52,12 @@ const inventory = entity('inventory', {
     handlers: {
         sell(state, userId: string, price: number, now: number) {
             if (state.stock <= 0) throw new EntityError('OUT_OF_STOCK', 'No stock');
-            return emit(
-                { ...state, stock: state.stock - 1 },
-                { table: transactions, record: { productSlug: '$key', userId, amount: price, type: 'sale', timestamp: now } },
-            );
+            return emit({
+                state: { ...state, stock: state.stock - 1 },
+                effects: [
+                    insert(transactions, { productSlug: '$key', userId, amount: price, type: 'sale', timestamp: now }),
+                ],
+            });
         },
         restock(state, amount: number) {
             return { ...state, stock: state.stock + amount };

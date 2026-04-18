@@ -153,8 +153,6 @@ export type {
 export type {
     EmitInsert,
     EmitTrigger,
-    TypedEmitInsert,
-    LegacyEmitInsert,
     SourceProjectionDef,
     SourceProjections,
     SourceState,

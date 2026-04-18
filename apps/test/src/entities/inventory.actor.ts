@@ -31,7 +31,7 @@
 //   ActivityTab → useView({ salesByProduct, recentActivity, totalSales })
 //     └─ reads the rows emitted by sell(), rendered as a live dashboard
 
-import { entity, integer, text, emit, sourceCount, EntityError, Access } from '@syncengine/core';
+import { entity, integer, text, emit, insert, sourceCount, EntityError, Access } from '@syncengine/core';
 import { transactions } from '../schema';
 
 // Reservation TTL — if a client disappears, the lock auto-expires so
@@ -123,8 +123,8 @@ export const inventory = entity('inventory', {
         throw new EntityError('RESERVATION_EXPIRED', 'Reservation has expired');
       }
 
-      return emit(
-        {
+      return emit({
+        state: {
           ...state,
           stock: state.stock - 1,
           reserved: state.reserved - 1,
@@ -132,39 +132,37 @@ export const inventory = entity('inventory', {
           reservedAt: 0,
           totalSold: (state.totalSold ?? 0) + 1,
         },
-        {
-          table: transactions,
-          record: {
+        effects: [
+          insert(transactions, {
             productSlug: '$key',
             userId,
             amount: price,
             type: 'sale',
             timestamp: now,
-          },
-        },
-      );
+          }),
+        ],
+      });
     },
 
     // ── Refund: compensating transaction for order cancellation ────
     // Restocks the item and emits a negative-amount refund transaction.
     // Called by the cancellation workflow, not directly by the UI.
     refund(state, userId: string, price: number, now: number) {
-      return emit(
-        {
+      return emit({
+        state: {
           ...state,
           stock: state.stock + 1,
         },
-        {
-          table: transactions,
-          record: {
+        effects: [
+          insert(transactions, {
             productSlug: '$key',
             userId,
             amount: -price,
             type: 'refund',
             timestamp: now,
-          },
-        },
-      );
+          }),
+        ],
+      });
     },
   },
 });
