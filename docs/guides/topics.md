@@ -101,4 +101,4 @@ Topic tests usually mock the NATS connection. There isn't a dedicated harness â€
 
 - Core code: `packages/core/src/topic.ts`
 - Client hook: `packages/client/src/useTopic.ts`
-- Demo: `apps/test/src/topics/cursors.ts`
+- Demo: `apps/kitchen-sink/src/topics/cursors.ts`

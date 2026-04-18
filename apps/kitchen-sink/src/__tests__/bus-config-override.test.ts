@@ -7,7 +7,7 @@ import appConfig from '../../syncengine.config';
 import { loadConfigOverrides, busOverridesToModeOf } from '@syncengine/server';
 import { orderEvents } from '../events/orders.bus';
 
-describe('apps/test config overrides — orderEvents flips to inMemory under NODE_ENV=test', () => {
+describe('apps/kitchen-sink config overrides — orderEvents flips to inMemory under NODE_ENV=test', () => {
     it('loadConfigOverrides picks up the bus override when NODE_ENV=test', async () => {
         // Guard the test behind the env the config itself checks. Running
         // this under NODE_ENV !== 'test' is fine — overrides is undefined

@@ -550,7 +550,7 @@ directly.
 ## Status
 
 Pre-1.0. Core primitives are stable; the kitchen-sink demo in
-[`apps/test`](./apps/test) exercises every feature end-to-end against
+[`apps/kitchen-sink`](./apps/kitchen-sink) exercises every feature end-to-end against
 real Restate + NATS. APIs may still move before 1.0 — breaking changes
 will be called out in the changelog.
 

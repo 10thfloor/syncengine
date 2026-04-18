@@ -172,7 +172,7 @@ const next = applyHandler(order, 'place', { status: 'draft', total: 0, createdAt
 expect(next.status).toBe('placed');
 ```
 
-For the runtime (including `emit()` effects dispatch + entity projections), see `apps/test/src/__tests__/entities.test.ts`.
+For the runtime (including `emit()` effects dispatch + entity projections), see `apps/kitchen-sink/src/__tests__/entities.test.ts`.
 
 ## Footguns
 
@@ -185,4 +185,4 @@ For the runtime (including `emit()` effects dispatch + entity projections), see 
 - Spec: `docs/superpowers/specs/2026-04-13-entity-ref-workflow-design.md`
 - Core code: `packages/core/src/entity.ts`
 - Runtime: `packages/server/src/entity-runtime.ts`
-- Demo: `apps/test/src/entities/order.actor.ts`, `inventory.actor.ts`
+- Demo: `apps/kitchen-sink/src/entities/order.actor.ts`, `inventory.actor.ts`

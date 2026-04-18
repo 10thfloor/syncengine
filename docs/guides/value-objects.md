@@ -192,7 +192,7 @@ const sum = Money.ops.add(Money.create.usd(100), Money.create.usd(50));
 expect(sum.amount).toBe(150);
 ```
 
-For kitchen-sink integration (entity + table + bus all using value objects together), drive it through `createBusTestHarness` — see `apps/test/src/__tests__/value-objects.test.ts`.
+For kitchen-sink integration (entity + table + bus all using value objects together), drive it through `createBusTestHarness` — see `apps/kitchen-sink/src/__tests__/value-objects.test.ts`.
 
 ## `unsafe()` — loud on purpose
 
@@ -309,4 +309,4 @@ When a breaking change lands, route through the existing migrations system (`pac
 - Spec: `docs/superpowers/specs/2026-04-20-value-objects-design.md`
 - Plan: `docs/superpowers/plans/2026-04-21-value-objects.md`
 - Core code: `packages/core/src/value.ts`
-- Kitchen-sink demo: `apps/test/src/values/*.ts` + `apps/test/src/__tests__/value-objects.test.ts`
+- Kitchen-sink demo: `apps/kitchen-sink/src/values/*.ts` + `apps/kitchen-sink/src/__tests__/value-objects.test.ts`

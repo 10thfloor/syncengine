@@ -157,7 +157,7 @@ const merged = mergeRows(existing, incoming, { columns: products.$columns });
 expect(merged.price).toBe(incoming.price);  // LWW by HLC
 ```
 
-`apps/test/src/__tests__/views.test.ts` has richer examples including DBSP view pipelines.
+`apps/kitchen-sink/src/__tests__/views.test.ts` has richer examples including DBSP view pipelines.
 
 ## Common patterns
 
@@ -181,4 +181,4 @@ expect(merged.price).toBe(incoming.price);  // LWW by HLC
 - Bus harness code: `packages/server/src/test/bus-harness.ts`
 - Entity handler runtime: `packages/core/src/entity.ts`
 - Service override: `packages/core/src/overrides.ts`
-- Example specs: `apps/test/src/__tests__/`, `packages/server/src/__tests__/`
+- Example specs: `apps/kitchen-sink/src/__tests__/`, `packages/server/src/__tests__/`

@@ -283,4 +283,4 @@ Capture-only methods (`publishedOn(bus)`, `capturePublishEffects(state)`) work w
 - Spec: `docs/superpowers/specs/2026-04-20-event-bus-design.md`
 - Plans: `docs/superpowers/plans/2026-04-20-event-bus.md` (Phase 1), `...-phase-2a.md`, `...-phase-2b.md`
 - Migration: `docs/migrations/2026-04-20-trigger-to-publish.md`
-- Demo: `apps/test/src/events/orders.bus.ts` + workflows under `apps/test/src/workflows/`
+- Demo: `apps/kitchen-sink/src/events/orders.bus.ts` + workflows under `apps/kitchen-sink/src/workflows/`

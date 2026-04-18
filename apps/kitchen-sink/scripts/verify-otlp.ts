@@ -6,7 +6,7 @@
 // Usage:
 //   docker run -d --name jaeger -p 14318:4318 -p 16686:16686 \
 //     -e COLLECTOR_OTLP_ENABLED=true jaegertracing/all-in-one:latest
-//   bun apps/test/scripts/verify-otlp.ts
+//   bun apps/kitchen-sink/scripts/verify-otlp.ts
 //
 // Asserts:
 //   - bootSdk runs without error against a live collector

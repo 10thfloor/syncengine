@@ -148,4 +148,4 @@ CRDT merging happens per-column. Two clients can update different columns of the
 
 - Spec: `docs/superpowers/specs/2026-04-12-storefront-demo-design.md`
 - Core code: `packages/core/src/schema.ts`, `channels.ts`, `table.ts`
-- Demo: `apps/test/src/schema.ts`
+- Demo: `apps/kitchen-sink/src/schema.ts`

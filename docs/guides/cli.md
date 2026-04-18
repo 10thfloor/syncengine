@@ -54,7 +54,7 @@ syncengine add service payments
 # → src/services/payments.ts
 ```
 
-Supported kinds today: `bus`, `service`. Entity / workflow / webhook / heartbeat / table are defined inline (no scaffold yet — just copy a file from `apps/test/src/`).
+Supported kinds today: `bus`, `service`. Entity / workflow / webhook / heartbeat / table are defined inline (no scaffold yet — just copy a file from `apps/kitchen-sink/src/`).
 
 ## `syncengine dev`
 

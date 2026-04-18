@@ -47,4 +47,4 @@ The other guides — topics, webhooks, heartbeats, services — pull in when you
 - **Specs** at `docs/superpowers/specs/` — authoritative design docs for each primitive. Read when a guide says "for deeper dives, see the spec".
 - **Plans** at `docs/superpowers/plans/` — implementation plans for in-flight or shipped work. Useful for understanding how the current code got here.
 - **Migrations** at `docs/migrations/` — upgrade paths between breaking API changes.
-- **Kitchen-sink demo** at `apps/test/src/` — a real app exercising every primitive. Good to grep when a guide snippet isn't enough.
+- **Kitchen-sink demo** at `apps/kitchen-sink/src/` — a real app exercising every primitive. Good to grep when a guide snippet isn't enough.

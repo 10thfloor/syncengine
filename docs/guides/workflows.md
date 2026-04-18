@@ -190,4 +190,4 @@ The harness routes publishes through the same seam as production, fires subscrib
 - Spec: `docs/superpowers/specs/2026-04-13-entity-ref-workflow-design.md`
 - Server code: `packages/server/src/workflow.ts`
 - Entity-ref proxy: `packages/server/src/entity-ref.ts`
-- Demo: `apps/test/src/workflows/checkout.workflow.ts`, `ship-on-pay.workflow.ts`
+- Demo: `apps/kitchen-sink/src/workflows/checkout.workflow.ts`, `ship-on-pay.workflow.ts`

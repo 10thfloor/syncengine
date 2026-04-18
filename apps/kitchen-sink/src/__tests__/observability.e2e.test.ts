@@ -34,7 +34,7 @@ afterEach(async () => {
 
 async function bootWith(exporter: InMemorySpanExporter): Promise<SdkHandle> {
     const handle = await bootSdk({
-        config: { exporter: 'otlp', serviceName: 'apps/test e2e' },
+        config: { exporter: 'otlp', serviceName: 'apps/kitchen-sink e2e' },
         traceExporterOverride: exporter,
     });
     teardown.push(handle);

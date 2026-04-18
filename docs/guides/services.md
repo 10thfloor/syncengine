@@ -153,4 +153,4 @@ Three structural benefits:
 - Spec: `docs/superpowers/specs/2026-04-19-hexagonal-framework-design.md`
 - Core code: `packages/core/src/service.ts`, `overrides.ts`
 - Container: `packages/server/src/service-container.ts`
-- Demo: `apps/test/src/services/shipping.ts`, `notifications.ts`
+- Demo: `apps/kitchen-sink/src/services/shipping.ts`, `notifications.ts`
