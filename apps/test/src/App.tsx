@@ -87,7 +87,8 @@ function WorkspaceSwitcher() {
     setOpen(false);
   }, [input, setWorkspace]);
 
-  const isTransitioning = workspace.status !== "live" && workspace.status !== "error";
+  const isTransitioning =
+    workspace.status !== "live" && workspace.status !== "error";
 
   return (
     <div className="ws-switcher">
@@ -97,9 +98,16 @@ function WorkspaceSwitcher() {
       >
         <span className="ws-dot" />
         <span className="ws-id">{workspace.wsKey.slice(0, 10)}</span>
-        <span className="ws-status">{isTransitioning ? workspace.status : ""}</span>
+        <span className="ws-status">
+          {isTransitioning ? workspace.status : ""}
+        </span>
         <svg className="ws-chevron" width="10" height="10" viewBox="0 0 10 10">
-          <path d="M2.5 3.5L5 6L7.5 3.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
+          <path
+            d="M2.5 3.5L5 6L7.5 3.5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            fill="none"
+          />
         </svg>
       </button>
 
@@ -112,18 +120,29 @@ function WorkspaceSwitcher() {
                 <button
                   key={wsKey}
                   className={`ws-option ${wsKey === workspace.wsKey ? "ws-option-active" : ""}`}
-                  onClick={() => { setWorkspace(wsKey); setOpen(false); }}
+                  onClick={() => {
+                    setWorkspace(wsKey);
+                    setOpen(false);
+                  }}
                 >
                   <span className="ws-dot" />
                   <span className="ws-id">{wsKey.slice(0, 16)}</span>
-                  {wsKey === workspace.wsKey && <span className="ws-check">&#10003;</span>}
+                  {wsKey === workspace.wsKey && (
+                    <span className="ws-check">&#10003;</span>
+                  )}
                 </button>
               ))}
             </div>
           )}
           <div className="ws-section">
             <div className="ws-section-label">New workspace</div>
-            <form className="ws-new" onSubmit={(e) => { e.preventDefault(); handleSwitch(); }}>
+            <form
+              className="ws-new"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSwitch();
+              }}
+            >
               <input
                 type="text"
                 value={input}
@@ -131,7 +150,11 @@ function WorkspaceSwitcher() {
                 placeholder="workspace name"
                 autoFocus
               />
-              <button type="submit" className="btn btn-sm" disabled={!input.trim()}>
+              <button
+                type="submit"
+                className="btn btn-sm"
+                disabled={!input.trim()}
+              >
                 Create
               </button>
             </form>
@@ -146,21 +169,29 @@ function WorkspaceSwitcher() {
 
 export default function App() {
   const s = useStore<DB>();
-  const { ready, workspace, workerHealth, connection, connectionError } = s.use({ totalSales });
+  const { ready, workspace, workerHealth, connection, connectionError } = s.use(
+    { totalSales },
+  );
 
   const userId = useMemo(getUserId, []);
   const [activeTab, setActiveTab] = useState<Tab>("Catalog");
 
   return (
     <div className="app-shell">
-      {workerHealth === 'dead' && (
+      {workerHealth === "dead" && (
         <ErrorBanner>
-          Worker crashed — <button className="btn btn-sm" onClick={() => window.location.reload()}>reload page</button>
+          Worker crashed —{" "}
+          <button
+            className="btn btn-sm"
+            onClick={() => window.location.reload()}
+          >
+            reload page
+          </button>
         </ErrorBanner>
       )}
-      {connection === 'auth_failed' && (
+      {connection === "auth_failed" && (
         <ErrorBanner>
-          Authentication failed{connectionError ? `: ${connectionError}` : ''}
+          Authentication failed{connectionError ? `: ${connectionError}` : ""}
         </ErrorBanner>
       )}
       <div className="app-header">
@@ -173,9 +204,9 @@ export default function App() {
 
       {!ready ? (
         <div style={{ padding: "2rem", color: "#71717a" }}>
-          {workspace.status === 'error'
-            ? `Error: ${workspace.error ?? 'unknown'}`
-            : `${workspace.status === 'live' ? 'Loading' : workspace.status}…`}
+          {workspace.status === "error"
+            ? `Error: ${workspace.error ?? "unknown"}`
+            : `${workspace.status === "live" ? "Loading" : workspace.status}…`}
         </div>
       ) : (
         <>

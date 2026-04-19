@@ -14,6 +14,7 @@
     "@restatedev/restate-sdk": "1.13.0",
     "@syncengine/client": "workspace:*",
     "@syncengine/core": "workspace:*",
+    "@syncengine/observe": "workspace:*",
     "@syncengine/server": "workspace:*",
     "@syncengine/test-utils": "workspace:*",
     "react": "^19.0.0",
@@ -23,6 +24,8 @@
   "devDependencies": {
     "@syncengine/vite-plugin": "workspace:*",
     "@syncengine/cli": "workspace:*",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^2.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",
