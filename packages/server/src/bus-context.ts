@@ -117,7 +117,7 @@ export function installBusPublisher(
             // NATS path; the in-memory driver receives the message in
             // the same task and inherits the active span naturally.
             await instrument.busPublish(
-                { busName, workspace: resolveWorkspaceForMetrics(busContextStorage.getStore()) },
+                { busName, workspace: currentWorkspaceIdOrEmpty() },
                 async () => {
                     await opts.inMemoryDriver!.fanOut(busName, payload, ctx);
                 },
@@ -163,12 +163,12 @@ export function uninstallBusPublisher(): void {
     setBusPublisher(null);
 }
 
-/** For in-memory publishes that originate outside a BusContext frame
- *  (e.g. direct test harnesses), there's no workspace to tag. The
- *  observe span still fires for symmetry with the NATS path; we use
- *  an empty string so span attrs stay a string type. */
-function resolveWorkspaceForMetrics(bc: BusContext | undefined): string {
-    return bc?.workspaceId ?? '';
+/** Read the current ALS-frame workspace id, falling back to `''`
+ *  when no frame is installed (direct test harnesses that bypass
+ *  `runInBusContext`). The observe span still fires for symmetry
+ *  with the NATS path — empty string keeps the attr a string type. */
+function currentWorkspaceIdOrEmpty(): string {
+    return busContextStorage.getStore()?.workspaceId ?? '';
 }
 
 // The real `headers()` signature is `headers(code?: number, description?: string)`
