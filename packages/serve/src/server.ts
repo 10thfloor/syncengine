@@ -11,8 +11,19 @@ import { healthHandler, createReadinessHandler } from './health.ts';
 export interface CreateServerOptions {
     readonly distDir: string;
     readonly config: SyncengineConfig;
-    readonly natsUrl: string;
+    /** Restate URL this process reaches. Used for provisioning + RPC
+     *  proxy upstream. Internal to the deployment network. */
     readonly restateUrl: string;
+    /** NATS URL used by this process — currently unused server-side,
+     *  kept for symmetry. */
+    readonly natsUrl: string;
+    /** Optional override for the Restate URL injected into HTML meta.
+     *  Set when the browser reaches Restate on a different address
+     *  than this process does (e.g. Docker: server=http://restate:8080,
+     *  browser=http://localhost:18080). Falls back to restateUrl. */
+    readonly publicRestateUrl?: string;
+    /** Optional override for the NATS URL injected into HTML meta. */
+    readonly publicNatsUrl?: string;
     readonly gatewayUrl?: string;
     readonly assetsPrefix?: string;
     readonly resolveTimeoutMs?: number;
@@ -52,8 +63,10 @@ export async function createServer(opts: CreateServerOptions): Promise<ServerHan
         indexHtml,
         config: opts.config,
         provisionCache,
-        natsUrl: opts.natsUrl,
-        restateUrl: opts.restateUrl,
+        // Meta-tag injection prefers the public URL when provided —
+        // this is the address the BROWSER uses, not the server.
+        natsUrl: opts.publicNatsUrl ?? opts.natsUrl,
+        restateUrl: opts.publicRestateUrl ?? opts.restateUrl,
         ...(opts.gatewayUrl ? { gatewayUrl: opts.gatewayUrl } : {}),
         devMode: opts.devMode ?? false,
         ...(opts.resolveTimeoutMs !== undefined

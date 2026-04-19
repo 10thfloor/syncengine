@@ -18,7 +18,11 @@ export interface HtmlHandlerOptions {
     readonly natsUrl: string;
     /** URL threaded into the client via meta tag. */
     readonly restateUrl: string;
-    /** Optional gateway WS URL, omitted from meta if undefined. */
+    /** Optional gateway WS URL, omitted from meta if undefined.
+     *  Accepts either an absolute URL (`ws://edge.example.com/gateway`)
+     *  or the sentinel `/gateway` — the latter is expanded per-request
+     *  to `ws(s)://<Host>/gateway` so the same deployment works across
+     *  localhost and any hostname without reconfiguration. */
     readonly gatewayUrl?: string;
     /** Surface full platform error renders in 500 bodies (dev only). */
     readonly devMode: boolean;
@@ -69,11 +73,14 @@ export function createHtmlHandler(opts: HtmlHandlerOptions) {
             return renderError(err, opts.devMode, requestId);
         }
 
+        const resolvedGatewayUrl = opts.gatewayUrl
+            ? resolveGatewayUrl(opts.gatewayUrl, req)
+            : undefined;
         const meta: HtmlInjectorMeta = {
             workspaceId: wsKey,
             natsUrl: opts.natsUrl,
             restateUrl: opts.restateUrl,
-            ...(opts.gatewayUrl ? { gatewayUrl: opts.gatewayUrl } : {}),
+            ...(resolvedGatewayUrl ? { gatewayUrl: resolvedGatewayUrl } : {}),
         };
         const body = injector.inject(meta);
 
@@ -88,6 +95,24 @@ export function createHtmlHandler(opts: HtmlHandlerOptions) {
             headers: { ...INDEX_HTML_HEADERS, 'x-request-id': requestId },
         });
     };
+}
+
+/**
+ * Absolutize a gateway URL. Paths starting with `/` are expanded to
+ * `ws(s)://<Host>/<path>` using the request's Host header (and the
+ * forwarded-proto header if a reverse proxy stamped one). Already-
+ * absolute URLs are returned as-is.
+ */
+function resolveGatewayUrl(raw: string, req: Request): string {
+    if (!raw.startsWith('/')) return raw;
+    const host = req.headers.get('host') ?? 'localhost';
+    // Respect `X-Forwarded-Proto: https` from upstream proxies.
+    const forwardedProto = req.headers.get('x-forwarded-proto');
+    const wsProto =
+        forwardedProto === 'https' || new URL(req.url).protocol === 'https:'
+            ? 'wss'
+            : 'ws';
+    return `${wsProto}://${host}${raw}`;
 }
 
 function statusFor(err: SyncEngineError): number {

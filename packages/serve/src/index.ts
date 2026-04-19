@@ -58,10 +58,20 @@ async function main(argv: readonly string[]): Promise<void> {
 
     const logger = createLogger({ level: flags.logLevel, format: flags.logFormat });
 
-    // Required env vars.
+    // Required env vars (internal — how this process reaches infra).
     const natsUrl = process.env.SYNCENGINE_NATS_URL;
     const restateUrl = process.env.SYNCENGINE_RESTATE_URL;
-    const gatewayUrl = process.env.SYNCENGINE_GATEWAY_URL;
+    // Optional overrides — what the BROWSER uses. Set in split-network
+    // deploys where the edge reaches nats/restate via compose DNS but
+    // the browser reaches them via the host's published ports.
+    const publicNatsUrl = process.env.SYNCENGINE_NATS_PUBLIC_URL;
+    const publicRestateUrl = process.env.SYNCENGINE_RESTATE_PUBLIC_URL;
+    // If the gateway WebSocket proxy is active, advertise it to the
+    // client so connectGateway() runs instead of connectNats() and
+    // the browser never touches NATS directly. The proxy itself is
+    // wired below via SYNCENGINE_GATEWAY_UPSTREAM_URL.
+    const gatewayUrl = process.env.SYNCENGINE_GATEWAY_URL
+        ?? (process.env.SYNCENGINE_GATEWAY_UPSTREAM_URL ? '/gateway' : undefined);
     if (!natsUrl || !restateUrl) {
         const err = errors.cli(CliCode.ENV_MISSING, {
             message:
@@ -106,6 +116,8 @@ async function main(argv: readonly string[]): Promise<void> {
         config,
         natsUrl,
         restateUrl,
+        ...(publicNatsUrl ? { publicNatsUrl } : {}),
+        ...(publicRestateUrl ? { publicRestateUrl } : {}),
         ...(gatewayUrl ? { gatewayUrl } : {}),
         assetsPrefix: flags.assetsPrefix,
         resolveTimeoutMs: flags.resolveTimeoutMs,
