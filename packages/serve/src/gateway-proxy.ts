@@ -8,9 +8,11 @@
  * parallel WS to the upstream gateway, and pipes frames in both
  * directions. Close/error on either side tears the other down.
  *
- * Bun's `server.upgrade()` + `websocket` handlers carry per-connection
- * state via `data`; we stash the upstream client there so the message
- * callback can look it up in O(1).
+ * All lifecycle state lives on the per-connection `ClientData` that
+ * Bun carries via `server.upgrade(req, { data })` — the upstream
+ * listeners and the server-side WebSocket callbacks share it so
+ * frames arriving before either side's `open` event get queued
+ * and drained once both sides are ready.
  */
 
 import type { ServerWebSocket } from 'bun';
@@ -32,9 +34,12 @@ export interface GatewayProxyOptions {
 
 type ClientData = {
     readonly upstream: WebSocket;
-    /** Frames that arrived before the upstream finished opening. */
-    readonly pending: Array<string | ArrayBufferLike>;
+    /** Frames from the browser that arrived before upstream opened. */
+    readonly pendingToUpstream: Array<string | ArrayBufferLike>;
+    /** Frames from upstream that arrived before the browser ws opened. */
+    readonly pendingToClient: Array<string | ArrayBufferLike>;
     upstreamOpen: boolean;
+    clientWs: ServerWebSocket<ClientData> | null;
 };
 
 /**
@@ -57,60 +62,52 @@ export function tryUpgradeGateway(
 
     const upstream = new WebSocket(opts.upstreamUrl);
 
-    const data: ClientData = { upstream, pending: [], upstreamOpen: false };
+    const data: ClientData = {
+        upstream,
+        pendingToUpstream: [],
+        pendingToClient: [],
+        upstreamOpen: false,
+        clientWs: null,
+    };
 
-    // `server.upgrade` returns true when the response becomes 101. From
-    // this point on, only the ws handlers (open/message/close) fire on
-    // the client side.
     const upgraded = server.upgrade(req, { data });
     if (!upgraded) {
-        upstream.close();
+        try { upstream.close(); } catch { /* best effort */ }
         return false;
     }
 
-    // Wire upstream lifecycle. The ws client reference for the downstream
-    // browser is published to us in `open()`; until then, queue frames.
-    const queue: Array<string | ArrayBufferLike> = [];
-    let clientWs: ServerWebSocket<ClientData> | null = null;
-
     upstream.addEventListener('open', () => {
         data.upstreamOpen = true;
-        for (const frame of data.pending) {
-            upstream.send(frame);
+        // Drain client → upstream.
+        for (const frame of data.pendingToUpstream) {
+            try { upstream.send(frame); } catch { /* ignore */ }
         }
-        data.pending.length = 0;
-        for (const frame of queue) {
-            clientWs?.send(frame);
-        }
-        queue.length = 0;
+        data.pendingToUpstream.length = 0;
+        // Drain upstream → client only if the client ws is already
+        // live. If not, `open(ws)` below will handle it when ws opens.
+        maybeDrainToClient(data);
     });
 
     upstream.addEventListener('message', (ev) => {
-        const payload = ev.data as string | ArrayBuffer | Blob;
-        if (clientWs && clientWs.readyState === 1) {
-            clientWs.send(payload as string | ArrayBufferLike);
+        // Normalize ArrayBuffer / Blob / string into what
+        // ServerWebSocket.send accepts. Blob shouldn't appear over a
+        // Node-side upstream but guard anyway.
+        const payload = normalizeIncoming(ev.data);
+        if (data.clientWs && data.clientWs.readyState === 1) {
+            try { data.clientWs.send(payload); } catch { /* ignore */ }
         } else {
-            queue.push(payload as string | ArrayBufferLike);
+            data.pendingToClient.push(payload);
         }
     });
 
     upstream.addEventListener('close', (ev) => {
-        try { clientWs?.close(ev.code, ev.reason); } catch { /* best effort */ }
+        try { data.clientWs?.close(ev.code, ev.reason); } catch { /* best effort */ }
     });
 
     upstream.addEventListener('error', () => {
         opts.logger.warn({ event: 'gateway.upstream.error' });
-        try { clientWs?.close(1011, 'upstream error'); } catch { /* best effort */ }
+        try { data.clientWs?.close(1011, 'upstream error'); } catch { /* best effort */ }
     });
-
-    // Give the open handler a way to set clientWs via global state on
-    // the server. We publish clientWs through `data` — ws handlers
-    // receive `(ws: ServerWebSocket<ClientData>)` and can reach back
-    // through `ws.data` if needed, but the other direction (ws from
-    // data) needs the assignment below via the open callback.
-    (data as ClientData & { _setClient?: (ws: ServerWebSocket<ClientData>) => void })._setClient = (ws) => {
-        clientWs = ws;
-    };
 
     return true;
 }
@@ -123,30 +120,47 @@ export function tryUpgradeGateway(
 export function createGatewayWebsocketHandler(_opts: GatewayProxyOptions) {
     return {
         open(ws: ServerWebSocket<ClientData>) {
-            const setter = (ws.data as ClientData & { _setClient?: (ws: ServerWebSocket<ClientData>) => void })
-                ._setClient;
-            setter?.(ws);
-            // If upstream was opened synchronously (unlikely but
-            // possible), drain queued frames now.
-            // (handled in upstream.open listener via clientWs check)
+            ws.data.clientWs = ws;
+            // Drain anything that arrived from upstream while the
+            // client side was still upgrading.
+            maybeDrainToClient(ws.data);
         },
         message(ws: ServerWebSocket<ClientData>, message: string | Buffer) {
-            const { upstream, upstreamOpen, pending } = ws.data;
-            const frame =
-                typeof message === 'string'
-                    ? message
-                    : (message.buffer.slice(
-                          message.byteOffset,
-                          message.byteOffset + message.byteLength,
-                      ) as ArrayBufferLike);
-            if (upstreamOpen) {
-                upstream.send(frame as string | ArrayBufferLike);
+            const frame = normalizeIncoming(message);
+            if (ws.data.upstreamOpen) {
+                try { ws.data.upstream.send(frame); } catch { /* ignore */ }
             } else {
-                pending.push(frame);
+                ws.data.pendingToUpstream.push(frame);
             }
         },
         close(ws: ServerWebSocket<ClientData>, code: number, reason: string) {
             try { ws.data.upstream.close(code, reason); } catch { /* best effort */ }
         },
     };
+}
+
+function maybeDrainToClient(data: ClientData): void {
+    if (!data.upstreamOpen) return;
+    if (!data.clientWs || data.clientWs.readyState !== 1) return;
+    for (const frame of data.pendingToClient) {
+        try { data.clientWs.send(frame); } catch { /* ignore */ }
+    }
+    data.pendingToClient.length = 0;
+}
+
+function normalizeIncoming(
+    input: string | ArrayBuffer | Blob | Buffer | Uint8Array,
+): string | ArrayBufferLike {
+    if (typeof input === 'string') return input;
+    if (input instanceof ArrayBuffer) return input;
+    // Buffer / Uint8Array — slice out the backing ArrayBuffer view.
+    if ((input as Uint8Array).byteLength !== undefined) {
+        const view = input as Uint8Array;
+        return view.buffer.slice(
+            view.byteOffset,
+            view.byteOffset + view.byteLength,
+        ) as ArrayBufferLike;
+    }
+    // Blob: unexpected on the upstream side; treat as empty string.
+    return '';
 }
