@@ -117,6 +117,88 @@ describe('createLogger (json)', () => {
     });
 });
 
+describe('createLogger (trace correlation)', () => {
+    it('includes trace_id / span_id when the hook returns a context', () => {
+        const buf = capture();
+        const log = createLogger({
+            level: 'info',
+            format: 'json',
+            write: buf.write,
+            getTraceContext: () => ({
+                traceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                spanId: 'bbbbbbbbbbbbbbbb',
+            }),
+        });
+        log.info({ event: 'x' });
+        const rec = JSON.parse(buf.lines[0]!) as Record<string, unknown>;
+        expect(rec.trace_id).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+        expect(rec.span_id).toBe('bbbbbbbbbbbbbbbb');
+    });
+
+    it('omits trace_id / span_id when the hook returns undefined', () => {
+        const buf = capture();
+        const log = createLogger({
+            level: 'info',
+            format: 'json',
+            write: buf.write,
+            getTraceContext: () => undefined,
+        });
+        log.info({ event: 'x' });
+        const rec = JSON.parse(buf.lines[0]!) as Record<string, unknown>;
+        expect(rec.trace_id).toBeUndefined();
+        expect(rec.span_id).toBeUndefined();
+    });
+
+    it('hook is called per-emit so mid-request span changes land on later lines', () => {
+        const buf = capture();
+        let current: { traceId: string; spanId: string } | undefined = undefined;
+        const log = createLogger({
+            level: 'info',
+            format: 'json',
+            write: buf.write,
+            getTraceContext: () => current,
+        });
+        log.info({ event: 'before' });
+        current = { traceId: 'cccccccccccccccccccccccccccccccc', spanId: 'dddddddddddddddd' };
+        log.info({ event: 'during' });
+        current = undefined;
+        log.info({ event: 'after' });
+
+        const [before, during, after] = buf.lines.map(
+            (l) => JSON.parse(l) as Record<string, unknown>,
+        );
+        expect(before!.trace_id).toBeUndefined();
+        expect(during!.trace_id).toBe('cccccccccccccccccccccccccccccccc');
+        expect(after!.trace_id).toBeUndefined();
+    });
+
+    it('pretty format includes trace_id/span_id when present', () => {
+        const buf = capture();
+        const log = createLogger({
+            level: 'info',
+            format: 'pretty',
+            write: buf.write,
+            getTraceContext: () => ({
+                traceId: 'abc12345abc12345abc12345abc12345',
+                spanId: '1234567890abcdef',
+            }),
+        });
+        log.info({ event: 'req' });
+        const line = buf.lines[0]!;
+        expect(line).toContain('trace_id=abc12345abc12345abc12345abc12345');
+        expect(line).toContain('span_id=1234567890abcdef');
+    });
+
+    it('no hook configured → behaves as before (backward compatible)', () => {
+        const buf = capture();
+        const log = createLogger({ level: 'info', format: 'json', write: buf.write });
+        log.info({ event: 'x' });
+        const rec = JSON.parse(buf.lines[0]!) as Record<string, unknown>;
+        expect(rec.trace_id).toBeUndefined();
+        expect(rec.span_id).toBeUndefined();
+    });
+});
+
 describe('createLogger (pretty)', () => {
     it('does NOT emit JSON per line', () => {
         const buf = capture();

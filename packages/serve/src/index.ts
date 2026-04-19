@@ -54,7 +54,14 @@ async function main(argv: readonly string[]): Promise<void> {
         process.exit(2);
     }
 
-    const logger = createLogger({ level: flags.logLevel, format: flags.logFormat });
+    const logger = createLogger({
+        level: flags.logLevel,
+        format: flags.logFormat,
+        // Log-trace correlation: every emit checks for an active OTel
+        // span and stamps traceId/spanId on the line. When observability
+        // is disabled this returns undefined — the fields stay absent.
+        getTraceContext: instrument.getActiveTraceContext,
+    });
 
     // Required env vars (internal — how this process reaches infra).
     const natsUrl = process.env.SYNCENGINE_NATS_URL;

@@ -575,6 +575,20 @@ function traceHeaders(): TraceCarrier {
     return carrier;
 }
 
+/**
+ * Return the active trace context (traceId + spanId) for the current
+ * async frame, if any. Used by the serve logger's `getTraceContext`
+ * hook to stamp trace ids on every log line that fires inside a span.
+ * Consumers don't need to import `@opentelemetry/api` for this — the
+ * OTel dependency stays contained in observe.
+ */
+function getActiveTraceContext():
+    | { readonly traceId: string; readonly spanId: string }
+    | undefined {
+    const sc = trace.getActiveSpan()?.spanContext();
+    return sc ? { traceId: sc.traceId, spanId: sc.spanId } : undefined;
+}
+
 export const instrument = {
     entityEffect,
     request,
@@ -589,4 +603,5 @@ export const instrument = {
     markWebhookWorkspace,
     heartbeatTick,
     gatewayMessage,
+    getActiveTraceContext,
 };

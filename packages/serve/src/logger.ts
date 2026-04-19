@@ -1,10 +1,25 @@
 import type { LogLevel, LogFormat } from './flags.ts';
 
+/** W3C trace context for log correlation. Returned by the
+ *  `getTraceContext` hook on each emit — when a trace is active,
+ *  the logger injects traceId / spanId fields so an APM can jump
+ *  from a log line to the enclosing trace. The hook stays
+ *  dependency-free so the logger itself doesn't pull in OTel;
+ *  `serve/index.ts` wires it to `trace.getActiveSpan()` at boot. */
+export interface ActiveTraceContext {
+    readonly traceId: string;
+    readonly spanId: string;
+}
+
 export interface LoggerOptions {
     readonly level: LogLevel;
     readonly format: LogFormat;
     /** Write sink. Defaults to writing to stdout. */
     readonly write?: (line: string) => void;
+    /** Optional hook that returns the active trace context, if any.
+     *  Called on every emit — keep it cheap. Omitted → no trace
+     *  correlation. */
+    readonly getTraceContext?: () => ActiveTraceContext | undefined;
 }
 
 export type LogFields = Record<string, unknown>;
@@ -39,10 +54,18 @@ export function createLogger(opts: LoggerOptions): Logger {
     const threshold = LEVEL_ORDER[opts.level];
     const write = opts.write ?? ((line: string) => process.stdout.write(line + '\n'));
     const emit = opts.format === 'pretty' ? emitPretty : emitJson;
+    const getTraceContext = opts.getTraceContext;
 
     function at(level: LogLevel, fields: LogFields): void {
         if (LEVEL_ORDER[level] > threshold) return;
-        write(emit(level, fields));
+        // Inject trace ids at emit time (not construction) so each line
+        // sees the span active at the moment the log call fires.
+        // Absent hook / no active span → fields unchanged.
+        const tc = getTraceContext?.();
+        const enriched = tc
+            ? { ...fields, trace_id: tc.traceId, span_id: tc.spanId }
+            : fields;
+        write(emit(level, enriched));
     }
 
     return {
