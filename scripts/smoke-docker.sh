@@ -214,30 +214,40 @@ if [ "$RUN_BUSES" = "1" ]; then
     fi
     log "✓ happy path: shipOnPay invoked ($((happy_end - happy_start))s)"
 
-    # ── DLQ path (DROPPED — re-add in Phase 2c) ─────────────────────────
-    # TODO(Phase 2c): restore the DLQ path assertion once TerminalError
-    # propagation from Restate is wired through the dispatcher:
-    #
-    #   1. Restate 1.6 returns TerminalErrors as plain HTTP 500 with a
-    #      JSON body — the dispatcher currently treats any 500 as
-    #      `retriable` (bus-dispatcher.ts:postToRestate), so terminal
-    #      workflow throws exhaust JetStream max_deliver rather than
-    #      publishing a DeadEvent to `orderEvents.dlq`.
-    #   2. The shipOnPay workflow throws because `ctx.services` is not
-    #      populated by buildWorkflowObject() — hex-service injection
-    #      for workflows is still pending. Without it the DLQ path
-    #      can't even reach the intentional `fail-*` failure mode.
-    #
-    # Phase 2c (modifier phase) will tighten the dispatcher's
-    # terminal-vs-retriable classification and add services injection
-    # to buildWorkflowObject; once both land, restore:
-    #
-    #   rpc order/fail-O2/place ... rpc order/fail-O2/pay ...
-    #   poll sys_invocation_status for target_service_name =
-    #   'workflow_alertOnShippingFailure'
-    dlq_start="skipped"
-    dlq_end="skipped"
-    log "DLQ path: SKIPPED (see TODO in scripts/smoke-docker.sh — Phase 2c)"
+    # ── DLQ path ────────────────────────────────────────────────────────
+    # Phase 2a A6 + A7 landed the missing pieces:
+    #   A6: buildWorkflowObject() injects `ctx.services` on subscriber
+    #       workflows, so shipOnPay can actually call shipping.create()
+    #       and hit the `fail-*` terminal branch.
+    #   A7: the dispatcher classifies HTTP 500 from Restate as terminal
+    #       (Restate's ingress blocks until terminal state, so a 500 is
+    #       the workflow itself failing terminally — not infra). Those
+    #       get published to `orderEvents.dlq`, which alertOnShippingFailure
+    #       subscribes to.
+    dlq_start=$(date +%s)
+    log "DLQ path: POST /rpc/order/fail-O2/place"
+    rpc "order/fail-O2/place" '["bob","widget",10,0]' >/dev/null
+
+    log "DLQ path: POST /rpc/order/fail-O2/pay (shipping will throw → DLQ)"
+    rpc "order/fail-O2/pay" '{"orderId":"fail-O2","at":0}' >/dev/null
+
+    log "polling Restate for workflow_alertOnShippingFailure invocation (≤30s)"
+    # 30s budget: max_deliver=3 with 1s/10s/60s backoff would exceed this
+    # naively, but the TerminalError short-circuits retries on the very
+    # first delivery — dispatcher sees 500, classifies terminal, publishes
+    # DeadEvent. alertOnShippingFailure fires on the next consume tick.
+    dlq_ok=0
+    for i in $(seq 1 30); do
+        n=$(restate_query_count \
+            "SELECT target_service_name FROM sys_invocation_status WHERE target_service_name = 'workflow_alertOnShippingFailure'")
+        if [ "${n:-0}" -ge 1 ]; then dlq_ok=1; break; fi
+        sleep 1
+    done
+    dlq_end=$(date +%s)
+    if [ "$dlq_ok" != "1" ]; then
+        fail "no alertOnShippingFailure invocation visible in Restate admin within 30s — DLQ path stuck"
+    fi
+    log "✓ DLQ path: alertOnShippingFailure invoked ($((dlq_end - dlq_start))s)"
 
     # ── Consumer-reuse check ────────────────────────────────────────────
     # Durable JetStream consumers must survive an app-container restart.
@@ -286,6 +296,6 @@ if [ "$RUN_BUSES" = "1" ]; then
         || fail "expected exactly 1 bus:orderEvents_dlq:alertOnShippingFailure consumer after restart, got $after_alert (durable-name logic broken)"
     log "✓ consumer-reuse: durable consumers survived restart without duplication"
 
-    printf "✓ bus smoke passed (ws=%s happy=%ss dlq=%s)\n" \
-        "$wsKey" "$((happy_end - happy_start))" "$dlq_end"
+    printf "✓ bus smoke passed (ws=%s happy=%ss dlq=%ss)\n" \
+        "$wsKey" "$((happy_end - happy_start))" "$((dlq_end - dlq_start))"
 fi
