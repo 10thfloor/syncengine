@@ -568,6 +568,18 @@ export const TRIGGER_KEY: unique symbol = Symbol.for("syncengine.trigger");
  *  handler's return value. Mirrors EMIT_KEY + TRIGGER_KEY. */
 export const PUBLISH_KEY: unique symbol = Symbol.for("syncengine.publish");
 
+/** Well-known Symbol key used to carry emitted table removes on the
+ *  handler's return value. Mirrors EMIT_KEY — kept as a separate symbol
+ *  so extractors stay parallel (extractEmits / extractRemoves / ...). */
+export const REMOVE_KEY: unique symbol = Symbol.for("syncengine.remove");
+
+/** Well-known Symbol key used to carry emitted table updates on the
+ *  handler's return value. Third CRDT verb alongside inserts and
+ *  removes; the patch respects each column's configured merge
+ *  strategy, so `update(counter, 7, {clicks: 5})` on a `merge: 'add'`
+ *  column contributes +5, not LWW-overwrites. */
+export const UPDATE_KEY: unique symbol = Symbol.for("syncengine.update");
+
 /** A workflow trigger attached to a handler's return value via TRIGGER_KEY. */
 export interface EmitTrigger {
     readonly workflow: string;
@@ -640,6 +652,192 @@ export function insert<T extends AnyTable>(
     record: EmitRecord<T['$columns']>,
 ): { readonly $effect: 'insert'; readonly table: T; readonly record: EmitRecord<T['$columns']> } {
     return { $effect: 'insert', table: tableRef, record };
+}
+
+/** A row removal emitted by a handler. Runtime representation — the
+ *  table is carried as a string name, parallel to `EmitInsert`. The
+ *  entity runtime publishes one `{ type: 'DELETE', table, id }`
+ *  envelope to NATS per element so the data-worker delete path that
+ *  already handles client-initiated removes applies it unchanged. */
+export interface EmitRemove {
+    readonly table: string;
+    readonly id: unknown;
+}
+
+/** A typed emit remove — indexes through `$idKey` to pull the PK
+ *  column's inner type, so `remove(notes, ...)` takes whatever `notes.id`
+ *  is (today: `number`, via `id()`). Widens automatically if a future
+ *  column builder produces a string PK. */
+export interface TypedEmitRemove<T extends AnyTable> {
+    readonly $effect: 'remove';
+    readonly table: T;
+    readonly id: T['$columns'][T['$idKey']] extends ColumnDef<infer U> ? U : never;
+}
+
+/** Validate the id passed to `remove(table, id)` against the target
+ *  table's primary-key column kind. Catches `remove(notes, "abc")` when
+ *  `notes.id` is an integer before the DELETE ever hits the wire. */
+function validateRemoveId(r: { table: AnyTable; id: unknown }): void {
+    const idKey = r.table.$idKey;
+    const col = r.table.$columns[idKey];
+    if (!col) return;
+    const isFiniteNumber = typeof r.id === 'number' && Number.isFinite(r.id);
+    const isString = typeof r.id === 'string';
+    let ok: boolean;
+    switch (col.kind) {
+        case 'id':
+        case 'integer':
+            ok = isFiniteNumber;
+            break;
+        case 'text':
+            ok = isString;
+            break;
+        default:
+            ok = isFiniteNumber || isString;
+    }
+    if (!ok) {
+        throw errors.entity(EntityCode.TYPE_MISMATCH, {
+            message:
+                `remove(${r.table.$name}): primary-key column '${idKey}' (kind '${col.kind}') ` +
+                `rejected id value ${String(r.id)}.`,
+            hint: `Pass the id of the row to delete, matching the column's type.`,
+            context: { table: r.table.$name, field: idKey, kind: col.kind },
+        });
+    }
+}
+
+/** Normalize a typed remove to the runtime form (table name as string). */
+function normalizeRemove(r: { table: AnyTable; id: unknown }): EmitRemove {
+    return { table: r.table.$name, id: r.id };
+}
+
+/** Create a typed remove effect for use in `emit({ state, effects })`.
+ *
+ *  The handler passes the id of the row to delete — typically an id the
+ *  handler either inserted earlier (and stored in entity state) or
+ *  received as an argument. `remove` publishes a `DELETE` envelope
+ *  symmetric to the one `s.tables.X.remove(id)` sends on the client;
+ *  the same tombstone/LWW machinery applies. */
+export function remove<T extends AnyTable>(
+    tableRef: T,
+    id: TypedEmitRemove<T>['id'],
+): TypedEmitRemove<T> {
+    return { $effect: 'remove', table: tableRef, id } as TypedEmitRemove<T>;
+}
+
+/** A row update emitted by a handler. Runtime representation — the
+ *  table is carried as a string name, parallel to `EmitInsert` /
+ *  `EmitRemove`. The entity runtime publishes one `{ type: 'UPDATE',
+ *  table, id, patch }` envelope to NATS per element; the data-worker
+ *  merges each patched column against the existing row using the
+ *  column's configured `merge` strategy — the CRDT op for that path. */
+export interface EmitUpdate {
+    readonly table: string;
+    readonly id: unknown;
+    readonly patch: Record<string, unknown>;
+}
+
+/** A typed emit update — patch is a partial of the table's columns,
+ *  excluding the primary key (use delete+insert to change identity).
+ *  Immutable columns (`merge: false`) are caught at runtime; TS can't
+ *  inspect the merge flag off a ColumnDef at the type level today. */
+export interface TypedEmitUpdate<T extends AnyTable> {
+    readonly $effect: 'update';
+    readonly table: T;
+    readonly id: T['$columns'][T['$idKey']] extends ColumnDef<infer U> ? U : never;
+    readonly patch: Partial<Omit<EmitRecord<T['$columns']>, T['$idKey']>>;
+}
+
+/** Validate the patch passed to `update(table, id, patch)`:
+ *    - id kind matches the primary-key column
+ *    - patch does not touch the primary key (use delete+insert instead)
+ *    - patch does not touch columns configured with `merge: false`
+ *    - value-object columns are validated via the same path as inserts
+ *  Throws EntityError with a specific message on the first violation. */
+function validateUpdatePatch(u: { table: AnyTable; id: unknown; patch: Record<string, unknown> }): void {
+    const tableName = u.table.$name;
+    const idKey = u.table.$idKey;
+    const columns = u.table.$columns;
+
+    // 1. id kind matches PK
+    const idCol = columns[idKey];
+    if (idCol) {
+        const isFiniteNumber = typeof u.id === 'number' && Number.isFinite(u.id);
+        const isString = typeof u.id === 'string';
+        let ok: boolean;
+        switch (idCol.kind) {
+            case 'id':
+            case 'integer': ok = isFiniteNumber; break;
+            case 'text': ok = isString; break;
+            default: ok = isFiniteNumber || isString;
+        }
+        if (!ok) {
+            throw errors.entity(EntityCode.TYPE_MISMATCH, {
+                message:
+                    `update(${tableName}): primary-key column '${idKey}' (kind '${idCol.kind}') ` +
+                    `rejected id value ${String(u.id)}.`,
+                hint: `Pass the id of the row to update, matching the column's type.`,
+                context: { table: tableName, field: idKey, kind: idCol.kind },
+            });
+        }
+    }
+
+    // 2. Patch rejects PK
+    if (idKey in u.patch) {
+        throw errors.entity(EntityCode.TYPE_MISMATCH, {
+            message:
+                `update(${tableName}): patch may not touch primary-key column '${idKey}'. ` +
+                `Use remove() + insert() to change row identity.`,
+            hint: `Drop '${idKey}' from the patch.`,
+            context: { table: tableName, field: idKey },
+        });
+    }
+
+    // 3. Patch rejects immutable columns (merge: false)
+    for (const colName of Object.keys(u.patch)) {
+        const col = columns[colName];
+        if (!col) continue;
+        if (col.merge === null) {
+            // PK columns always have merge: null (not user-immutable, just
+            // out of scope above) — we've already handled the PK case, so
+            // any remaining merge:null is an explicit `merge: false` column.
+            if (colName === idKey) continue;
+            throw errors.entity(EntityCode.TYPE_MISMATCH, {
+                message:
+                    `update(${tableName}): column '${colName}' is immutable ` +
+                    `(declared with \`merge: false\`) and cannot be patched.`,
+                hint: `Change the column's merge strategy, or delete+insert the row to overwrite.`,
+                context: { table: tableName, field: colName },
+            });
+        }
+    }
+
+    // 4. Value-object columns validated the same way insert does
+    validateInsertValueColumns({ table: u.table, record: u.patch });
+}
+
+/** Normalize a typed update to the runtime form (string table name). */
+function normalizeUpdate(u: { table: AnyTable; id: unknown; patch: Record<string, unknown> }): EmitUpdate {
+    return { table: u.table.$name, id: u.id, patch: u.patch };
+}
+
+/** Create a typed update effect for use in `emit({ state, effects })`.
+ *
+ *  Applies `patch` to the row at `id`, respecting each column's
+ *  configured `merge` strategy. A column with `merge: 'add'` treats
+ *  the patched value as a contribution (counter semantics); a column
+ *  with `merge: 'lww'` uses HLC ordering to decide the winner. If the
+ *  row at `id` doesn't exist, the update is a silent no-op.
+ *
+ *  Patches may not touch the primary-key column (use remove+insert)
+ *  or columns declared with `merge: false`. Both are runtime rejections
+ *  raised before the effect hits the wire. */
+export function update<T extends AnyTable>(
+    tableRef: T,
+    id: TypedEmitUpdate<T>['id'],
+    patch: TypedEmitUpdate<T>['patch'],
+): TypedEmitUpdate<T> {
+    return { $effect: 'update', table: tableRef, id, patch } as TypedEmitUpdate<T>;
 }
 
 /** Test-only — resets the deprecation-warning latch so successive
@@ -728,6 +926,8 @@ export function emit<S extends Record<string, unknown>>(
   const wrapped = { ...state };
 
   const insertEffects: EmitInsert[] = [];
+  const removeEffects: EmitRemove[] = [];
+  const updateEffects: EmitUpdate[] = [];
   const triggerEffects: EmitTrigger[] = [];
   const publishEffects: EmitPublish[] = [];
 
@@ -739,6 +939,14 @@ export function emit<S extends Record<string, unknown>>(
       // on lineItems.price") instead of failing downstream at persist.
       validateInsertValueColumns(typed);
       insertEffects.push(normalizeInsert(typed));
+    } else if (effect.$effect === 'remove') {
+      const typed = effect as unknown as { table: AnyTable; id: unknown };
+      validateRemoveId(typed);
+      removeEffects.push(normalizeRemove(typed));
+    } else if (effect.$effect === 'update') {
+      const typed = effect as unknown as { table: AnyTable; id: unknown; patch: Record<string, unknown> };
+      validateUpdatePatch(typed);
+      updateEffects.push(normalizeUpdate(typed));
     } else if (effect.$effect === 'trigger') {
       const typed = effect as unknown as { workflow: { $name: string }; input: unknown };
       triggerEffects.push({ workflow: typed.workflow.$name, input: typed.input });
@@ -750,6 +958,22 @@ export function emit<S extends Record<string, unknown>>(
   if (insertEffects.length > 0) {
     Object.defineProperty(wrapped, EMIT_KEY, {
       value: insertEffects,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (removeEffects.length > 0) {
+    Object.defineProperty(wrapped, REMOVE_KEY, {
+      value: removeEffects,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  if (updateEffects.length > 0) {
+    Object.defineProperty(wrapped, UPDATE_KEY, {
+      value: updateEffects,
       enumerable: false,
       configurable: true,
     });
@@ -802,6 +1026,28 @@ export function extractPublishes(
 ): EmitPublish[] | undefined {
   return (state as Record<symbol, unknown>)[PUBLISH_KEY] as
     | EmitPublish[]
+    | undefined;
+}
+
+/** Extract table removes from a handler return value, if any. Parallel
+ *  to the other three extractors; the entity runtime reads this and
+ *  publishes one DELETE envelope per element to NATS. */
+export function extractRemoves(
+  state: Record<string, unknown>,
+): EmitRemove[] | undefined {
+  return (state as Record<symbol, unknown>)[REMOVE_KEY] as
+    | EmitRemove[]
+    | undefined;
+}
+
+/** Extract table updates from a handler return value, if any. Parallel
+ *  to the other extractors; the entity runtime reads this and publishes
+ *  one UPDATE envelope per element to NATS. */
+export function extractUpdates(
+  state: Record<string, unknown>,
+): EmitUpdate[] | undefined {
+  return (state as Record<symbol, unknown>)[UPDATE_KEY] as
+    | EmitUpdate[]
     | undefined;
 }
 
@@ -1070,17 +1316,22 @@ export function applyHandler(
 
   let next: Record<string, unknown>;
   let emits: EmitInsert[] | undefined;
+  let removes: EmitRemove[] | undefined;
+  let updates: EmitUpdate[] | undefined;
   let triggers: EmitTrigger[] | undefined;
   let publishes: EmitPublish[] | undefined;
   let rawResult: Record<string, unknown> | undefined;
   try {
     const result = handlerFn(base, ...args);
     rawResult = result as Record<string, unknown>;
-    // Capture emit()ed inserts, triggers, and publishes before the
-    // spread. All three Symbol keys are non-enumerable so spreads skip
-    // them, but validateEntityState rebuilds the object from its
-    // declared fields and drops the Symbols — re-attach below.
+    // Capture emit()ed inserts, removes, updates, triggers, and
+    // publishes before the spread. All five Symbol keys are
+    // non-enumerable so spreads skip them, but validateEntityState
+    // rebuilds the object from its declared fields and drops the
+    // Symbols — re-attach below.
     emits = extractEmits(rawResult);
+    removes = extractRemoves(rawResult);
+    updates = extractUpdates(rawResult);
     triggers = extractTriggers(rawResult);
     publishes = extractPublishes(rawResult);
     // Allow handlers to return a partial state — merge into the current
@@ -1170,6 +1421,27 @@ export function applyHandler(
   if (publishes) {
     Object.defineProperty(validated, PUBLISH_KEY, {
       value: publishes,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  // Re-attach table removes symmetrically — same reason as EMIT_KEY.
+  // Without this, a handler that returns emit({effects:[remove(...)]})
+  // silently drops the remove after validateEntityState rebuilds the
+  // state object.
+  if (removes) {
+    Object.defineProperty(validated, REMOVE_KEY, {
+      value: removes,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  // Re-attach table updates — same reason as EMIT_KEY / REMOVE_KEY.
+  if (updates) {
+    Object.defineProperty(validated, UPDATE_KEY, {
+      value: updates,
       enumerable: false,
       configurable: true,
     });

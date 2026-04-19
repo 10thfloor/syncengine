@@ -995,6 +995,13 @@ async function processConsumer(codec, source) {
                     _fromNats: true, _isReplay: isReplay,
                     _nonce: msg._nonce, _hlc: msg._hlc,
                 });
+            } else if (msg.type === 'UPDATE' && msg.table && msg.id !== undefined && msg.patch) {
+                broadcastDevtoolsMessage('delta', { channel: subject, seq: raw.seq, payload: msg });
+                await handleMessage({
+                    type: 'UPDATE', table: msg.table, id: msg.id, patch: msg.patch,
+                    _fromNats: true, _isReplay: isReplay,
+                    _nonce: msg._nonce, _hlc: msg._hlc,
+                });
             } else if (msg.type === 'RESET') {
                 broadcastDevtoolsMessage('delta', { channel: subject, seq: raw.seq, payload: msg });
                 // RESET wipes SQLite + DBSP unconditionally. The live-only
@@ -1181,7 +1188,7 @@ async function connectNats() {
 // ── Gateway transport ─────────────────────────────────────────────────────
 
 /**
- * Process a single incoming delta (INSERT/DELETE/RESET/SCHEMA_MIGRATION).
+ * Process a single incoming delta (INSERT/UPDATE/DELETE/RESET/SCHEMA_MIGRATION).
  * Shared between the JetStream consumer path and the gateway message path.
  */
 function processIncomingDelta(payload, seq) {
@@ -1189,6 +1196,8 @@ function processIncomingDelta(payload, seq) {
 
     if (payload.type === 'INSERT' && payload.table && payload.record) {
         handleInsert({ ...payload, _fromNats: true, _isReplay: isReplay });
+    } else if (payload.type === 'UPDATE' && payload.table && payload.id !== undefined && payload.patch) {
+        handleUpdate({ ...payload, _fromNats: true, _isReplay: isReplay });
     } else if (payload.type === 'DELETE' && payload.table) {
         handleDelete({ ...payload, _fromNats: true, _isReplay: isReplay });
     } else if (payload.type === 'RESET') {
@@ -2173,6 +2182,71 @@ function handleDelete(data) {
     deleteWithFullRetraction(tableName, deleteId, nonce);
 }
 
+/**
+ * Apply a partial-column update to a row.
+ *
+ * Tables are CRDT documents; each column's merge strategy is its CRDT
+ * op. Update is the partial-write verb alongside insert (full upsert)
+ * and delete (tombstone). The wire carries only the patch; each replica
+ * does read-modify-write locally so the final row respects per-column
+ * merge via DBSP's TableMergeState on the `+merged` delta.
+ *
+ * If the target row doesn't exist locally, the update is a silent
+ * no-op — matches how insert-with-existing-id is an upsert (neither
+ * verb fails when its assumed state isn't there).
+ */
+function handleUpdate(data) {
+    const { table: tableName, id: updateId, patch } = data;
+    const meta = tablesMeta[tableName];
+    if (!meta) {
+        console.warn('[worker] Unknown table:', tableName);
+        return;
+    }
+
+    const nonce = data._fromNats ? data._nonce : makeNonce();
+    const idCol = meta.columns[0];
+
+    const oldRows = db.exec(
+        `SELECT * FROM ${tableName} WHERE ${idCol} = ?`,
+        { bind: [updateId], rowMode: 'object' },
+    );
+    if (oldRows.length === 0) return;
+    const oldRow = oldRows[0];
+
+    const mergedRow = { ...oldRow, ...patch };
+
+    let hlcRetract;
+    let hlcInsert;
+    if (data._fromNats && data._hlc) {
+        hlcInsert = hlcMerge(data._hlc);
+        hlcRetract = hlcInsert;
+    } else {
+        hlcRetract = hlcTick();
+        hlcInsert = hlcTick();
+    }
+
+    const values = meta.columns.map((col) => mergedRow[col] ?? null);
+    db.exec(meta.insertSql, { bind: values });
+
+    const deltas = [
+        { source: tableName, record: oldRow, weight: -1, hlc: hlcRetract },
+        { source: tableName, record: mergedRow, weight: 1, hlc: hlcInsert },
+    ];
+
+    if (!data._fromNats && !data._localOnly) {
+        natsPublish({
+            type: 'UPDATE',
+            table: tableName,
+            id: updateId,
+            patch,
+            _nonce: nonce,
+            _hlc: hlcInsert,
+        });
+    }
+
+    stepEmitBroadcast(deltas, nonce);
+}
+
 function handleUndo() {
     if (undoStack.length === 0) return;
     const { table: undoTable, id: undoId } = undoStack.pop();
@@ -2364,6 +2438,7 @@ async function handleMessage(data) {
             handleSwitchWorkspace(data);
             return;
         case 'INSERT': return handleInsert(data);
+        case 'UPDATE': return handleUpdate(data);
         case 'DELETE': return handleDelete(data);
         case 'UNDO':   return handleUndo();
         case 'RESET':  return handleReset();

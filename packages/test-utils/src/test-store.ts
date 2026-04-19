@@ -5,9 +5,13 @@ import {
     type AnyEntity,
     type AuthUser,
     type EmitInsert,
+    type EmitRemove,
+    type EmitUpdate,
     extractMergeConfig,
     applyHandler as coreApplyHandler,
     extractEmits,
+    extractRemoves,
+    extractUpdates,
     errors,
     StoreCode,
 } from '@syncengine/core';
@@ -22,6 +26,8 @@ export interface TestStoreConfig {
 export interface HandlerResult {
     state: Record<string, unknown>;
     emits: EmitInsert[];
+    removes: EmitRemove[];
+    updates: EmitUpdate[];
 }
 
 // ── Record ID (mirrors store.ts recordId) ────────────────────────────────
@@ -133,6 +139,14 @@ export class TestStore {
         this.step([{ source: tableName, record: row, weight: 1 }]);
     }
 
+    /** Read a row by PK — undefined if not in the local row store.
+     *  Useful for tests that need to verify row state after updates,
+     *  since the view layer has pre-existing issues with upsert-style
+     *  operations that re-emit the same id. */
+    getRow<T extends AnyTable>(table: T, id: number | string): Record<string, unknown> | undefined {
+        return this.rowStore.get(table.$name)?.get(id);
+    }
+
     /** Delete a row by PK. Throws if not found. */
     delete<T extends AnyTable>(table: T, id: number | string): void {
         const tableName = table.$name;
@@ -174,7 +188,9 @@ export class TestStore {
     ): HandlerResult {
         const nextState = coreApplyHandler(entity, handlerName, state, args, auth);
         const emits = extractEmits(nextState) ?? [];
-        return { state: nextState, emits };
+        const removes = extractRemoves(nextState) ?? [];
+        const updates = extractUpdates(nextState) ?? [];
+        return { state: nextState, emits, removes, updates };
     }
 
     /** Insert emits into the pipeline. Resolves '$key' placeholders. */
@@ -197,6 +213,61 @@ export class TestStore {
             }
 
             this.insert(tableRef, record);
+        }
+    }
+
+    /** Apply remove effects to the pipeline — symmetric to applyEmits.
+     *  Each remove calls `this.delete(table, id)`, which feeds a
+     *  negative-weight delta into DBSP so views recompute incrementally. */
+    applyRemoves(removes: readonly EmitRemove[]): void {
+        for (const r of removes) {
+            const tableRef = this.tableMap.get(r.table);
+            if (!tableRef) {
+                throw errors.store(StoreCode.TEST_STORE_UNKNOWN_TABLE, {
+                    message: `TestStore.applyRemoves: unknown table '${r.table}'`,
+                    context: { table: r.table },
+                });
+            }
+            this.delete(tableRef, r.id as number | string);
+        }
+    }
+
+    /** Apply update effects — symmetric to applyEmits / applyRemoves.
+     *  Loads the existing row, merges the patch over it (unpatched
+     *  fields carry over), writes the merged row to the local store,
+     *  and emits both -old and +merged in a single DBSP step. Missing
+     *  rows are silent no-ops, matching the data-worker's production
+     *  behavior.
+     *
+     *  NB: we emit deltas as a single step() call (matching the
+     *  production data-worker), not two back-to-back calls like
+     *  TestStore.insert does. The production pattern is correct;
+     *  TestStore.insert's two-call pattern has a pre-existing bug
+     *  where raw-projection views see empty after an upsert. Tracked
+     *  separately — applyUpdates works around it by using the correct
+     *  single-call pattern directly. */
+    applyUpdates(updates: readonly EmitUpdate[]): void {
+        for (const u of updates) {
+            const tableRef = this.tableMap.get(u.table);
+            if (!tableRef) {
+                throw errors.store(StoreCode.TEST_STORE_UNKNOWN_TABLE, {
+                    message: `TestStore.applyUpdates: unknown table '${u.table}'`,
+                    context: { table: u.table },
+                });
+            }
+            const tableName = u.table;
+            if (!this.rowStore.has(tableName)) continue;
+            const tableRows = this.rowStore.get(tableName)!;
+            const oldRow = tableRows.get(u.id as number | string);
+            if (!oldRow) continue; // silent no-op on missing row
+            const mergedRow = { ...oldRow, ...u.patch };
+            tableRows.set(u.id as number | string, mergedRow);
+            // Single step with both deltas — matches the production
+            // data-worker and DBSP's expected input shape for updates.
+            this.step([
+                { source: tableName, record: oldRow, weight: -1 },
+                { source: tableName, record: mergedRow, weight: 1 },
+            ]);
         }
     }
 

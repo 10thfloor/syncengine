@@ -262,3 +262,13 @@ export type {
 // ── publish() effect — third effect type in emit({ effects }) ──────────────
 export { publish, extractPublishes, PUBLISH_KEY } from './entity';
 export type { EmitPublish } from './entity';
+
+export { remove, extractRemoves, REMOVE_KEY } from './entity';
+export type { EmitRemove, TypedEmitRemove } from './entity';
+
+export { update, extractUpdates, UPDATE_KEY } from './entity';
+
+// ── edge() — @experimental ──────────────────────────────────────────────
+export { edge, isEdge, Cardinality } from './edge';
+export type { EdgeDef, EdgeStep, AnyEdge } from './edge';
+export type { EmitUpdate, TypedEmitUpdate } from './entity';

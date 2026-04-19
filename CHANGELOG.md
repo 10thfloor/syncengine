@@ -9,6 +9,44 @@ and will be called out explicitly below.
 
 ## [Unreleased]
 
+### Added (experimental)
+
+- **`edge(name, from, to, { cardinality?, props? })` — @experimental.**
+  Thin typed sugar over a synthesized table with a `(from, to)` shape.
+  Edges ARE tables; writes go through the normal three-verb CRUD on
+  `edge.$table` or `s.tables.<edgeName>.*`. Reads compose
+  Gremlin-style: `edge.out(id)` / `edge.in(id)` start a traversal;
+  `.has(col, 'eq', val)` filters on props; `.out(nextEdge)` /
+  `.in(nextEdge)` hop; `.values()` terminates to a `ViewBuilder` of
+  target records. User-defined props are hoisted as column refs
+  (`tagged.weight`); the synthetic `from`/`to` stay internal. No
+  runtime cardinality enforcement (`$cardinality` is a type-level
+  hint — hard cardinality invariants belong on entities). No
+  fixpoint / transitive closure; chain explicit hops for n-hop
+  traversals. API will iterate based on real usage — no guide yet.
+
+### Added
+
+- **`update(table, id, patch)` — the third table verb.** Completes the
+  CRDT-native CRUD triplet (`insert`, `update`, `remove`), available
+  both as an entity `emit` effect and as `s.tables.X.update(id, patch)`
+  on the client. Each patched column respects its configured `merge`
+  strategy — the column schema *is* the CRDT op for that path. Patches
+  touching the primary key or `merge:false` columns are rejected at
+  handler time; missing rows make the update a silent no-op. Wire carries
+  only the patch; each replica performs read-modify-write against its
+  local row, and DBSP's `TableMergeState` resolves per-column merge on
+  the `+merged` delta at the view layer. New `UPDATE` NATS envelope
+  parallel to `INSERT`/`DELETE`; entity emits publish in the wire order
+  `INSERTs → UPDATEs → DELETEs`.
+
+- **`remove(table, id)` entity effect.** Entity handlers can now delete
+  table rows inside `emit({ state, effects: [...] })`, symmetric to
+  `insert()`. Removes flow through the same NATS subject and data-worker
+  consumer as client-initiated `s.tables.X.remove(id)`, so tombstone /
+  LWW behaviour is identical. Inserts publish before removes within a
+  single `emit()` call.
+
 ## [0.1.0] — 2026-04-23
 
 Initial public release.

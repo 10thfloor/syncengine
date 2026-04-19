@@ -33,6 +33,8 @@ import {
     extractEmits,
     extractTriggers,
     extractPublishes,
+    extractRemoves,
+    extractUpdates,
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
@@ -46,6 +48,8 @@ import {
     type EmitInsert,
     type EmitPublish,
     type EmitTrigger,
+    type EmitRemove,
+    type EmitUpdate,
 } from "@syncengine/core";
 import { instrument } from '@syncengine/observe';
 import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
@@ -166,6 +170,8 @@ async function runHandler(
     const rawEmits = extractEmits(validated);
     const rawTriggers = extractTriggers(validated);
     const rawPublishes = extractPublishes(validated);
+    const rawRemoves = extractRemoves(validated);
+    const rawUpdates = extractUpdates(validated);
     const emits = rawEmits
         ? resolveEmitPlaceholders(rawEmits, { entityKey, userId: user?.id ?? null })
         : undefined;
@@ -187,9 +193,21 @@ async function runHandler(
         : userState;
     await publishState(ctx, workspaceId, entity.$name, entityKey, broadcastState);
 
-    // Publish emitted table deltas to the entity-writes subject
-    if (emits && emits.length > 0) {
-        await publishTableDeltas(ctx, workspaceId, emits);
+    // Publish emitted table deltas to the entity-writes subject.
+    // Inserts, updates, and removes share a single ctx.run so they
+    // commit atomically. Within a single call the wire order is
+    // INSERTs → UPDATEs → DELETEs; handlers that need a different
+    // order must split across separate emit() calls.
+    const hasTableDeltas =
+        (emits?.length ?? 0) + (rawUpdates?.length ?? 0) + (rawRemoves?.length ?? 0) > 0;
+    if (hasTableDeltas) {
+        await publishTableDeltas(
+            ctx,
+            workspaceId,
+            emits ?? [],
+            rawUpdates ?? [],
+            rawRemoves ?? [],
+        );
     }
 
     // Dispatch workflow triggers from emit() effects
@@ -280,20 +298,28 @@ async function publishState(
     });
 }
 
-/** Publish emitted table rows to the `entity-writes` subject. The data
- *  worker subscribes to this subject alongside the channel subjects, so
- *  the rows flow through the same JetStream → DBSP pipeline as client
- *  inserts. Each insert gets its own message with a server-generated
- *  nonce so client-side dedup works correctly. */
+/** Publish emitted table deltas to the `entity-writes` subject. The
+ *  data worker subscribes alongside the channel subjects, so entity
+ *  writes flow through the same JetStream → DBSP pipeline as
+ *  client-initiated writes. Each message gets its own deterministic
+ *  nonce for client-side dedup.
+ *
+ *  Wire order within a single call: INSERTs → UPDATEs → DELETEs.
+ *  Handlers that need a different order must split across separate
+ *  emit() calls. */
 async function publishTableDeltas(
     ctx: restate.ObjectContext,
     workspaceId: string,
     inserts: readonly EmitInsert[],
+    updates: readonly EmitUpdate[],
+    removes: readonly EmitRemove[],
 ): Promise<void> {
     const subject = `ws.${workspaceId}.entity-writes`;
     // Generate deterministic nonces OUTSIDE ctx.run so Restate journal
     // replay produces identical values. ctx.rand is deterministic.
-    const nonces = inserts.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
+    const insertNonces = inserts.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
+    const updateNonces = updates.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
+    const removeNonces = removes.map(() => `restate-${ctx.key}-${ctx.rand.uuidv4()}`);
     await ctx.run("publish entity table deltas", async () => {
         const { getJetStream } = await import("./workspace/nats-client.js");
         const js = await getJetStream();
@@ -303,7 +329,26 @@ async function publishTableDeltas(
                 table: inserts[i]!.table,
                 record: inserts[i]!.record,
                 _clientId: "restate-entity-runtime",
-                _nonce: nonces[i],
+                _nonce: insertNonces[i],
+            }));
+        }
+        for (let i = 0; i < updates.length; i++) {
+            await js.publish(subject, JSON.stringify({
+                type: "UPDATE",
+                table: updates[i]!.table,
+                id: updates[i]!.id,
+                patch: updates[i]!.patch,
+                _clientId: "restate-entity-runtime",
+                _nonce: updateNonces[i],
+            }));
+        }
+        for (let i = 0; i < removes.length; i++) {
+            await js.publish(subject, JSON.stringify({
+                type: "DELETE",
+                table: removes[i]!.table,
+                id: removes[i]!.id,
+                _clientId: "restate-entity-runtime",
+                _nonce: removeNonces[i],
             }));
         }
     });

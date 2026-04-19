@@ -87,6 +87,68 @@ return emit({
 
 Effects run after state persists, all-or-nothing. A crash between state and effects resumes from the journal and re-runs the effects deterministically.
 
+### Available effects
+
+Tables are CRDT documents. Each column's `merge` strategy is its CRDT op for that path — `lww` for last-write-wins fields, `add` for counters, `set_union` for tag lists. Handlers mutate tables through three verbs, all respecting per-column merge:
+
+| Factory | Purpose | Notes |
+|---|---|---|
+| `insert(table, record)` | Upsert a full row (create or replace) | `'$key'` / `'$user'` placeholders resolve at publish time |
+| `update(table, id, patch)` | Merge a partial patch into an existing row | Patch respects each column's merge; rejects the PK column and `merge:false` columns |
+| `remove(table, id)` | Tombstone a row by primary key | Id must match the table's primary-key column kind |
+| `publish(bus, payload)` | Fire a typed event on a bus | Schema-validated at call time |
+| `trigger(wf, input)` | *(deprecated)* Invoke a named workflow | Migrate to `publish` + `on(bus)` subscribers |
+
+All three row verbs compose in a single `emit()` call — the framework publishes them in the wire order `INSERT → UPDATE → DELETE`, so a handler that replaces-and-deletes or inserts-and-patches sees deterministic ordering. Handlers that need a different order split across two `emit()` calls.
+
+### Updating rows — `update(table, id, patch)`
+
+```ts
+editBody(state, noteId: number, body: string) {
+  return emit({
+    state: { lastEditedId: noteId },
+    effects: [update(notes, noteId, { body })],
+  });
+}
+```
+
+The patch is a subset of the table's columns. Each patched column is merged against the existing row using the column's configured `merge` strategy — `update(counter, 7, {clicks: 5})` on a `merge: 'add'` column contributes +5 to the counter at the CRDT layer, not a last-write-wins overwrite. The merge strategy declared on the column *is* the CRDT op.
+
+Patches may not touch the primary-key column (use `remove` + `insert` to change row identity) or columns declared `merge: false`. Both are runtime rejections raised before the effect hits the wire.
+
+If the target row does not exist on the receiving replica, the update is a silent no-op — matching how `insert` silently upserts when its id is already present. Neither verb fails when its assumed state isn't there.
+
+The wire carries only the patch; each replica performs the read-modify-write locally against its own copy of the row. Concurrent updates converge via the same merge machinery that handles concurrent inserts.
+
+### Removing rows — `remove(table, id)`
+
+```ts
+toggle(state, rowId: number, noteId: number, userId: string) {
+  if (state.rowId !== 0) {
+    return emit({
+      state: { rowId: 0 },
+      effects: [remove(thumbs, state.rowId)],
+    });
+  }
+  return emit({
+    state: { rowId },
+    effects: [insert(thumbs, { id: rowId, noteId, userId })],
+  });
+}
+```
+
+Writes flow through the same NATS subject as client-initiated `s.tables.X.remove(id)` — same tombstone / LWW behaviour, same data-worker consumer. The id the handler passes must be stable across client-optimistic and server-authoritative runs of the same handler; the usual patterns are:
+
+1. **Caller-supplied id** — the client passes a stable id as a handler argument (like the `rowId` above).
+2. **Id in entity state** — the handler stored the id when it inserted and now uses `state.rowId`.
+3. **Compound natural key** — if the target table is keyed by `(userId, noteId)` rather than a synthetic `id()`, the handler removes by the natural key.
+
+Entity-emitted writes — both `insert` and `remove` — are **authoritative-only**: the optimistic client run discards effects and only reads state. Emitted rows materialise once the server's NATS publish reaches the replica. State updates remain optimistic.
+
+### Access and effects
+
+The handler's `access:` policy gates the entire call. A caller authorised to invoke a handler is authorised for every effect it emits; there is no per-effect policy surface. Denied callers never reach the handler body, so no effects are produced.
+
 ## State machines
 
 `transitions` is optional but powerful. Declare the allowed graph once:

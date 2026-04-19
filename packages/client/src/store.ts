@@ -100,6 +100,7 @@ interface InitMessage {
 
 interface InsertMessage { type: 'INSERT'; table: string; record: Record<string, unknown>; _noUndo?: boolean; _localOnly?: boolean }
 interface DeleteMessage { type: 'DELETE'; table: string; id: unknown }
+interface UpdateMessage { type: 'UPDATE'; table: string; id: unknown; patch: Record<string, unknown> }
 interface ResetMessage { type: 'RESET' }
 interface UndoMessage { type: 'UNDO' }
 interface TopicSubscribeMessage { type: 'TOPIC_SUBSCRIBE'; name: string; key: string }
@@ -131,7 +132,7 @@ type WorkerOutMessage =
         current: { created: string; firstSeq: number; lastSeq: number };
     };
 
-type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | ResetMessage | UndoMessage
+type WorkerInMessage = InitMessage | InsertMessage | DeleteMessage | UpdateMessage | ResetMessage | UndoMessage
     | TopicSubscribeMessage | TopicPublishMessage | TopicLeaveMessage | TopicUnsubscribeMessage;
 
 // ── User-facing config types ─────────────────────────────────────────────
@@ -177,6 +178,17 @@ type TableNamespace<TTables extends readonly AnyTable[]> = {
         ): void;
         /** Delete by primary key. */
         remove(id: T['$record'][T['$idKey']]): void;
+        /**
+         * Update a row by primary key, merging a partial patch into the
+         * existing row. Each patched column respects its configured
+         * `merge` strategy. Patches touching the primary key or columns
+         * declared with `merge: false` are rejected at runtime. If the
+         * row does not exist locally, the update is a silent no-op.
+         */
+        update(
+            id: T['$record'][T['$idKey']],
+            patch: Partial<Omit<T['$record'], T['$idKey']>>,
+        ): void;
         /**
          * Insert without undo tracking and without publishing to NATS.
          * Used by the seed lifecycle and for local-only fixture data.
@@ -964,6 +976,7 @@ export function store<
     const tableNs = {} as Record<string, {
         insert(record: Record<string, unknown>): void;
         remove(id: unknown): void;
+        update(id: unknown, patch: Record<string, unknown>): void;
         seed(record: Record<string, unknown>): void;
     }>;
 
@@ -978,6 +991,19 @@ export function store<
             },
             remove(id: unknown): void {
                 send({ type: 'DELETE', table: tableName, id });
+            },
+            update(id: unknown, patch: Record<string, unknown>): void {
+                // Reject patches touching the PK — symmetric with the
+                // entity-side validateUpdatePatch. Immutable-column
+                // rejection lives in the data-worker (not all replicas
+                // have column-merge metadata client-side).
+                if (idKey in patch) {
+                    throw new Error(
+                        `update(${tableName}): patch may not touch primary-key column '${idKey}'. ` +
+                        `Use remove() + insert() to change row identity.`,
+                    );
+                }
+                send({ type: 'UPDATE', table: tableName, id, patch });
             },
             seed(record: Record<string, unknown>): void {
                 const filled = { ...record };
