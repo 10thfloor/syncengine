@@ -32,6 +32,7 @@ import {
     applyHandler,
     extractEmits,
     extractTriggers,
+    extractPublishes,
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
@@ -41,6 +42,7 @@ import {
     SchemaCode,
     type AnyEntity,
     type EmitInsert,
+    type EmitPublish,
     type EmitTrigger,
 } from "@syncengine/core";
 import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
@@ -110,6 +112,7 @@ async function runHandler(
     // so published rows have the real key in SQLite, not the literal '$key'.
     const rawEmits = extractEmits(validated);
     const rawTriggers = extractTriggers(validated);
+    const rawPublishes = extractPublishes(validated);
     const emits = rawEmits?.map((ins) => {
         const hasPlaceholder = Object.values(ins.record).some((v) => v === '$key');
         if (!hasPlaceholder) return ins;
@@ -147,7 +150,36 @@ async function runHandler(
         dispatchWorkflowTriggers(ctx, rawTriggers);
     }
 
+    // Dispatch bus publishes from emit() effects. Each publish is its
+    // own ctx.run so Restate journals the NATS publish result; replays
+    // reuse the journaled outcome and don't double-publish.
+    if (rawPublishes && rawPublishes.length > 0) {
+        await publishBusEvents(ctx, workspaceId, rawPublishes);
+    }
+
     return { state: broadcastState };
+}
+
+/** Publish every `publish(bus, payload)` effect to NATS JetStream. The
+ *  subject shape matches the one gateway-core's BusDispatcher listens on
+ *  (`ws.<wsId>.bus.<busName>`) so subscriber workflows wake up via their
+ *  durable consumer. */
+async function publishBusEvents(
+    ctx: restate.ObjectContext,
+    workspaceId: string,
+    publishes: readonly EmitPublish[],
+): Promise<void> {
+    for (const pub of publishes) {
+        const subject = `ws.${workspaceId}.bus.${pub.bus.$name}`;
+        const body = JSON.stringify(pub.payload);
+        await ctx.run(`bus:${pub.bus.$name}:publish`, async () => {
+            const { connect } = await import("@nats-io/transport-node");
+            const nc = await connect({ servers: NATS_URL });
+            nc.publish(subject, body);
+            await nc.flush();
+            await nc.close();
+        });
+    }
 }
 
 /** Publish a state-update message via NATS core (ephemeral). The subject
