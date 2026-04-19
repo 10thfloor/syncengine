@@ -331,3 +331,12 @@ export {
     busContextStorage,
 } from './bus-context.js';
 export type { BusContext } from './bus-context.js';
+export {
+    BusManager,
+    realDispatcherFactory,
+} from './bus-manager.js';
+export type {
+    BusManagerConfig,
+    DispatcherFactory,
+    DispatcherHandle,
+} from './bus-manager.js';

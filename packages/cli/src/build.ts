@@ -193,10 +193,11 @@ function generateServerEntry(
         `import { fileURLToPath } from 'node:url';`,
         `import { dirname, join } from 'node:path';`,
         ``,
-        `import { startRestateEndpoint } from '@syncengine/server';`,
+        `import { startRestateEndpoint, BusManager, realDispatcherFactory, installBusPublisher } from '@syncengine/server';`,
         `import { startHttpServer } from '@syncengine/server/serve';`,
         `import { isEntity, isBus } from '@syncengine/core';`,
         `import { isWorkflow, isBusSubscriberWorkflow, isHeartbeat } from '@syncengine/server';`,
+        `import { connectNats } from '@syncengine/gateway-core';`,
         ``,
     ];
 
@@ -254,6 +255,37 @@ function generateServerEntry(
     lines.push(
         `const PORT = parseInt(process.env.PORT ?? '9080', 10);`,
         `await startRestateEndpoint(entities, workflows, PORT, heartbeats);`,
+        ``,
+    );
+
+    // Bus runtime — spawn a BusDispatcher per (workspace × subscriber)
+    // once the Restate endpoint is listening (so dispatched Restate
+    // invocations land on a ready service). Also wire the bus publisher
+    // seam so workflows / webhooks / heartbeats can call bus.publish(ctx,
+    // payload) imperatively (entity runtime has its own publish path).
+    // Runs in BOTH syncengine start AND SYNCENGINE_HANDLERS_ONLY modes —
+    // subscribers live in the handlers tier either way.
+    lines.push(
+        `if (workflows.some(isBusSubscriberWorkflow) || buses.length > 0) {`,
+        `    const natsUrl = process.env.SYNCENGINE_NATS_URL ?? 'ws://localhost:9222';`,
+        `    const restateUrl = process.env.SYNCENGINE_RESTATE_URL ?? 'http://localhost:8080';`,
+        `    installBusPublisher();`,
+        `    const busManager = new BusManager({`,
+        `        natsUrl,`,
+        `        restateUrl,`,
+        `        workflows,`,
+        `        dispatcherFactory: realDispatcherFactory,`,
+        `        installSignalHandlers: process.env.SYNCENGINE_NO_BUS_SIGNALS !== '1',`,
+        `    });`,
+        `    await busManager.start();`,
+        `    try {`,
+        `        const nc = await connectNats(natsUrl);`,
+        `        await busManager.attachToNats(nc);`,
+        "        console.log('[syncengine] bus runtime attached to ' + natsUrl);",
+        `    } catch (err) {`,
+        "        console.warn('[syncengine] bus runtime could not attach to NATS: ' + (err instanceof Error ? err.message : String(err)));",
+        `    }`,
+        `}`,
         ``,
     );
 
