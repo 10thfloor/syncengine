@@ -2,6 +2,7 @@
 export {
     SyncEngineError,
     UserHandlerError,
+    AccessDeniedError,
     errors,
     formatError,
     SchemaCode,
@@ -9,6 +10,7 @@ export {
     StoreCode,
     ConnectionCode,
     HandlerCode,
+    AuthCode,
     CliCode,
 } from './errors';
 
@@ -22,7 +24,9 @@ export type {
     StoreCodeValue,
     ConnectionCodeValue,
     HandlerCodeValue,
+    AuthCodeValue,
     CliCodeValue,
+    AccessDeniedErrorInit,
 } from './errors';
 
 // ── Schema DSL ──────────────────────────────────────────────────────────────
