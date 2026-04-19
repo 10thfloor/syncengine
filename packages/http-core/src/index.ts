@@ -8,10 +8,19 @@
 // injected HTML. Keeping the logic here is the single load-bearing decision
 // that prevents dev/prod drift in workspace resolution semantics.
 
-export { ProvisionCache } from './provision-cache.ts';
-export { createHtmlInjector, type HtmlInjectorMeta } from './html-injector.ts';
+export { ProvisionCache } from './provision-cache';
+export { createHtmlInjector, type HtmlInjectorMeta } from './html-injector';
 export {
     resolveWorkspace,
     type ResolvePipelineOptions,
     type ResolutionResult,
-} from './resolve.ts';
+} from './resolve';
+export {
+    isRpcError,
+    resolveWorkspaceId,
+    resolveWorkflowTarget,
+    resolveHeartbeatTarget,
+    resolveEntityTarget,
+    type RpcTarget,
+    type RpcError,
+} from './rpc-proxy';

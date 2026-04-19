@@ -8,8 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./workspace": "./src/workspace/workspace.ts",
-    "./serve": "./src/serve.ts",
-    "./rpc-proxy": "./src/rpc-proxy.ts"
+    "./serve": "./src/serve.ts"
   },
   "scripts": {
     "build": "tsc",
@@ -20,10 +19,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@nats-io/jetstream": "^3.3.1",
-    "@nats-io/transport-node": "^3.3.1",
-    "@restatedev/restate-sdk": "^1.13.0",
+    "@nats-io/jetstream": "3.3.1",
+    "@nats-io/transport-node": "3.3.1",
+    "@restatedev/restate-sdk": "1.13.0",
     "@syncengine/core": "workspace:*",
+    "@syncengine/http-core": "workspace:*",
     "ws": "^8.20.0"
   },
   "devDependencies": {

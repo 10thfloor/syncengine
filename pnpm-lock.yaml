@@ -160,7 +160,7 @@ importers:
   packages/client:
     dependencies:
       '@nats-io/transport-node':
-        specifier: ^3.3.1
+        specifier: 3.3.1
         version: 3.3.1
       '@sqlite.org/sqlite-wasm':
         specifier: 3.51.2-build8
@@ -280,17 +280,20 @@ importers:
   packages/server:
     dependencies:
       '@nats-io/jetstream':
-        specifier: ^3.3.1
+        specifier: 3.3.1
         version: 3.3.1
       '@nats-io/transport-node':
-        specifier: ^3.3.1
+        specifier: 3.3.1
         version: 3.3.1
       '@restatedev/restate-sdk':
-        specifier: ^1.13.0
+        specifier: 1.13.0
         version: 1.13.0
       '@syncengine/core':
         specifier: workspace:*
         version: link:../core
+      '@syncengine/http-core':
+        specifier: workspace:*
+        version: link:../http-core
       ws:
         specifier: ^8.20.0
         version: 8.20.0
@@ -349,10 +352,10 @@ importers:
   packages/vite-plugin:
     dependencies:
       '@nats-io/jetstream':
-        specifier: ^3.3.1
+        specifier: 3.3.1
         version: 3.3.1
       '@nats-io/transport-node':
-        specifier: ^3.3.1
+        specifier: 3.3.1
         version: 3.3.1
       '@syncengine/core':
         specifier: workspace:*

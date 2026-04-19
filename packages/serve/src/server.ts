@@ -5,6 +5,7 @@ import { provisionWorkspace } from '@syncengine/core/http';
 import type { SyncengineConfig } from '@syncengine/core';
 import { createStaticHandler } from './static.ts';
 import { createHtmlHandler } from './html.ts';
+import { createRpcHandler } from './rpc.ts';
 import { healthHandler, createReadinessHandler } from './health.ts';
 
 export interface CreateServerOptions {
@@ -60,6 +61,8 @@ export async function createServer(opts: CreateServerOptions): Promise<ServerHan
             : {}),
     });
 
+    const rpcHandler = createRpcHandler({ restateUrl: opts.restateUrl });
+
     const readiness = createReadinessHandler();
 
     return {
@@ -68,7 +71,7 @@ export async function createServer(opts: CreateServerOptions): Promise<ServerHan
             const path = url.pathname;
             // One request id per request — echo the caller's if present,
             // otherwise mint a fresh UUID. Handlers that already stamp it
-            // (html) win because we only set() on responses missing it.
+            // (html, rpc) win because we only set() on responses missing it.
             const requestId =
                 req.headers.get('x-request-id') ?? crypto.randomUUID();
 
@@ -76,8 +79,15 @@ export async function createServer(opts: CreateServerOptions): Promise<ServerHan
             if (path === '/_health') res = await healthHandler(req);
             else if (path === '/_ready') res = await readiness.handler(req);
             else {
-                const staticRes = await staticHandler(req);
-                res = staticRes ?? (await htmlHandler(req));
+                // RPC proxy owns `/__syncengine/rpc/*`; returns null for
+                // anything else so we can fall through to static/HTML.
+                const rpcRes = await rpcHandler(req);
+                if (rpcRes) {
+                    res = rpcRes;
+                } else {
+                    const staticRes = await staticHandler(req);
+                    res = staticRes ?? (await htmlHandler(req));
+                }
             }
             if (!res.headers.has('x-request-id')) {
                 res.headers.set('x-request-id', requestId);

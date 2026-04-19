@@ -34,7 +34,7 @@ import {
     resolveHeartbeatTarget,
     resolveEntityTarget,
     isRpcError,
-} from '@syncengine/server/rpc-proxy';
+} from '@syncengine/http-core';
 
 // ── Registry ────────────────────────────────────────────────────────────────
 

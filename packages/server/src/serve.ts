@@ -32,7 +32,7 @@ import {
     resolveHeartbeatTarget,
     resolveEntityTarget,
     isRpcError,
-} from './rpc-proxy.js';
+} from '@syncengine/http-core';
 import { GatewayServer } from './gateway/server.js';
 import type {
     SyncengineConfig,
