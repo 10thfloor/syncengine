@@ -171,12 +171,6 @@ with `authState.setError(null)` when the user dismisses.
 
 ## Known limitations
 
-- **Gateway-side workspace role lookup** — the gateway's `lookupRole`
-  is currently stubbed to `null`, so `Access.role(...)` at channel
-  subscribe rejects. `Access.authenticated` and `Access.owner()` work.
-  Entity-side role policies work because `entity-runtime` calls
-  `workspace.isMember` via Restate's in-context `objectClient`.
-
 - **Token refresh on long-lived WebSocket** — the `AuthProvider.refresh`
   hook exists on the server port, but there is no built-in client-side
   refresh loop. Your frontend auth SDK's own refresh mechanism should

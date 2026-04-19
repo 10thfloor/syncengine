@@ -54,6 +54,39 @@ export async function provisionWorkspace(
     }
 }
 
+/**
+ * POST to workspace.isMember on a Restate ingress. Returns the user's
+ * workspace role or `null` when the user is not a member.
+ *
+ * Used by the gateway's `AuthHook.authorizeChannel` to resolve roles
+ * for `Access.role(...)` policies. Runs outside a Restate context
+ * (gateway is a plain node process), so it goes through the ingress
+ * HTTP API rather than the in-context `objectClient`.
+ */
+export async function workspaceMemberRole(
+    restateUrl: string,
+    workspaceId: string,
+    userId: string,
+): Promise<string | null> {
+    const url = `${restateUrl.replace(/\/+$/, '')}/workspace/${encodeURIComponent(workspaceId)}/isMember`;
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userId }),
+    });
+    if (!res.ok) {
+        // Treat errors as "not a member" rather than crashing the
+        // subscribe path. Logs so operators see the failure.
+        // eslint-disable-next-line no-console
+        console.warn(
+            `[auth] workspace.isMember(${workspaceId}, ${userId}) → HTTP ${res.status}`,
+        );
+        return null;
+    }
+    const data = (await res.json()) as { isMember?: boolean; role?: string };
+    return data.isMember && typeof data.role === 'string' ? data.role : null;
+}
+
 // ── HTML meta tag injection ────────────────────────────────────────────────
 
 /**
