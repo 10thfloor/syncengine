@@ -231,7 +231,8 @@ export default defineConfig({
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StoreProvider } from '@syncengine/client';
-import App, { db } from './App';
+import App from './App';
+import { db } from './db';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -281,73 +282,42 @@ export const notesByAuthor = view(notes).aggregate([notes.author], {
 });
 `);
 
-    // ── src/entities/reactions.actor.ts
-    write(target, 'src/entities/reactions.actor.ts', `\
-import { defineEntity, integer } from '@syncengine/core';
+    // ── src/entities/focus.actor.ts
+    write(target, 'src/entities/focus.actor.ts', `\
+import { defineEntity, text, integer } from '@syncengine/core';
 
 /**
  * Tables vs entities — the core mental model.
  *
- * Tables are local state you also sync. Every client keeps a full
- * replica of the log, queries run on-device in SQLite, and offline
- * writes merge back in via CRDT when you reconnect.
+ * Tables (see \`notes\`, \`thumbs\` in schema.ts) are local state you
+ * also sync. Every client keeps a full replica of the log, queries run
+ * on-device in SQLite, and offline writes merge back in via CRDT.
  *
  * Entities are server state you subscribe to. The authoritative value
  * lives on a Restate virtual object, handlers execute serialized there,
  * and clients receive snapshots. No CRDT merge — the server is the
- * arbiter, so atomic counters and state machines stay exact no matter
+ * arbiter, so state machines and atomic counters stay exact no matter
  * how many tabs are writing.
  *
  * Rule of thumb:
  *   - table  → data you own and want offline / queryable locally
  *   - entity → shared state the server needs to referee
  *
- * This file is the counter flavor. \`REACTIONS\` is the single source
- * of truth — adding a new emoji is just one line here. The entity
- * state, handler, and UI all derive from it.
- */
-export const REACTIONS = [
-  { key: 'fire',  emoji: '🔥', label: 'fire'  },
-  { key: 'heart', emoji: '❤️', label: 'heart' },
-  { key: 'star',  emoji: '⭐', label: 'star'  },
-  { key: 'party', emoji: '🎉', label: 'party' },
-] as const;
-
-export type ReactionKey = (typeof REACTIONS)[number]['key'];
-
-export const reactions = defineEntity('reactions', {
-  state: {
-    fire: integer(),
-    heart: integer(),
-    star: integer(),
-    party: integer(),
-  },
-  handlers: {
-    bump(state, kind: ReactionKey) {
-      return { [kind]: state[kind] + 1 };
-    },
-    reset() {
-      return { fire: 0, heart: 0, star: 0, party: 0 };
-    },
-  },
-});
-`);
-
-    // ── src/entities/focus.actor.ts
-    write(target, 'src/entities/focus.actor.ts', `\
-import { defineEntity, text, integer } from '@syncengine/core';
-
-/**
- * The state-machine flavor of entity.
+ * This file is the state-machine flavor:
  *
  *   idle → running → done → idle
  *
  * \`transitions\` declares the legal edges. Restate rejects any handler
  * that tries to set \`status\` to a value that isn't reachable from the
- * current one, and the same guard runs client-side, so the UI can't
- * invent illegal actions. You get server-validated state transitions
- * for free — exactly what you'd reach for workflows, checkout flows,
- * ticket status, game rounds, etc.
+ * current one; the same guard runs client-side, so the UI can't invent
+ * illegal actions. You get server-validated state transitions for free
+ * — what you'd reach for to model workflows, checkout flows, ticket
+ * status, game rounds, etc.
+ *
+ * The pomodoro workflow (\`src/workflows/pomodoro.workflow.ts\`) calls
+ * \`focus.finish()\` via \`entityRef\` after a durable \`ctx.sleep\`,
+ * showing how entities compose with workflows: one canonical state
+ * machine, any number of server-side callers.
  */
 const STATUS = ['idle', 'running', 'done'] as const;
 
@@ -447,7 +417,7 @@ import { defineWorkflow, entityRef } from '@syncengine/server';
 import { focus } from '../entities/focus.actor';
 
 interface PomodoroInput {
-  key: string;         // focus entity key, usually 'global'
+  key: string;         // focus entity key — per-user, so client passes userId
   durationMs: number;  // how long to focus for
 }
 
@@ -480,162 +450,143 @@ export const pomodoro = defineWorkflow('pomodoro', async (ctx, input: PomodoroIn
 });
 `);
 
-    // ── src/App.tsx
-    write(target, 'src/App.tsx', `\
-import { useState, useMemo, useEffect, useRef } from 'react';
-import { store, useStore, useHeartbeat } from '@syncengine/client';
-import { notes, thumbs, stats, recentNotes, allThumbs, notesByAuthor } from './schema';
-import { reactions, REACTIONS } from './entities/reactions.actor';
-import { focus } from './entities/focus.actor';
-import { pulse } from './heartbeats/pulse.heartbeat';
-import { presence } from './topics/presence.topic';
-import { pomodoro } from './workflows/pomodoro.workflow';
+    // ── src/entities/inbox.actor.ts
+    write(target, 'src/entities/inbox.actor.ts', `\
+import { defineEntity, integer, emit } from '@syncengine/core';
+import { notes } from '../schema';
 
-// ── Store ────────────────────────────────────────────────────────
-export const db = store({
-  tables: [notes, thumbs] as const,
-  views: { stats, recentNotes, allThumbs, notesByAuthor },
+/**
+ * Inbox entity — the server-side ingest point used by the webhook.
+ *
+ * Webhook handlers run as Restate workflows, which can't write directly
+ * to the table pipeline. They \`entityRef\` an entity like this one;
+ * the entity's handler serializes the insert and \`emit()\`s a row into
+ * the \`notes\` table so every client materializes it through the same
+ * CRDT path as a typed note.
+ *
+ * Why bother with an entity at all? Because the entity runtime owns
+ * the bridge from Restate to the sync stream (NATS subject publishing
+ * with deterministic nonces). Routing webhook payloads through a
+ * named entity keeps the \`emit\` contract obvious and testable.
+ */
+export const inbox = defineEntity('inbox', {
+  state: {
+    received: integer(),
+  },
+  handlers: {
+    /** Called by the webhook workflow with a body pre-formatted string. */
+    receive(state, body: string, author: string, createdAt: number) {
+      return emit(
+        { received: state.received + 1 },
+        { table: notes, record: { body, author, createdAt } },
+      );
+    },
+  },
 });
+`);
 
-type DB = typeof db;
+    // ── src/webhooks/notify.webhook.ts
+    write(target, 'src/webhooks/notify.webhook.ts', `\
+import { webhook, entityRef } from '@syncengine/server';
+import { inbox } from '../entities/inbox.actor';
 
-// ── Author color (deterministic hue from name) ──────────────────
-function authorHue(name: string): number {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash) % 360;
+/**
+ * Webhooks are the primitive for inbound HTTP from external services:
+ * GitHub/Stripe/Slack, vendor partners, or a curl from your laptop.
+ * Each \`webhook()\` compiles to a Restate workflow keyed on the
+ * user-supplied \`idempotencyKey\`. That gives you four things for free:
+ *
+ *   - Signature verification before any body parsing (see \`verify\`).
+ *   - Workflow-per-key deduplication — repeat deliveries from the same
+ *     event id collapse to one handler execution, even across retries.
+ *   - Durable execution — the handler inherits Restate's journal so
+ *     crashes mid-flight resume where they left off.
+ *   - Fast ack — the HTTP response is a 202 as soon as the workflow is
+ *     scheduled; the handler runs async.
+ *
+ * Try it locally — the dev server exposes this at \`POST /webhooks/notify\`:
+ *
+ *   echo -n '{"text":"hello from curl","from":"me"}' > /tmp/body.json
+ *   SECRET=dev-secret
+ *   SIG=$(openssl dgst -sha256 -hmac "$SECRET" -hex < /tmp/body.json | awk '{print $2}')
+ *   curl -X POST http://localhost:5173/webhooks/notify \\
+ *     -H "content-type: application/json" \\
+ *     -H "x-signature: sha256=$SIG" \\
+ *     --data-binary @/tmp/body.json
+ *
+ * A new note appears in the feed instantly — the webhook handler calls
+ * the \`inbox\` entity which \`emit()\`s a row into the \`notes\` table,
+ * which syncs to every connected client through the same NATS + DBSP
+ * pipeline as your own typed notes.
+ *
+ * Production note: replace \`() => 'dev-secret'\` with a real secret
+ * from your env (\`() => process.env.NOTIFY_SECRET!\`) before shipping.
+ */
+interface NotifyPayload {
+  text: string;
+  from?: string;
 }
 
-// ── App ──────────────────────────────────────────────────────────
-export default function App() {
-  const s = useStore<DB>();
-  const { views, ready } = s.use({ stats, recentNotes, allThumbs, notesByAuthor });
-  const [input, setInput] = useState('');
+export const notify = webhook<'notify', NotifyPayload>('notify', {
+  path: '/notify',
 
-  const userId = useMemo(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('user') ?? 'anon';
-  }, []);
+  verify: {
+    scheme: 'hmac-sha256',
+    // Change to \`() => process.env.NOTIFY_SECRET!\` when you wire this to
+    // a real sender. For custom schemes (Stripe, Slack timestamped HMAC,
+    // Twilio), pass an async function \`(req, rawBody) => ...\` instead.
+    secret: () => 'dev-secret',
+    header: 'x-signature',
+  },
 
-  const hue = authorHue(userId);
-  const totalNotes = views.stats[0]?.totalNotes ?? 0;
+  // Every workspace's data is isolated. Pick something from the payload
+  // the sender can stamp; here we just use the configured default so
+  // curl against \`/webhooks/notify\` lands in the current workspace.
+  resolveWorkspace: () => 'default',
 
-  // Index thumbs by noteId once per render. Local scan over SQLite-backed
-  // view rows — no network, no subscription overhead.
-  const thumbsByNote = useMemo(() => {
-    const map = new Map<number, Array<{ id: number; userId: string }>>();
-    for (const t of views.allThumbs) {
-      const noteId = Number(t.noteId);
-      const arr = map.get(noteId) ?? [];
-      arr.push({ id: Number(t.id), userId: String(t.userId) });
-      map.set(noteId, arr);
-    }
-    return map;
-  }, [views.allThumbs]);
+  // Idempotency key = the sender's event id. Repeat deliveries with the
+  // same value dedupe. Here we fall back to the request id header so
+  // curl-from-the-shell still works while iterating.
+  idempotencyKey: (req, payload) => {
+    return (
+      req.headers.get('x-event-id') ??
+      \`notify-\${payload.text}-\${Date.now()}\`
+    );
+  },
 
-  function handleSubmit() {
-    const body = input.trim();
-    if (!body) return;
-    s.tables.notes.insert({ body, author: userId, createdAt: Date.now() });
-    setInput('');
-  }
+  // Duplicate-response policy. Some senders treat non-2xx as failure
+  // and retry forever; flip to '200' for those. Default '409' makes the
+  // dedup visible while debugging.
+  onDuplicate: '409',
 
-  function toggleThumb(noteId: number) {
-    const mine = (thumbsByNote.get(noteId) ?? []).find((t) => t.userId === userId);
-    if (mine) s.tables.thumbs.remove(mine.id);
-    else s.tables.thumbs.insert({ noteId, userId });
-  }
+  run: async (ctx, payload) => {
+    const author = payload.from ?? 'webhook';
+    const body = \`[notify] \${payload.text}\`;
 
-  if (!ready) {
-    return <div className="container"><p className="muted">Connecting...</p></div>;
-  }
+    // Fan out to the inbox entity — one instance per workspace, stable
+    // key so the counter accumulates across events. \`entityRef\` lifts
+    // the workspace id out of the workflow's own key automatically.
+    const inboxRef = entityRef(ctx, inbox, 'main');
+    await inboxRef.receive(body, author, Date.now());
+  },
+});
+`);
 
-  return (
-    <div className="container">
-      <header>
-        <h1>syncengine</h1>
-        <div className="badges">
-          <WorkspaceSwitcher />
-          <span className="badge" style={{ background: \`hsl(\${hue}, 70%, 40%)\` }}>
-            {userId}
-          </span>
-          <span className="badge badge-muted">
-            {totalNotes} note{totalNotes !== 1 ? 's' : ''}
-          </span>
-        </div>
-      </header>
+    // ── Hex: services directory (empty placeholder)
+    write(target, 'src/services/.gitkeep', '');
 
-      <div className="input-row">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-          placeholder="Type a note and press Enter..."
-          autoFocus
-        />
-      </div>
+    // ── src/components/WorkspaceSwitcher.tsx
+    write(target, 'src/components/WorkspaceSwitcher.tsx', `\
+import { useState, useEffect, useMemo, useRef } from 'react';
 
-      <div className="feed">
-        {views.recentNotes.map((n) => {
-          const h = authorHue(String(n.author));
-          const noteId = Number(n.id);
-          const rows = thumbsByNote.get(noteId) ?? [];
-          const thumbCount = rows.length;
-          const thumbed = rows.some((t) => t.userId === userId);
-          return (
-            <div key={String(n.id)} className="note-card">
-              <span className="note-author" style={{ color: \`hsl(\${h}, 70%, 65%)\` }}>
-                {String(n.author)}
-              </span>
-              <span className="note-body">{String(n.body)}</span>
-              <button
-                className={\`thumb \${thumbed ? 'thumbed' : ''}\`}
-                onClick={() => toggleThumb(noteId)}
-                title={thumbed ? 'remove thumbs-up' : 'thumbs-up'}
-              >
-                👍{thumbCount > 0 && <span className="thumb-count">{thumbCount}</span>}
-              </button>
-              <span className="note-time">
-                {new Date(Number(n.createdAt)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </span>
-            </div>
-          );
-        })}
-        {views.recentNotes.length === 0 && (
-          <p className="muted" style={{ textAlign: 'center', padding: '2rem' }}>
-            No notes yet. Type something above!
-          </p>
-        )}
-      </div>
+/**
+ * Header pill that lists previously-visited workspaces and lets the
+ * user create or switch between them. Each workspace is a fully
+ * isolated data scope (separate NATS stream, SQLite replica, entity
+ * state); switching navigates via URL param so the target is
+ * bookmarkable and the whole React tree + worker remount cleanly.
+ */
 
-      <Leaderboard rows={views.notesByAuthor} />
-      <Focus />
-      <Reactions />
-      <Heartbeat />
-      <Presence userId={userId} hue={hue} />
-
-      <footer>
-        Open another tab with{' '}
-        <code>?user=bob</code>{' '}
-        to see real-time sync. Switch workspaces with{' '}
-        <code>?workspace=team-b</code>.
-      </footer>
-    </div>
-  );
-}
-
-// ── WorkspaceSwitcher ──────────────────────────────────────────
-// Switch between workspaces by URL query param; each is a fully
-// isolated data scope (separate NATS stream, SQLite replica, entity
-// state). Previously-visited workspaces are remembered in
-// localStorage so the dropdown builds up as the user explores.
-//
-// We reload the page on switch rather than calling store.setWorkspace()
-// — simpler teardown (every subscription + worker gets fresh), and
-// the URL stays bookmarkable / shareable.
 const WS_STORAGE_KEY = 'syncengine:workspaces';
 const WS_DEFAULT = 'default';
 const WS_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$/;
@@ -665,7 +616,7 @@ function currentWorkspaceFromUrl(): string {
   return new URL(window.location.href).searchParams.get('workspace') ?? WS_DEFAULT;
 }
 
-function WorkspaceSwitcher() {
+export function WorkspaceSwitcher() {
   const current = useMemo(currentWorkspaceFromUrl, []);
   const [known, setKnown] = useState<string[]>(() => loadKnownWorkspaces(current));
   const [open, setOpen] = useState(false);
@@ -810,48 +761,208 @@ function WorkspaceSwitcher() {
     </div>
   );
 }
+`);
 
-// ── Leaderboard (grouped DBSP view: notes per author) ───────────
-// Pure read of a server-pushed aggregate — every tab sees the
-// same incrementally-maintained counts.
-function Leaderboard({ rows }: { rows: ReadonlyArray<{ readonly author: unknown; readonly count: unknown }> }) {
-  if (rows.length === 0) return null;
-  const sorted = [...rows].sort((a, b) => Number(b.count) - Number(a.count)).slice(0, 5);
-  const max = Math.max(...sorted.map((r) => Number(r.count)), 1);
+    // ── src/db.ts
+    write(target, 'src/db.ts', `\
+import { store } from '@syncengine/client';
+import { notes, thumbs, stats, recentNotes, allThumbs, notesByAuthor } from './schema';
+
+/**
+ * The reactive store. One instance per page load; every hook
+ * (useStore / useEntity / useHeartbeat / useTopic) reads from here.
+ */
+export const db = store({
+  tables: [notes, thumbs] as const,
+  views: { stats, recentNotes, allThumbs, notesByAuthor },
+});
+
+export type DB = typeof db;
+`);
+
+    // ── src/lib/authorHue.ts
+    write(target, 'src/lib/authorHue.ts', `\
+/**
+ * Deterministic hue (0-359) derived from any string — used by the UI
+ * to color-code author names across the feed, leaderboard, and badges.
+ * Same input always produces the same color, so 'alice' looks the
+ * same shade of purple everywhere she shows up.
+ */
+export function authorHue(name: string): number {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 360;
+}
+`);
+
+    // ── src/components/Presence.tsx
+    write(target, 'src/components/Presence.tsx', `\
+import { useEffect } from 'react';
+import { useStore } from '@syncengine/client';
+import { presence } from '../topics/presence.topic';
+import type { DB } from '../db';
+
+/**
+ * Ephemeral "who's here" strip, powered by a NATS-core topic. Each
+ * tab publishes its userId + color on mount and leaves on unmount —
+ * no DB writes, no Restate calls. Peers naturally disappear from the
+ * list when they close their tab (TTL-reaped by the framework).
+ */
+export function Presence({ userId, hue }: { userId: string; hue: number }) {
+  const s = useStore<DB>();
+  const { peers, publish, leave } = s.useTopic(presence, 'global');
+
+  useEffect(() => {
+    publish({ userId, color: \`hsl(\${hue}, 70%, 50%)\` });
+    const interval = setInterval(() => publish({ userId, color: \`hsl(\${hue}, 70%, 50%)\` }), 5000);
+    const onLeave = () => leave();
+    window.addEventListener('beforeunload', onLeave);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', onLeave);
+      leave();
+    };
+  }, [userId, hue, publish, leave]);
+
+  const others = Array.from(peers.values()).filter((p) => p.userId !== userId);
+  if (others.length === 0) {
+    return (
+      <div className="presence">
+        <span className="focus-label">live</span>
+        <span className="muted">just you — open another tab to see presence</span>
+      </div>
+    );
+  }
   return (
-    <section className="leaderboard">
-      <h2>top authors</h2>
-      <ul>
-        {sorted.map((r) => {
-          const author = String(r.author);
-          const pct = (Number(r.count) / max) * 100;
-          return (
-            <li key={author}>
-              <span className="bar-label" style={{ color: \`hsl(\${authorHue(author)}, 70%, 65%)\` }}>
-                {author}
-              </span>
-              <span className="bar-track">
-                <span className="bar-fill" style={{ width: pct + '%', background: \`hsl(\${authorHue(author)}, 60%, 45%)\` }} />
-              </span>
-              <span className="bar-count">{Number(r.count)}</span>
-            </li>
-          );
-        })}
-      </ul>
-    </section>
+    <div className="presence">
+      <span className="focus-label">live</span>
+      {others.map((p) => (
+        <span key={String(p.userId)} className="peer-dot" title={String(p.userId)} style={{ background: String(p.color) }}>
+          {String(p.userId)}
+        </span>
+      ))}
+    </div>
   );
 }
+`);
 
-// ── Heartbeat (declarative recurring primitive) ────────────────────
-// \`useHeartbeat(pulse)\` subscribes to the framework-owned status entity
-// and returns both the live state (status, runNumber, lastRunAt) and
-// lifecycle methods (start/stop/reset). No entity, workflow, or client
-// kick-off code to hand-roll.
-//
-// Crash-safe: kill \`syncengine dev\` mid-run, restart it, and ticks
-// resume on the original schedule. setInterval can't do this — its
-// timer dies with its process.
-function Heartbeat() {
+    // ── src/components/Focus.tsx
+    write(target, 'src/components/Focus.tsx', `\
+import { useState, useEffect } from 'react';
+import { useStore } from '@syncengine/client';
+import { focus } from '../entities/focus.actor';
+import { pomodoro } from '../workflows/pomodoro.workflow';
+import type { DB } from '../db';
+
+/**
+ * Server-side state-machine entity keyed per user so each participant
+ * has their own focus state. The +30s button schedules a durable
+ * Restate workflow that calls focus.finish() after sleeping —
+ * survives server crashes.
+ */
+export function Focus({ userId }: { userId: string }) {
+  const s = useStore<DB>();
+  const { state, actions } = s.useEntity(focus, userId);
+  const status = state?.status ?? 'idle';
+  const topic = state?.topic ?? '';
+  const endsAt = Number(state?.endsAt ?? 0);
+  const [draft, setDraft] = useState('');
+
+  // Tick once per second so the countdown updates while a pomodoro is running.
+  const [, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (status !== 'running' || endsAt <= 0) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [status, endsAt]);
+
+  async function start(withPomodoroMs?: number) {
+    const label = draft.trim();
+    if (!label) return;
+    const now = Date.now();
+    const endsAt = withPomodoroMs ? now + withPomodoroMs : 0;
+    actions.start(label, now, endsAt);
+    setDraft('');
+    if (withPomodoroMs) {
+      // Fire-and-forget a durable Restate workflow. Survives server crashes —
+      // try killing \`syncengine dev\` mid-timer and watch finish() still fire.
+      await s.runWorkflow(pomodoro, { key: userId, durationMs: withPomodoroMs });
+    }
+  }
+
+  if (status === 'running') {
+    const remaining = endsAt > 0 ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null;
+    return (
+      <div className="focus">
+        <span className="focus-label">{remaining !== null ? '🍅 pomodoro' : 'working on'}</span>
+        <span className="focus-topic">{topic || 'something'}</span>
+        {remaining !== null && (
+          <span className="focus-countdown" title="durable Restate workflow">
+            {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
+          </span>
+        )}
+        <button onClick={() => actions.finish()}>done</button>
+        <button className="ghost" onClick={() => actions.reset()}>cancel</button>
+      </div>
+    );
+  }
+
+  if (status === 'done') {
+    return (
+      <div className="focus">
+        <span className="focus-label">finished</span>
+        <span className="focus-topic">{topic || 'a task'}</span>
+        <button onClick={() => actions.reset()}>reset</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="focus">
+      <span className="focus-label">focus</span>
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') start();
+        }}
+        placeholder="What are we working on?"
+      />
+      <button disabled={!draft.trim()} onClick={() => start()}>
+        start
+      </button>
+      <button
+        className="pomodoro"
+        disabled={!draft.trim()}
+        onClick={() => start(30_000)}
+        title="Schedules a durable Restate workflow that auto-finishes in 30s — survives server restarts"
+      >
+        🍅 30s
+      </button>
+    </div>
+  );
+}
+`);
+
+    // ── src/components/Heartbeat.tsx
+    write(target, 'src/components/Heartbeat.tsx', `\
+import { useState, useEffect } from 'react';
+import { useHeartbeat } from '@syncengine/client';
+import { pulse } from '../heartbeats/pulse.heartbeat';
+
+/**
+ * \`useHeartbeat(pulse)\` subscribes to the framework-owned status
+ * entity and returns the live state (status, runNumber, lastRunAt)
+ * alongside lifecycle methods (start/stop/reset). No entity, workflow,
+ * or client kick-off code to hand-roll.
+ *
+ * Crash-safe: kill \`syncengine dev\` mid-run, restart it, and ticks
+ * resume on the original schedule. setInterval can't do this — its
+ * timer dies with its process.
+ */
+export function Heartbeat() {
   const hb = useHeartbeat(pulse);
   const [, setNow] = useState(Date.now());
 
@@ -914,170 +1025,214 @@ function Heartbeat() {
     </section>
   );
 }
+`);
 
-// ── Presence (ephemeral NATS topic, TTL-reaped when peers leave) ──
-// Each tab publishes its userId + color on mount and leaves on
-// unmount. No DB write, no Restate call — just pub/sub.
-function Presence({ userId, hue }: { userId: string; hue: number }) {
-  const s = useStore<DB>();
-  const { peers, publish, leave } = s.useTopic(presence, 'global');
+    // ── src/components/Leaderboard.tsx
+    write(target, 'src/components/Leaderboard.tsx', `\
+import { authorHue } from '../lib/authorHue';
 
-  useEffect(() => {
-    publish({ userId, color: \`hsl(\${hue}, 70%, 50%)\` });
-    const interval = setInterval(() => publish({ userId, color: \`hsl(\${hue}, 70%, 50%)\` }), 5000);
-    const onLeave = () => leave();
-    window.addEventListener('beforeunload', onLeave);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('beforeunload', onLeave);
-      leave();
-    };
-  }, [userId, hue, publish, leave]);
-
-  const others = Array.from(peers.values()).filter((p) => p.userId !== userId);
-  if (others.length === 0) {
-    return (
-      <div className="presence">
-        <span className="focus-label">live</span>
-        <span className="muted">just you — open another tab to see presence</span>
-      </div>
-    );
-  }
+/**
+ * Grouped DBSP view: notes per author, incrementally recomputed
+ * server-side on every write and pushed down to every client. Pure
+ * read — the component takes the view rows as a prop.
+ */
+export function Leaderboard({
+  rows,
+}: {
+  rows: ReadonlyArray<{ readonly author: unknown; readonly count: unknown }>;
+}) {
+  if (rows.length === 0) return null;
+  const sorted = [...rows].sort((a, b) => Number(b.count) - Number(a.count)).slice(0, 5);
+  const max = Math.max(...sorted.map((r) => Number(r.count)), 1);
   return (
-    <div className="presence">
-      <span className="focus-label">live</span>
-      {others.map((p) => (
-        <span key={String(p.userId)} className="peer-dot" title={String(p.userId)} style={{ background: String(p.color) }}>
-          {String(p.userId)}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// ── Reactions (server-side counter entity, keyed 'global') ──────
-// Row iterates the REACTIONS array so adding a new emoji is a one-line
-// change in the entity file — no JSX edits. Every bump() runs
-// serialized on Restate; counts stay exact no matter how many tabs click.
-function Reactions() {
-  const s = useStore<DB>();
-  const { state, actions } = s.useEntity(reactions, 'global');
-  const total = REACTIONS.reduce((n, r) => n + Number(state?.[r.key] ?? 0), 0);
-
-  return (
-    <div className="reactions">
-      <span className="focus-label">reactions</span>
-      <div className="reactions-row">
-        {REACTIONS.map((r) => {
-          const count = Number(state?.[r.key] ?? 0);
+    <section className="leaderboard">
+      <h2>top authors</h2>
+      <ul>
+        {sorted.map((r) => {
+          const author = String(r.author);
+          const pct = (Number(r.count) / max) * 100;
           return (
-            <button
-              key={r.key}
-              onClick={() => actions.bump(r.key)}
-              title={r.label}
-              className={count > 0 ? 'has-count' : ''}
-            >
-              <span className="emoji">{r.emoji}</span>
-              <span className="count">{count}</span>
-            </button>
+            <li key={author}>
+              <span className="bar-label" style={{ color: \`hsl(\${authorHue(author)}, 70%, 65%)\` }}>
+                {author}
+              </span>
+              <span className="bar-track">
+                <span className="bar-fill" style={{ width: pct + '%', background: \`hsl(\${authorHue(author)}, 60%, 45%)\` }} />
+              </span>
+              <span className="bar-count">{Number(r.count)}</span>
+            </li>
           );
         })}
-      </div>
-      <button
-        className="reactions-reset"
-        onClick={() => actions.reset()}
-        disabled={total === 0}
-        title="reset all counts to zero"
-      >
-        ↺
-      </button>
-    </div>
+      </ul>
+    </section>
   );
 }
+`);
 
-// ── Focus (server-side state machine entity, keyed 'global') ────
-// idle → running → done → idle. The transitions declared on the
-// entity are enforced server-side; this component just picks which
-// action to offer based on the current status.
-function Focus() {
-  const s = useStore<DB>();
-  const { state, actions } = s.useEntity(focus, 'global');
-  const status = state?.status ?? 'idle';
-  const topic = state?.topic ?? '';
-  const endsAt = Number(state?.endsAt ?? 0);
-  const [draft, setDraft] = useState('');
+    // ── src/components/NoteFeed.tsx
+    write(target, 'src/components/NoteFeed.tsx', `\
+import { authorHue } from '../lib/authorHue';
 
-  // Tick once per second so the countdown updates while a pomodoro is running.
-  const [, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (status !== 'running' || endsAt <= 0) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [status, endsAt]);
-
-  async function start(withPomodoroMs?: number) {
-    const label = draft.trim();
-    if (!label) return;
-    const now = Date.now();
-    const endsAt = withPomodoroMs ? now + withPomodoroMs : 0;
-    actions.start(label, now, endsAt);
-    setDraft('');
-    if (withPomodoroMs) {
-      // Fire-and-forget a durable Restate workflow. Survives server crashes —
-      // try killing \`syncengine dev\` mid-timer and watch finish() still fire.
-      await s.runWorkflow(pomodoro, { key: 'global', durationMs: withPomodoroMs });
-    }
-  }
-
-  if (status === 'running') {
-    const remaining = endsAt > 0 ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null;
+/**
+ * The main note feed + thumbs-up control. One row per note; the
+ * thumbs-up button toggles a per-user row in the \`thumbs\` table,
+ * driving the count badge reactively.
+ */
+export function NoteFeed({
+  notes,
+  thumbsByNote,
+  userId,
+  onToggleThumb,
+}: {
+  notes: ReadonlyArray<{ readonly id: unknown; readonly author: unknown; readonly body: unknown; readonly createdAt: unknown }>;
+  thumbsByNote: ReadonlyMap<number, Array<{ id: number; userId: string }>>;
+  userId: string;
+  onToggleThumb: (noteId: number) => void;
+}) {
+  if (notes.length === 0) {
     return (
-      <div className="focus">
-        <span className="focus-label">{remaining !== null ? '🍅 pomodoro' : 'working on'}</span>
-        <span className="focus-topic">{topic || 'something'}</span>
-        {remaining !== null && (
-          <span className="focus-countdown" title="durable Restate workflow">
-            {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
-          </span>
-        )}
-        <button onClick={() => actions.finish()}>done</button>
-        <button className="ghost" onClick={() => actions.reset()}>cancel</button>
-      </div>
-    );
-  }
-
-  if (status === 'done') {
-    return (
-      <div className="focus">
-        <span className="focus-label">finished</span>
-        <span className="focus-topic">{topic || 'a task'}</span>
-        <button onClick={() => actions.reset()}>reset</button>
+      <div className="feed">
+        <p className="muted" style={{ textAlign: 'center', padding: '2rem' }}>
+          No notes yet. Type something above!
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="focus">
-      <span className="focus-label">focus</span>
-      <input
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') start();
-        }}
-        placeholder="What are we working on?"
+    <div className="feed">
+      {notes.map((n) => {
+        const h = authorHue(String(n.author));
+        const noteId = Number(n.id);
+        const rows = thumbsByNote.get(noteId) ?? [];
+        const thumbCount = rows.length;
+        const thumbed = rows.some((t) => t.userId === userId);
+        return (
+          <div key={String(n.id)} className="note-card">
+            <span className="note-author" style={{ color: \`hsl(\${h}, 70%, 65%)\` }}>
+              {String(n.author)}
+            </span>
+            <span className="note-body">{String(n.body)}</span>
+            <button
+              className={\`thumb \${thumbed ? 'thumbed' : ''}\`}
+              onClick={() => onToggleThumb(noteId)}
+              title={thumbed ? 'remove thumbs-up' : 'thumbs-up'}
+            >
+              👍{thumbCount > 0 && <span className="thumb-count">{thumbCount}</span>}
+            </button>
+            <span className="note-time">
+              {new Date(Number(n.createdAt)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+`);
+
+    // ── src/App.tsx
+    write(target, 'src/App.tsx', `\
+import { useState, useMemo } from 'react';
+import { useStore } from '@syncengine/client';
+import { stats, recentNotes, allThumbs, notesByAuthor } from './schema';
+import { authorHue } from './lib/authorHue';
+import type { DB } from './db';
+import { WorkspaceSwitcher } from './components/WorkspaceSwitcher';
+import { Presence } from './components/Presence';
+import { Focus } from './components/Focus';
+import { NoteFeed } from './components/NoteFeed';
+import { Leaderboard } from './components/Leaderboard';
+import { Heartbeat } from './components/Heartbeat';
+
+export default function App() {
+  const s = useStore<DB>();
+  const { views, ready } = s.use({ stats, recentNotes, allThumbs, notesByAuthor });
+  const [input, setInput] = useState('');
+
+  const userId = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('user') ?? 'anon';
+  }, []);
+
+  const hue = authorHue(userId);
+  const totalNotes = views.stats[0]?.totalNotes ?? 0;
+
+  // Index thumbs by noteId once per render. Local scan over SQLite-backed
+  // view rows — no network, no subscription overhead.
+  const thumbsByNote = useMemo(() => {
+    const map = new Map<number, Array<{ id: number; userId: string }>>();
+    for (const t of views.allThumbs) {
+      const noteId = Number(t.noteId);
+      const arr = map.get(noteId) ?? [];
+      arr.push({ id: Number(t.id), userId: String(t.userId) });
+      map.set(noteId, arr);
+    }
+    return map;
+  }, [views.allThumbs]);
+
+  function handleSubmit() {
+    const body = input.trim();
+    if (!body) return;
+    s.tables.notes.insert({ body, author: userId, createdAt: Date.now() });
+    setInput('');
+  }
+
+  function toggleThumb(noteId: number) {
+    const mine = (thumbsByNote.get(noteId) ?? []).find((t) => t.userId === userId);
+    if (mine) s.tables.thumbs.remove(mine.id);
+    else s.tables.thumbs.insert({ noteId, userId });
+  }
+
+  if (!ready) {
+    return <div className="container"><p className="muted">Connecting...</p></div>;
+  }
+
+  return (
+    <div className="container">
+      <header>
+        <h1>syncengine</h1>
+        <div className="badges">
+          <WorkspaceSwitcher />
+          <span className="badge" style={{ background: \`hsl(\${hue}, 70%, 40%)\` }}>
+            {userId}
+          </span>
+          <span className="badge badge-muted">
+            {totalNotes} note{totalNotes !== 1 ? 's' : ''}
+          </span>
+        </div>
+      </header>
+
+      <Presence userId={userId} hue={hue} />
+      <Focus userId={userId} />
+
+      <div className="input-row">
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+          placeholder="Type a note and press Enter..."
+          autoFocus
+        />
+      </div>
+
+      <NoteFeed
+        notes={views.recentNotes}
+        thumbsByNote={thumbsByNote}
+        userId={userId}
+        onToggleThumb={toggleThumb}
       />
-      <button disabled={!draft.trim()} onClick={() => start()}>
-        start
-      </button>
-      <button
-        className="pomodoro"
-        disabled={!draft.trim()}
-        onClick={() => start(30_000)}
-        title="Schedules a durable Restate workflow that auto-finishes in 30s — survives server restarts"
-      >
-        🍅 30s
-      </button>
+
+      <Leaderboard rows={views.notesByAuthor} />
+      <Heartbeat />
+
+      <footer>
+        Open another tab with{' '}
+        <code>?user=bob</code>{' '}
+        to see real-time sync. Switch workspaces with{' '}
+        <code>?workspace=team-b</code>.
+      </footer>
     </div>
   );
 }
@@ -1397,6 +1552,7 @@ h1 {
 }
 
 .input-row {
+  margin-top: 1.5rem;
   margin-bottom: 1.5rem;
 }
 
@@ -1491,7 +1647,7 @@ h1 {
 .muted { color: var(--muted); font-size: 0.85rem; }
 
 .focus {
-  margin-top: 1.5rem;
+  margin-top: 0.5rem;
   padding: 0.55rem 0.75rem;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -1743,95 +1899,6 @@ h1 {
   padding: 2px 8px;
   border-radius: 10px;
   color: white;
-}
-
-.reactions {
-  margin-top: 0.75rem;
-  padding: 0.5rem 0.75rem;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 0.85rem;
-}
-
-.reactions-row {
-  display: flex;
-  gap: 0.3rem;
-  flex: 1;
-  justify-content: center;
-}
-
-.reactions-row button {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--fg);
-  padding: 0.25rem 0.65rem;
-  font-size: 0.9rem;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  transition: transform 0.06s, border-color 0.15s, background 0.15s;
-}
-
-.reactions-row button:hover {
-  border-color: var(--accent);
-  background: #1f1f23;
-}
-
-.reactions-row button:active {
-  transform: scale(0.92);
-}
-
-.reactions-row button.has-count {
-  border-color: var(--accent);
-  background: rgba(99, 102, 241, 0.1);
-}
-
-.reactions-row .emoji {
-  font-size: 0.95rem;
-  line-height: 1;
-}
-
-.reactions-row .count {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--muted);
-  min-width: 1ch;
-  text-align: right;
-}
-
-.reactions-row button.has-count .count {
-  color: var(--fg);
-}
-
-.reactions-reset {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  color: var(--muted);
-  width: 1.6rem;
-  height: 1.6rem;
-  padding: 0;
-  font-size: 0.9rem;
-  line-height: 1;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-  flex-shrink: 0;
-}
-
-.reactions-reset:hover:not(:disabled) {
-  color: var(--fg);
-  border-color: var(--accent);
-}
-
-.reactions-reset:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
 }
 
 footer {
