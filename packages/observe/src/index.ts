@@ -32,7 +32,12 @@ export type {
 export { bootSdk, type SdkHandle, type BootSdkOptions } from './sdk';
 
 export { instrument } from './internal';
-export type { EntityEffectAttrs } from './internal';
+export type {
+    EntityEffectAttrs,
+    RequestAttrs,
+    RpcAttrs,
+    RpcKind,
+} from './internal';
 
 export { makeObservabilityCtx, type ObservabilityCtxScope } from './ctx';
 

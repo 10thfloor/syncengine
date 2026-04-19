@@ -22,7 +22,7 @@ import { resolve as resolvePath, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { errors, CliCode, formatError } from '@syncengine/core';
 import type { SyncengineConfig } from '@syncengine/core';
-import { bootSdk, type SdkHandle } from '@syncengine/observe';
+import { bootSdk, instrument, type SdkHandle } from '@syncengine/observe';
 import { parseFlags } from './flags.ts';
 import type { Flags } from './flags.ts';
 import { createServer } from './server.ts';
@@ -147,22 +147,30 @@ async function main(argv: readonly string[]): Promise<void> {
         maxRequestBodySize: flags.maxBodyBytes,
         async fetch(req: Request): Promise<Response | undefined> {
             const t0 = performance.now();
+            const pathname = new URL(req.url).pathname;
             // Hijack /gateway for WebSocket upgrade before the fetch
             // path sees it. When upgrade succeeds, Bun takes over and
-            // this handler returns `undefined`.
+            // this handler returns `undefined`. Upgrades don't get
+            // wrapped in a request span — the gateway-connection span
+            // (C2) covers that lifecycle separately.
             if (gateway.tryUpgrade(req, server as unknown as Parameters<typeof gateway.tryUpgrade>[1])) {
                 logger.info({
                     event: 'gateway.upgrade',
-                    path: new URL(req.url).pathname,
+                    path: pathname,
                     duration_ms: Math.round((performance.now() - t0) * 100) / 100,
                 });
                 return undefined;
             }
-            const work = handle.fetch(req);
-            return shutdown.track(work).then((res) => {
-                logRequest(logger, req, res, t0);
-                return res;
-            });
+            return instrument.request(
+                { method: req.method, route: classifyRoute(pathname), path: pathname },
+                () => {
+                    const work = handle.fetch(req);
+                    return shutdown.track(work).then((res) => {
+                        logRequest(logger, req, res, t0);
+                        return res;
+                    });
+                },
+            );
         },
         websocket: gateway.websocketHandlers(),
     });
@@ -187,6 +195,18 @@ async function main(argv: readonly string[]): Promise<void> {
     await new Promise<void>(() => {
         /* never resolves — exit is driven by signals */
     });
+}
+
+/** Coarse path → route classifier for the top-level request span.
+ *  Keeps span names low-cardinality ("POST rpc" rather than one span
+ *  kind per concrete URL) so traces group cleanly in APMs. */
+function classifyRoute(pathname: string): string {
+    if (pathname.startsWith('/__syncengine/rpc/')) return 'rpc';
+    if (pathname.startsWith('/webhooks/')) return 'webhook';
+    if (pathname.startsWith('/assets/') || pathname === '/favicon.svg') return 'static';
+    if (pathname === '/_health') return 'health';
+    if (pathname === '/_ready') return 'ready';
+    return 'html';
 }
 
 function logRequest(

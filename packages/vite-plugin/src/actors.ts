@@ -35,6 +35,7 @@ import {
     resolveEntityTarget,
     isRpcError,
 } from '@syncengine/http-core';
+import { instrument } from '@syncengine/observe';
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
@@ -564,26 +565,60 @@ export function buildRpcMiddleware(
         for await (const chunk of req) chunks.push(chunk as Buffer);
         const body = Buffer.concat(chunks).toString('utf8') || ((isWorkflow || isHeartbeat) ? '{}' : '[]');
 
-        // Proxy to Restate
-        try {
-            const upstream = await fetch(target.url, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body,
-            });
-            const text = await upstream.text();
-            res.statusCode = upstream.status;
-            res.setHeader('content-type', upstream.headers.get('content-type') || 'application/json');
-            res.end(text);
-        } catch (err) {
-            res.statusCode = 502;
-            res.setHeader('content-type', 'application/json');
-            res.end(
-                JSON.stringify({
-                    message: `[syncengine] failed to reach Restate at ${target.url}: ${(err as Error).message}`,
-                }),
-            );
-        }
+        const rpcAttrs = classifyRpcForSpan(pathname, wsResult, isWorkflow, isHeartbeat);
+
+        await instrument.request(
+            { method: 'POST', route: 'rpc', path: pathname },
+            async () => instrument.rpc(rpcAttrs, async () => {
+            // Proxy to Restate
+            try {
+                const upstream = await fetch(target.url, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body,
+                });
+                const text = await upstream.text();
+                res.statusCode = upstream.status;
+                res.setHeader('content-type', upstream.headers.get('content-type') || 'application/json');
+                res.end(text);
+            } catch (err) {
+                res.statusCode = 502;
+                res.setHeader('content-type', 'application/json');
+                res.end(
+                    JSON.stringify({
+                        message: `[syncengine] failed to reach Restate at ${target.url}: ${(err as Error).message}`,
+                    }),
+                );
+            }
+        }));
+    };
+}
+
+/** Mirror of classifyRpc in packages/serve/src/rpc.ts — kept local
+ *  because vite-plugin resolves observe imports via the same bundler
+ *  path and we don't want cross-package helpers for a 10-line parser. */
+function classifyRpcForSpan(
+    pathname: string,
+    workspace: string,
+    isWorkflow: boolean,
+    isHeartbeat: boolean,
+): { kind: 'entity' | 'workflow' | 'heartbeat'; name: string; handler?: string; workspace: string } {
+    const prefix = '/__syncengine/rpc/';
+    const rest = pathname.slice(prefix.length);
+    if (isWorkflow) {
+        const [name] = rest.slice('workflow/'.length).split('/');
+        return { kind: 'workflow', name: name ?? 'unknown', workspace };
+    }
+    if (isHeartbeat) {
+        const [name] = rest.slice('heartbeat/'.length).split('/');
+        return { kind: 'heartbeat', name: name ?? 'unknown', workspace };
+    }
+    const parts = rest.split('/');
+    return {
+        kind: 'entity',
+        name: parts[0] ?? 'unknown',
+        handler: parts[2] ?? 'unknown',
+        workspace,
     };
 }
 

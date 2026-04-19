@@ -24,6 +24,7 @@ import {
     type RpcTarget,
     type RpcError,
 } from '@syncengine/http-core';
+import { instrument, type RpcKind } from '@syncengine/observe';
 
 export interface RpcProxyOptions {
     /** Restate ingress URL reachable from THIS process's network.
@@ -72,6 +73,8 @@ export function createRpcHandler(opts: RpcProxyOptions) {
             return plainText(target.status, target.message);
         }
 
+        const rpcAttrs = classifyRpc(pathname, wsResult);
+
         const requestId =
             req.headers.get('x-request-id') ?? crypto.randomUUID();
 
@@ -81,46 +84,72 @@ export function createRpcHandler(opts: RpcProxyOptions) {
         // fetch implementations.
         const bodyText = await req.text();
 
-        let upstream: Response;
-        try {
-            upstream = await fetch(target.url, {
-                method: 'POST',
-                headers: {
-                    'content-type':
-                        req.headers.get('content-type') ?? 'application/json',
-                    // Forward the workspace + request id so server-side
-                    // logs can tie Restate entries back to the original
-                    // browser request.
-                    'x-syncengine-workspace': wsResult,
-                    'x-request-id': requestId,
-                },
-                body: bodyText,
+        return instrument.rpc(rpcAttrs, async () => {
+            let upstream: Response;
+            try {
+                upstream = await fetch(target.url, {
+                    method: 'POST',
+                    headers: {
+                        'content-type':
+                            req.headers.get('content-type') ?? 'application/json',
+                        // Forward the workspace + request id so server-side
+                        // logs can tie Restate entries back to the original
+                        // browser request.
+                        'x-syncengine-workspace': wsResult,
+                        'x-request-id': requestId,
+                    },
+                    body: bodyText,
+                });
+            } catch (err) {
+                return plainText(
+                    502,
+                    `[syncengine] failed to reach Restate at ${target.url}: ${
+                        err instanceof Error ? err.message : String(err)
+                    }`,
+                    { 'x-request-id': requestId },
+                );
+            }
+
+            // Pass-through the Restate response. Preserve status + content
+            // type; stamp request-id for log correlation. Buffer the body
+            // for the same reason we buffer the request — small JSON, and
+            // streaming proxies through Bun have shown adverse latency.
+            const responseText = await upstream.text();
+            const headers = new Headers();
+            const ct = upstream.headers.get('content-type');
+            if (ct) headers.set('content-type', ct);
+            headers.set('x-request-id', requestId);
+
+            return new Response(responseText, {
+                status: upstream.status,
+                headers,
             });
-        } catch (err) {
-            return plainText(
-                502,
-                `[syncengine] failed to reach Restate at ${target.url}: ${
-                    err instanceof Error ? err.message : String(err)
-                }`,
-                { 'x-request-id': requestId },
-            );
-        }
-
-        // Pass-through the Restate response. Preserve status + content
-        // type; stamp request-id for log correlation. Buffer the body
-        // for the same reason we buffer the request — small JSON, and
-        // streaming proxies through Bun have shown adverse latency.
-        const responseText = await upstream.text();
-        const headers = new Headers();
-        const ct = upstream.headers.get('content-type');
-        if (ct) headers.set('content-type', ct);
-        headers.set('x-request-id', requestId);
-
-        return new Response(responseText, {
-            status: upstream.status,
-            headers,
         });
     };
+}
+
+/** Parse an RPC pathname into the attribute bag instrument.rpc expects.
+ *  We re-parse here rather than threading parsed parts through the
+ *  http-core target resolvers because the resolvers' return shape is a
+ *  Restate URL, which we don't want to widen just for telemetry. */
+function classifyRpc(
+    pathname: string,
+    workspace: string,
+): { kind: RpcKind; name: string; handler?: string; workspace: string } {
+    const rest = pathname.slice(RPC_PREFIX.length);
+    if (rest.startsWith(WORKFLOW_SUBPATH)) {
+        const [name] = rest.slice(WORKFLOW_SUBPATH.length).split('/');
+        return { kind: 'workflow', name: name ?? 'unknown', workspace };
+    }
+    if (rest.startsWith(HEARTBEAT_SUBPATH)) {
+        const [name] = rest.slice(HEARTBEAT_SUBPATH.length).split('/');
+        return { kind: 'heartbeat', name: name ?? 'unknown', workspace };
+    }
+    // Entity: <entity>/<key>/<handler>
+    const parts = rest.split('/');
+    const name = parts[0] ?? 'unknown';
+    const handler = parts[2] ?? 'unknown';
+    return { kind: 'entity', name, handler, workspace };
 }
 
 function chooseTarget(

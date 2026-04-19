@@ -15,6 +15,7 @@
 // changing a key is a single-file edit.
 
 import {
+    SpanKind,
     SpanStatusCode,
     trace,
     type Attributes,
@@ -83,6 +84,110 @@ async function entityEffect<T>(
     );
 }
 
+export interface RequestAttrs {
+    readonly method: string;
+    /** Low-cardinality classifier used for span naming — `rpc`,
+     *  `static`, `html`, `webhook`, `health`, etc. Span name becomes
+     *  `<method> <route>` so traces group naturally in APMs regardless
+     *  of user-supplied path cardinality. */
+    readonly route: string;
+    /** Full URL path — attached as the `url.path` attribute for
+     *  debugging / root-cause, NOT for grouping. */
+    readonly path: string;
+}
+
+/**
+ * Wrap an HTTP request handler in a root SERVER-kind span. Used at
+ * the outer edge of `serve` (Bun) and the Vite dev middleware; every
+ * downstream seam (rpc, entity, bus …) nests under this one.
+ */
+async function request<T>(
+    attrs: RequestAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `${attrs.method} ${attrs.route}`,
+        {
+            kind: SpanKind.SERVER,
+            attributes: {
+                [ATTR_PRIMITIVE]: 'http',
+                [ATTR_NAME]: attrs.route,
+                'http.request.method': attrs.method,
+                'http.route': attrs.route,
+                'url.path': attrs.path,
+            },
+        },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
+export type RpcKind = 'entity' | 'workflow' | 'heartbeat';
+
+export interface RpcAttrs {
+    /** What kind of target the RPC addresses — drives `rpc.service`. */
+    readonly kind: RpcKind;
+    /** Entity / workflow / heartbeat definition name. */
+    readonly name: string;
+    /** Handler name — only set for `kind: 'entity'`. Workflows and
+     *  heartbeats are addressed by invocation key instead. */
+    readonly handler?: string;
+    readonly workspace: string;
+}
+
+/**
+ * Wrap an RPC dispatch (the edge → Restate / server-side RPC handler)
+ * in a child span. Sits between the outer `request` span and the
+ * target-specific seam (entity effect / workflow invoke / heartbeat
+ * tick). Uses OTel RPC semconv keys plus our `syncengine.*` auto-tags
+ * so both native OTel tooling and custom `syncengine.*` filters work.
+ */
+async function rpc<T>(
+    attrs: RpcAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const method = attrs.handler !== undefined
+        ? `${attrs.name}.${attrs.handler}`
+        : attrs.name;
+    const spanAttrs: Attributes = {
+        'rpc.system': 'syncengine',
+        'rpc.service': attrs.kind,
+        'rpc.method': method,
+        [ATTR_WORKSPACE]: attrs.workspace,
+        [ATTR_NAME]: attrs.name,
+    };
+    if (attrs.handler !== undefined) spanAttrs[ATTR_OP] = attrs.handler;
+
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `rpc.${attrs.kind}.${method}`,
+        { attributes: spanAttrs },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
 export const instrument = {
     entityEffect,
+    request,
+    rpc,
 };
