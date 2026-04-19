@@ -2,11 +2,12 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { StoreProvider } from '@syncengine/client';
 import App, { db } from './App';
+import { devAuth } from './dev-auth';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <StoreProvider store={db}>
+    <StoreProvider store={db} auth={devAuth}>
       <App />
     </StoreProvider>
   </StrictMode>,

@@ -1,4 +1,5 @@
 import { config } from '@syncengine/core';
+import { unverified } from '@syncengine/server';
 
 export default config({
   workspaces: {
@@ -14,6 +15,12 @@ export default config({
       const url = new URL(request.url);
       return url.searchParams.get('ws') ?? 'default';
     },
+  },
+  auth: {
+    // Dev adapter: the bearer token IS the user id — no signature check,
+    // no expiry. Apps going to production swap this for jwt({ jwksUri, ... })
+    // pointed at their real identity provider (Clerk, Auth0, Descope, ...).
+    provider: unverified(),
   },
   services: {
     // The overrides module is lazy-imported at boot. In test, it flips

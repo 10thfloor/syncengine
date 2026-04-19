@@ -525,7 +525,12 @@ export async function invokeHandler(
         'content-type': 'application/json',
         'x-syncengine-workspace': currentWorkspaceId,
     };
-    if (runtimeAuthToken) headers.authorization = `Bearer ${runtimeAuthToken}`;
+    // Prefer the live token from authState (Plan 5 StoreProvider
+    // auth={...} pumps the host's bearer token here). Fall back to the
+    // compile-time runtimeAuthToken so pre-auth apps keep working.
+    const liveToken = authState.getToken();
+    const token = liveToken ?? runtimeAuthToken ?? null;
+    if (token) headers.authorization = `Bearer ${token}`;
 
     const res = await fetch(url, {
         method: 'POST',
