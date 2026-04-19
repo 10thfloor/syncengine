@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { entity, integer, text, Access } from '../index';
+import { entity, integer, text, Access, applyHandler, AccessDeniedError } from '../index';
 
 describe('entity() access config', () => {
     it('accepts an access block alongside handlers', () => {
@@ -64,5 +64,111 @@ describe('entity() access config', () => {
             },
         });
         expect(orders.$access?.cancel.$kind).toBe('access');
+    });
+});
+
+describe('applyHandler access enforcement', () => {
+    const inventory = entity('inventory', {
+        state: { stock: integer() },
+        access: {
+            restock: Access.role('admin'),
+            sell: Access.authenticated,
+            '*': Access.deny,
+        },
+        handlers: {
+            restock(state, amount: number) { return { ...state, stock: state.stock + amount }; },
+            sell(state) { return { ...state, stock: state.stock - 1 }; },
+            inspect(state) { return state; },
+        },
+    });
+
+    it('allows a handler when the policy passes', () => {
+        const result = applyHandler(
+            inventory,
+            'restock',
+            { stock: 5 },
+            [3],
+            { user: { id: 'u1', roles: ['admin'] }, key: 'keyboard' },
+        );
+        expect(result.stock).toBe(8);
+    });
+
+    it('throws AccessDeniedError when the policy rejects', () => {
+        expect(() =>
+            applyHandler(
+                inventory,
+                'restock',
+                { stock: 5 },
+                [3],
+                { user: { id: 'u1', roles: ['viewer'] }, key: 'keyboard' },
+            ),
+        ).toThrow(AccessDeniedError);
+    });
+
+    it('falls back to the "*" policy when no handler-specific rule exists', () => {
+        expect(() =>
+            applyHandler(
+                inventory,
+                'inspect',
+                { stock: 5 },
+                [],
+                { user: { id: 'u1', roles: ['admin'] }, key: 'keyboard' },
+            ),
+        ).toThrow(AccessDeniedError);
+    });
+
+    it('passes the current state to the policy for ownership checks', () => {
+        const orders = entity('orders', {
+            state: { userId: text(), total: integer() },
+            access: {
+                cancel: Access.owner(),
+            },
+            handlers: {
+                cancel(state) { return { ...state, total: 0 }; },
+            },
+        });
+        const aliceState = { userId: 'alice', total: 100 };
+        expect(() =>
+            applyHandler(
+                orders,
+                'cancel',
+                aliceState,
+                [],
+                { user: { id: 'bob' }, key: 'order-1' },
+            ),
+        ).toThrow(AccessDeniedError);
+        const ok = applyHandler(
+            orders,
+            'cancel',
+            aliceState,
+            [],
+            { user: { id: 'alice' }, key: 'order-1' },
+        );
+        expect(ok.total).toBe(0);
+    });
+
+    it('skips enforcement entirely when auth context is undefined', () => {
+        // Legacy call path — no auth info, no enforcement. Matches pre-Plan-2 behavior.
+        const result = applyHandler(inventory, 'restock', { stock: 5 }, [3]);
+        expect((result as { stock: number }).stock).toBe(8);
+    });
+
+    it('error context carries entity, handler, userId, and key', () => {
+        try {
+            applyHandler(
+                inventory,
+                'restock',
+                { stock: 5 },
+                [3],
+                { user: { id: 'bob', roles: ['viewer'] }, key: 'keyboard' },
+            );
+            throw new Error('should have thrown');
+        } catch (err) {
+            if (!(err instanceof AccessDeniedError)) throw err;
+            expect(err.context?.entity).toBe('inventory');
+            expect(err.context?.handler).toBe('restock');
+            expect(err.context?.userId).toBe('bob');
+            expect(err.context?.key).toBe('keyboard');
+        }
     });
 });

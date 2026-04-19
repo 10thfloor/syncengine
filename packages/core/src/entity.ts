@@ -28,8 +28,8 @@
 //    and server (Restate object factory). No codegen, no IDL.
 
 import type { ColumnDef, ColumnRef, InferRecord, AnyTable } from "./schema";
-import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './errors';
-import type { AccessPolicy } from './auth';
+import { errors, SchemaCode, EntityCode, HandlerCode, AuthCode, SyncEngineError } from './errors';
+import type { AccessPolicy, AccessContext, AuthUser } from './auth';
 
 // ── EntityError ──────────────────────────────────────────────────────────────
 
@@ -1061,12 +1061,19 @@ export function applySourceDeltas(
  * entity's `$initialState` is used as the starting point. Handlers may
  * return either the full next state or a `Partial<State>` that gets
  * merged into the current record.
+ *
+ * `auth` is optional — when supplied AND the entity declares an `$access`
+ * block, the matching policy (exact handler name, fallback to `'*'`) is
+ * evaluated before the handler runs. Rejection throws `AccessDeniedError`.
+ * Legacy callers (tests, pre-auth runtimes) can omit `auth` to skip
+ * enforcement entirely, matching pre-Plan-2 behavior.
  */
 export function applyHandler(
   entity: AnyEntity,
   handlerName: string,
   currentState: Record<string, unknown> | null,
   args: readonly unknown[],
+  auth?: { readonly user: AuthUser | null; readonly key: string },
 ): Record<string, unknown> {
   const handlerFn = entity.$handlers[handlerName] as
     | EntityHandler<Record<string, unknown>, readonly unknown[]>
@@ -1081,6 +1088,33 @@ export function applyHandler(
 
   const base =
     currentState ?? (entity.$initialState as Record<string, unknown>);
+
+  // Access enforcement (Plan 2). Only runs when the caller supplied an
+  // auth context — legacy callers (pure test-store, older entity runtimes
+  // that don't yet know about users) skip enforcement. Server + client
+  // entry points always pass auth context post-Plan-2.
+  if (auth && entity.$access) {
+    const policy: AccessPolicy | undefined =
+      entity.$access[handlerName] ?? entity.$access['*'];
+    if (policy) {
+      const ctx: AccessContext = {
+        user: auth.user,
+        key: auth.key,
+        state: base,
+      };
+      if (!policy.check(ctx)) {
+        throw errors.accessDenied(AuthCode.ACCESS_DENIED, {
+          message: `access denied for handler '${handlerName}' on entity '${entity.$name}'`,
+          context: {
+            entity: entity.$name,
+            handler: handlerName,
+            userId: auth.user?.id ?? null,
+            key: auth.key,
+          },
+        });
+      }
+    }
+  }
 
   let next: Record<string, unknown>;
   let emits: EmitInsert[] | undefined;
