@@ -22,9 +22,10 @@ export { StoreProvider, useStore } from './react';
 export type { StoreProviderProps, AuthClient } from './react';
 
 // ── Auth (Plan 5) ────────────────────────────────────────────────────────
-export { useUser } from './use-user';
+export { useUser, useAuthError } from './use-user';
 export type { UseUserResult } from './use-user';
 export { authState, AuthState } from './auth-state';
+export type { AuthError } from './auth-state';
 
 // ── Entity client (Phase 4 — actor model on Restate virtual objects) ─────
 export { useEntity } from './entity-client';

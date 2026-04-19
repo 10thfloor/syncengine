@@ -239,6 +239,23 @@ function getGateway(): Promise<WebSocket> {
                     gwEntityHandlers.get(matchKey)?.(
                         (msg['payload'] as Record<string, unknown>) ?? {},
                     );
+                } else if (msg['type'] === 'error') {
+                    // Plan 5: surface auth-layer errors from the gateway
+                    // (UNAUTHORIZED at init rejection, ACCESS_DENIED at
+                    // channel subscribe) onto authState so useAuthError
+                    // can render them. Other errors log but don't update
+                    // auth state.
+                    const code = msg['code'];
+                    if (code === 'UNAUTHORIZED' || code === 'ACCESS_DENIED') {
+                        const channelName = typeof msg['channel'] === 'string'
+                            ? msg['channel']
+                            : undefined;
+                        authState.setError({
+                            code,
+                            message: typeof msg['message'] === 'string' ? msg['message'] : code,
+                            ...(channelName ? { channel: channelName } : {}),
+                        });
+                    }
                 }
             },
             onClose: () => {

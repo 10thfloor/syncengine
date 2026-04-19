@@ -62,3 +62,37 @@ describe('AuthState', () => {
         expect(authState).toBeInstanceOf(AuthState);
     });
 });
+
+describe('AuthState error slot (Plan 5)', () => {
+    it('starts with null error', () => {
+        const state = new AuthState();
+        expect(state.getError()).toBeNull();
+    });
+
+    it('setError stores and notifies', () => {
+        const state = new AuthState();
+        let count = 0;
+        state.subscribe(() => { count++; });
+        state.setError({ code: 'ACCESS_DENIED', message: 'nope', channel: 'admin' });
+        expect(state.getError()?.code).toBe('ACCESS_DENIED');
+        expect(state.getError()?.channel).toBe('admin');
+        expect(count).toBe(1);
+    });
+
+    it('setError(null) clears the error', () => {
+        const state = new AuthState();
+        state.setError({ code: 'UNAUTHORIZED', message: 'bad token' });
+        state.setError(null);
+        expect(state.getError()).toBeNull();
+    });
+
+    it('setError ignores same-reference updates', () => {
+        const state = new AuthState();
+        const err = { code: 'ACCESS_DENIED' as const, message: 'x' };
+        state.setError(err);
+        let count = 0;
+        state.subscribe(() => { count++; });
+        state.setError(err);
+        expect(count).toBe(0);
+    });
+});
