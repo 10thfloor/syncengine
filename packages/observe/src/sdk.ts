@@ -112,6 +112,20 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
     // load cost.
     const { NodeSDK } = await import('@opentelemetry/sdk-node');
 
+    // Opt-in auto-instrumentations. Loaded only when the user explicitly
+    // asked so the default install doesn't pay the bundle / patch cost.
+    const instrumentations: import('@opentelemetry/instrumentation').Instrumentation[] = [];
+    if (config?.autoInstrument?.includes('fetch')) {
+        const { UndiciInstrumentation } = await import(
+            '@opentelemetry/instrumentation-undici'
+        );
+        // Node 20+'s native fetch is backed by undici. The Undici
+        // instrumentation patches at the request-client layer so every
+        // outbound fetch gets a CLIENT span + auto-propagated
+        // traceparent header.
+        instrumentations.push(new UndiciInstrumentation());
+    }
+
     const resource = buildResource(config);
     const sampler = new ParentBasedSampler({
         root: new TraceIdRatioBasedSampler(resolveSamplerRatio(config)),
@@ -136,6 +150,7 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
             resource,
             sampler,
             spanProcessors,
+            ...(instrumentations.length > 0 && { instrumentations }),
         };
         if (opts.metricExporterOverride) {
             const { PeriodicExportingMetricReader } = await import(
@@ -170,6 +185,7 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
                     exportIntervalMillis: 60_000,
                 }),
             ],
+            ...(instrumentations.length > 0 && { instrumentations }),
         });
     }
 
