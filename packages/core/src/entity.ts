@@ -29,6 +29,7 @@
 
 import type { ColumnDef, ColumnRef, InferRecord, AnyTable } from "./schema";
 import { errors, SchemaCode, EntityCode, HandlerCode, SyncEngineError } from './errors';
+import type { AccessPolicy } from './auth';
 
 // ── EntityError ──────────────────────────────────────────────────────────────
 
@@ -107,6 +108,15 @@ export type EntityHandlerMap<TState> = Record<
 /** Maps source projection key names to their runtime type (always number). */
 export type SourceState<TKeys extends string> = { readonly [K in TKeys]: number };
 
+// ── Access map ─────────────────────────────────────────────────────────────
+
+/**
+ * Maps handler names (and the wildcard `'*'` default) to access policies.
+ * `null` on an EntityDef when the entity declares no access block —
+ * enforcement is a no-op (any caller allowed, matching pre-auth behavior).
+ */
+export type EntityAccessMap = Readonly<Record<string, AccessPolicy>>;
+
 // ── Entity definition ──────────────────────────────────────────────────────
 
 /**
@@ -139,6 +149,9 @@ export interface EntityDef<
   readonly $transitions: TransitionMap | null;
   /** The state field governed by `$transitions`. null if no transitions. */
   readonly $statusField: string | null;
+  /** Access policy map: handler name (or '*' for default) → AccessPolicy.
+   *  null if no access block declared — enforcement is a no-op. */
+  readonly $access: EntityAccessMap | null;
   /** Phantom field carrying the inferred state record type for callers
    *  that want `EntityRecord<typeof cart>` without re-deriving it. */
   readonly $record: EntityState<TShape>;
@@ -329,6 +342,7 @@ export function entity<
     readonly state: TShape;
     readonly source?: TSourceDef;
     readonly transitions?: Record<string, readonly string[]>;
+    readonly access?: EntityAccessMap;
     readonly handlers: THandlers;
   },
 ): EntityDef<TName, TShape, THandlers, Extract<keyof TSourceDef, string>> {
@@ -417,6 +431,22 @@ export function entity<
     }
   }
 
+  // ── Access map validation ────────────────────────────────────────────────
+  const access: EntityAccessMap | null = config.access ?? null;
+  if (access) {
+    const handlerNames = new Set(Object.keys(config.handlers));
+    for (const key of Object.keys(access)) {
+      if (key === '*') continue;
+      if (!handlerNames.has(key)) {
+        throw errors.schema(SchemaCode.INVALID_ENTITY_ACCESS, {
+          message: `defineEntity('${name}'): access key '${key}' does not match any handler.`,
+          hint: `Access keys must match handler names or be '*' (default). Handlers: ${[...handlerNames].join(', ')}`,
+          context: { entity: name, key },
+        });
+      }
+    }
+  }
+
   // ── Transition map validation ────────────────────────────────────────────
   const transitions: TransitionMap | null = config.transitions ?? null;
   let statusField: string | null = null;
@@ -489,6 +519,7 @@ export function entity<
     $sourceInitial: buildSourceInitial(source),
     $transitions: transitions,
     $statusField: statusField,
+    $access: access,
     $record: undefined as never,
     $sourceKeys: undefined as never,
   };
