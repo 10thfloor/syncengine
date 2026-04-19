@@ -21,6 +21,7 @@ import {
     propagation,
     trace,
     type Attributes,
+    type SpanOptions,
 } from '@opentelemetry/api';
 
 import {
@@ -33,9 +34,43 @@ import {
     ATTR_USER,
     ATTR_WORKSPACE,
 } from './semantic';
-import { runInScope } from './scope';
+import { runInScope, type ObserveScope } from './scope';
 
 const TRACER_NAME = '@syncengine/observe';
+
+/**
+ * Open a span as the active parent, run `fn`, record exceptions, set
+ * ERROR status on throw, and always end the span. When `scope` is
+ * supplied, `fn` runs inside `runInScope(scope, ...)` so declared
+ * metrics inside the handler auto-tag with workspace / user /
+ * primitive / name without the caller threading ctx through.
+ *
+ * Every seam helper in this file delegates to this function — one
+ * source of truth for span-lifecycle semantics keeps the seam helpers
+ * focused on their distinctive concerns (name construction, attr
+ * bag, scope membership).
+ */
+async function withSpan<T>(
+    name: string,
+    opts: SpanOptions,
+    scope: ObserveScope | undefined,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(name, opts, async (span) => {
+        try {
+            return scope !== undefined
+                ? await runInScope(scope, fn)
+                : await fn();
+        } catch (err) {
+            span.recordException(err as Error);
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            throw err;
+        } finally {
+            span.end();
+        }
+    });
+}
 
 export interface EntityEffectAttrs {
     /** The workspace id derived from the Restate object key. */
@@ -66,35 +101,16 @@ async function entityEffect<T>(
         [ATTR_WORKSPACE]: attrs.workspace,
     };
     if (attrs.user !== undefined) spanAttrs[ATTR_USER] = attrs.user;
-
-    const tracer = trace.getTracer(TRACER_NAME);
-    // startActiveSpan — NOT startSpan — so the span becomes the active
-    // parent for the duration of fn(). Child spans created inside the
-    // user effect (Phase B2 `ObservabilityCtx.span`, Phase C bus/HTTP
-    // auto-instrumentation) nest under this one instead of becoming
-    // siblings of the outer request span.
-    return tracer.startActiveSpan(
+    return withSpan(
         `entity.${attrs.name}.${attrs.op}`,
         { attributes: spanAttrs },
-        async (span) => {
-            try {
-                return await runInScope(
-                    {
-                        workspace: attrs.workspace,
-                        primitive: 'entity',
-                        name: attrs.name,
-                        ...(attrs.user !== undefined && { user: attrs.user }),
-                    },
-                    fn,
-                );
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
+        {
+            workspace: attrs.workspace,
+            primitive: 'entity',
+            name: attrs.name,
+            ...(attrs.user !== undefined && { user: attrs.user }),
         },
+        fn,
     );
 }
 
@@ -119,8 +135,7 @@ async function request<T>(
     attrs: RequestAttrs,
     fn: () => Promise<T> | T,
 ): Promise<T> {
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `${attrs.method} ${attrs.route}`,
         {
             kind: SpanKind.SERVER,
@@ -132,17 +147,8 @@ async function request<T>(
                 'url.path': attrs.path,
             },
         },
-        async (span) => {
-            try {
-                return await fn();
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
-        },
+        undefined,
+        fn,
     );
 }
 
@@ -181,22 +187,11 @@ async function rpc<T>(
         [ATTR_NAME]: attrs.name,
     };
     if (attrs.handler !== undefined) spanAttrs[ATTR_OP] = attrs.handler;
-
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `rpc.${attrs.kind}.${method}`,
         { attributes: spanAttrs },
-        async (span) => {
-            try {
-                return await fn();
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
-        },
+        undefined,
+        fn,
     );
 }
 
@@ -221,8 +216,7 @@ async function busPublish<T>(
     attrs: BusPublishAttrs,
     fn: (carrier: TraceCarrier) => Promise<T> | T,
 ): Promise<T> {
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `bus.${attrs.busName} publish`,
         {
             kind: SpanKind.PRODUCER,
@@ -236,18 +230,13 @@ async function busPublish<T>(
                 [ATTR_WORKSPACE]: attrs.workspace,
             },
         },
-        async (span) => {
+        undefined,
+        async () => {
+            // Inject the current active span's trace context into a
+            // fresh carrier the user's fn forwards onto NATS headers.
             const carrier: TraceCarrier = {};
             propagation.inject(context.active(), carrier);
-            try {
-                return await fn(carrier);
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
+            return await fn(carrier);
         },
     );
 }
@@ -280,10 +269,8 @@ async function busConsume<T>(
     if (attrs.traceparent) carrier['traceparent'] = attrs.traceparent;
     if (attrs.tracestate) carrier['tracestate'] = attrs.tracestate;
     const parentCtx = propagation.extract(context.active(), carrier);
-
-    const tracer = trace.getTracer(TRACER_NAME);
     return context.with(parentCtx, () =>
-        tracer.startActiveSpan(
+        withSpan(
             `bus.${attrs.busName} consume`,
             {
                 kind: SpanKind.CONSUMER,
@@ -298,20 +285,8 @@ async function busConsume<T>(
                     [ATTR_WORKSPACE]: attrs.workspace,
                 },
             },
-            async (span) => {
-                try {
-                    return await runInScope(
-                        { workspace: attrs.workspace, primitive: 'bus', name: attrs.busName },
-                        fn,
-                    );
-                } catch (err) {
-                    span.recordException(err as Error);
-                    span.setStatus({ code: SpanStatusCode.ERROR });
-                    throw err;
-                } finally {
-                    span.end();
-                }
-            },
+            { workspace: attrs.workspace, primitive: 'bus', name: attrs.busName },
+            fn,
         ),
     );
 }
@@ -386,22 +361,11 @@ async function webhookInbound<T>(
         [ATTR_NAME]: attrs.name,
     };
     if (attrs.workspace !== undefined) spanAttrs[ATTR_WORKSPACE] = attrs.workspace;
-
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `webhook.${attrs.name}.inbound`,
         { kind: SpanKind.SERVER, attributes: spanAttrs },
-        async (span) => {
-            try {
-                return await fn();
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
-        },
+        undefined,
+        fn,
     );
 }
 
@@ -452,21 +416,11 @@ async function gatewayMessage<T>(
     if (attrs.workspace !== undefined) {
         spanAttrs[ATTR_WORKSPACE] = attrs.workspace;
     }
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `gateway.${attrs.messageType}`,
         { kind: SpanKind.SERVER, attributes: spanAttrs },
-        async (span) => {
-            try {
-                return await fn();
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
-        },
+        undefined,
+        fn,
     );
 }
 
@@ -488,8 +442,7 @@ async function heartbeatTick<T>(
     attrs: HeartbeatTickAttrs,
     fn: () => Promise<T> | T,
 ): Promise<T> {
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `heartbeat.${attrs.name}.tick`,
         {
             attributes: {
@@ -499,20 +452,8 @@ async function heartbeatTick<T>(
                 'syncengine.run_number': attrs.runNumber,
             },
         },
-        async (span) => {
-            try {
-                return await runInScope(
-                    { workspace: attrs.workspace, primitive: 'heartbeat', name: attrs.name },
-                    fn,
-                );
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
-        },
+        { workspace: attrs.workspace, primitive: 'heartbeat', name: attrs.name },
+        fn,
     );
 }
 
@@ -532,8 +473,7 @@ async function webhookRun<T>(
     attrs: WebhookRunAttrs,
     fn: () => Promise<T> | T,
 ): Promise<T> {
-    const tracer = trace.getTracer(TRACER_NAME);
-    return tracer.startActiveSpan(
+    return withSpan(
         `webhook.${attrs.name}.run`,
         {
             attributes: {
@@ -543,20 +483,8 @@ async function webhookRun<T>(
                 [ATTR_INVOCATION]: attrs.idempotencyKey,
             },
         },
-        async (span) => {
-            try {
-                return await runInScope(
-                    { workspace: attrs.workspace, primitive: 'webhook', name: attrs.name },
-                    fn,
-                );
-            } catch (err) {
-                span.recordException(err as Error);
-                span.setStatus({ code: SpanStatusCode.ERROR });
-                throw err;
-            } finally {
-                span.end();
-            }
-        },
+        { workspace: attrs.workspace, primitive: 'webhook', name: attrs.name },
+        fn,
     );
 }
 
