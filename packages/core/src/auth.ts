@@ -74,6 +74,18 @@ export interface AccessPolicy {
  */
 export const USER_PLACEHOLDER = '$user' as const;
 
+/**
+ * Reserved user id for workflow-initiated (and other framework-internal)
+ * entity calls. When the runtime sees this id, it:
+ *   - skips access policy enforcement (the caller is system-privileged)
+ *   - substitutes `'$user'` placeholders in emits with `'$system'` so
+ *     the audit trail shows the action was taken by framework code
+ *
+ * Client-supplied user ids can never take this value — the string
+ * starts with `$` which is reserved (same rule as entity names).
+ */
+export const SYSTEM_USER_ID = '$system' as const;
+
 // ── Access DSL ─────────────────────────────────────────────────────────────
 //
 // Composable access predicates. Every value here is either a terminal

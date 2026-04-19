@@ -6,9 +6,13 @@
 // to make a durable RPC to the target entity instance — fully typed, no
 // string handler names, no manual arg serialization.
 //
-// The Proxy is lazy: `objectClient` is called once (on first property
-// access or on construction — here we eagerly grab the client), and each
-// handler access returns a thin wrapper that forwards the args array.
+// Auth (Gap 2): call `entityRef(ctx, def, key, { asSystem: true })` (or
+// its sibling `systemRef(ctx, def, key)`) to mark the invocation as
+// framework-internal. The entity runtime sees the `x-syncengine-system`
+// header, sets the handler auth context to `{ id: '$system' }`, and
+// skips access policy enforcement. Used by workflows that need to
+// advance entity state in response to bus events (e.g. `shipOnPay`
+// calling `order.markShipped()`).
 
 import type {
     EntityDef,
@@ -17,6 +21,12 @@ import type {
     EntityHandler,
 } from '@syncengine/core';
 import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
+
+/** HTTP-style header recognized by the entity runtime to mark an
+ *  invocation as `$system`-privileged. Set by `entityRef({ asSystem })`
+ *  via Restate's `genericCall`. Never user-settable — the runtime only
+ *  honors it on internal objectClient paths. */
+export const SYSTEM_CALL_HEADER = 'x-syncengine-system';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -53,20 +63,77 @@ export function entityRef<
     THandlers extends EntityHandlerMap<any>,
     TSourceKeys extends string,
 >(
-    ctx: { key: string; objectClient(opts: { name: string }, key: string): any },
+    ctx: {
+        key: string;
+        objectClient(opts: { name: string }, key: string): any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        genericCall?(call: any): Promise<any>;
+    },
     entityDef: EntityDef<TName, TShape, THandlers, TSourceKeys>,
     key: string,
+    opts?: { asSystem?: boolean },
 ): EntityRefProxy<THandlers> {
     const { workspaceId } = splitObjectKey(ctx.key);
     const fullKey = `${workspaceId}/${key}`;
-    const client = ctx.objectClient(
-        { name: `${ENTITY_OBJECT_PREFIX}${entityDef.$name}` },
-        fullKey,
-    );
+    const service = `${ENTITY_OBJECT_PREFIX}${entityDef.$name}`;
 
+    if (opts?.asSystem) {
+        // System-privileged path — uses Restate's genericCall so we can
+        // attach the SYSTEM_CALL_HEADER. The entity runtime reads this
+        // header and sets auth.user = { id: '$system' } before the
+        // handler runs, bypassing access policies.
+        if (!ctx.genericCall) {
+            throw new Error(
+                'entityRef({ asSystem: true }) requires a context that exposes genericCall — ' +
+                'only available inside Restate handlers.',
+            );
+        }
+        const genericCall = ctx.genericCall;
+        return new Proxy({} as EntityRefProxy<THandlers>, {
+            get(_, handlerName: string) {
+                return (...args: unknown[]) =>
+                    genericCall({
+                        service,
+                        method: handlerName,
+                        key: fullKey,
+                        parameter: args,
+                        headers: { [SYSTEM_CALL_HEADER]: '1' },
+                    });
+            },
+        });
+    }
+
+    // Default path — no system privilege; the callee sees whatever auth
+    // header was on the original invocation (typically none for
+    // workflow chains, which means the callee will hit its access
+    // policies with user=null).
+    const client = ctx.objectClient({ name: service }, fullKey);
     return new Proxy({} as EntityRefProxy<THandlers>, {
         get(_, handlerName: string) {
             return (...args: unknown[]) => client[handlerName](args);
         },
     });
+}
+
+/**
+ * Shorthand for `entityRef(ctx, def, key, { asSystem: true })`. Use in
+ * workflows and framework-internal code that needs to advance entity
+ * state without being rejected by the target entity's access policies.
+ *
+ *     const shipOnPay = defineWorkflow('shipOnPay', { on: ... },
+ *         async (ctx, event) => {
+ *             await systemRef(ctx, order, event.orderId).markShipped();
+ *         });
+ */
+export function systemRef<
+    TName extends string,
+    TShape extends EntityStateShape,
+    THandlers extends EntityHandlerMap<any>,
+    TSourceKeys extends string,
+>(
+    ctx: Parameters<typeof entityRef<TName, TShape, THandlers, TSourceKeys>>[0],
+    entityDef: EntityDef<TName, TShape, THandlers, TSourceKeys>,
+    key: string,
+): EntityRefProxy<THandlers> {
+    return entityRef(ctx, entityDef, key, { asSystem: true });
 }

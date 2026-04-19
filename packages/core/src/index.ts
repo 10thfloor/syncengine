@@ -105,7 +105,7 @@ export { defineValue, op, withArgs } from './value';
 export type { Brand, Branded, ValueType, ScalarValueDef, ScalarValueOptions } from './value';
 
 // ── Auth foundation ───────────────────────────────────────────────────────
-export { Access, USER_PLACEHOLDER } from './auth';
+export { Access, USER_PLACEHOLDER, SYSTEM_USER_ID } from './auth';
 export type { AuthUser, AccessContext, AccessPolicy, RoleEnumCarrier } from './auth';
 export type { AuthProvider, AuthVerifyResult } from './auth-provider';
 
