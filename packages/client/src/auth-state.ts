@@ -1,10 +1,18 @@
 import type { AuthUser } from '@syncengine/core';
 
-/** Auth-layer error surfaced from the gateway (UNAUTHORIZED at init,
- *  ACCESS_DENIED on channel subscribe). Distinct from per-action
- *  errors, which surface on the individual entity/view hook. */
+/** Auth-layer error surfaced from the gateway.
+ *    - UNAUTHORIZED — init rejected (bad token, not a workspace member
+ *      when requireWorkspaceMembership is on)
+ *    - ACCESS_DENIED — channel subscribe rejected by the channel's
+ *      $access policy
+ *    - WORKSPACE_ACCESS_REVOKED — membership was revoked while the
+ *      session was open; the server broadcast the event and the client
+ *      should prompt the user to re-authenticate or navigate away.
+ *
+ *  Distinct from per-action errors, which surface on the individual
+ *  entity/view hook. */
 export interface AuthError {
-    readonly code: 'UNAUTHORIZED' | 'ACCESS_DENIED';
+    readonly code: 'UNAUTHORIZED' | 'ACCESS_DENIED' | 'WORKSPACE_ACCESS_REVOKED';
     readonly message: string;
     /** Channel name when code === 'ACCESS_DENIED' on a subscribe. */
     readonly channel?: string;

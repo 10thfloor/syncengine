@@ -242,11 +242,16 @@ function getGateway(): Promise<WebSocket> {
                 } else if (msg['type'] === 'error') {
                     // Plan 5: surface auth-layer errors from the gateway
                     // (UNAUTHORIZED at init rejection, ACCESS_DENIED at
-                    // channel subscribe) onto authState so useAuthError
-                    // can render them. Other errors log but don't update
-                    // auth state.
+                    // channel subscribe, WORKSPACE_ACCESS_REVOKED for
+                    // mid-session membership removal) onto authState so
+                    // useAuthError can render them. Other errors log but
+                    // don't update auth state.
                     const code = msg['code'];
-                    if (code === 'UNAUTHORIZED' || code === 'ACCESS_DENIED') {
+                    if (
+                        code === 'UNAUTHORIZED' ||
+                        code === 'ACCESS_DENIED' ||
+                        code === 'WORKSPACE_ACCESS_REVOKED'
+                    ) {
                         const channelName = typeof msg['channel'] === 'string'
                             ? msg['channel']
                             : undefined;
