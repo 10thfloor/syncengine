@@ -34,6 +34,7 @@ import {
     isRpcError,
 } from '@syncengine/http-core';
 import { GatewayServer } from './gateway/server.js';
+import { buildAuthHook } from './auth/build-auth-hook.js';
 import { dispatchWebhook, findWebhook } from './webhook-http.js';
 import { getRegisteredWebhooks } from './webhook-registry.js';
 import type {
@@ -194,9 +195,23 @@ export function startHttpServer(config: ProductionServerConfig): void {
     };
 
     const natsInternalUrl = toNatsInternalUrl(config.natsUrl ?? 'ws://localhost:9222');
+
+    // Plan 4: build the gateway AuthHook from the configured AuthProvider
+    // + the channel registry. `lookupRole` is a stub — calling Restate's
+    // workspace virtual object from outside a Restate context requires an
+    // ingress HTTP client that isn't wired in serve.ts yet. For now the
+    // gateway verifies tokens correctly but roles come back empty (users
+    // are `authenticated` but not members of any role). Plan 5 / 6 can
+    // add a real workspace-client lookup here.
+    const authHook = buildAuthHook({
+        provider: config.appConfig.auth?.provider,
+        lookupRole: async () => null,
+    });
+
     const gateway = new GatewayServer({
         natsUrl: natsInternalUrl,
         restateUrl: config.restateUrl,
+        authHook,
     });
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {

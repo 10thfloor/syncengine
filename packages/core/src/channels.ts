@@ -13,13 +13,32 @@
  */
 
 import type { AnyTable } from './schema';
+import type { AccessPolicy } from './auth';
 
 /** A sync channel: maps a set of tables to a NATS subject. */
 export interface ChannelConfig<TName extends string = string> {
+    /** Runtime discriminator so `isChannel(value)` can distinguish a
+     *  channel from other config objects during source-tree discovery.
+     *  Optional on the interface for backward compatibility with inline
+     *  object literals in tests; the `channel()` factory always sets it. */
+    readonly $tag?: 'channel';
     /** Channel name — used to build the NATS subject. */
     readonly name: TName;
     /** Tables whose mutations publish to this channel. */
     readonly tables: readonly AnyTable[];
+    /** Access policy evaluated at subscription time. Optional — `undefined`
+     *  or `null` means every authenticated workspace member can subscribe.
+     *  Enforcement lives in the gateway — see gateway-core's AuthHook. */
+    readonly $access?: AccessPolicy | null;
+}
+
+/** Type guard — does this value look like a `channel(...)` result? */
+export function isChannel(value: unknown): value is ChannelConfig {
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        (value as { $tag?: unknown }).$tag === 'channel'
+    );
 }
 
 /**
@@ -27,15 +46,21 @@ export interface ChannelConfig<TName extends string = string> {
  * a single JetStream subject and replay together.
  *
  *     channel('realtime', [clicks, notes])
+ *     channel('admin', [audit], { access: Access.role('admin') })
  *
  * Tables not assigned to any explicit channel get their own
  * auto-generated channel (one per table).
+ *
+ * An optional `access` policy is evaluated at subscription time. When
+ * omitted, the channel is public to every authenticated workspace
+ * member (workspace membership is the outer gate).
  */
 export function channel<const TName extends string>(
     name: TName,
     tables: readonly AnyTable[],
+    opts?: { readonly access?: AccessPolicy },
 ): ChannelConfig<TName> {
-    return { name, tables };
+    return { $tag: 'channel', name, tables, $access: opts?.access ?? null };
 }
 
 /**

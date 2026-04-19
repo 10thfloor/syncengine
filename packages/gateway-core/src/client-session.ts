@@ -22,6 +22,13 @@ export class ClientSession {
     /** Channels currently being replayed — live messages are buffered until replay-end. */
     readonly replayingChannels = new Set<string>();
 
+    /** Verified user for this session — set at init-time by the gateway
+     *  from the AuthHook.verifyInit callback. null when unauthenticated
+     *  (Access.public only) or when no auth is configured. */
+    user: import('@syncengine/core').AuthUser | null = null;
+    /** Workspace id this session is attached to — set at init. */
+    workspaceId: string = '';
+
     private readonly ws: GatewayClientWs;
 
     constructor(clientId: string, ws: GatewayClientWs) {

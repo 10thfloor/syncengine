@@ -5,7 +5,7 @@ import * as restate from "@restatedev/restate-sdk";
 import { errors, SchemaCode } from "@syncengine/core";
 import { workspace } from "./workspace/workspace.js";
 import { bindEntities, setAuthProvider } from "./entity-runtime.js";
-import { isEntity, type AnyEntity, isService, type AnyService, isBus, type BusRef } from "@syncengine/core";
+import { isEntity, type AnyEntity, isService, type AnyService, isBus, type BusRef, isChannel, type ChannelConfig } from "@syncengine/core";
 import { isWorkflow, isBusSubscriberWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
 import { ServiceContainer } from './service-container.js';
 import { isHeartbeat, type HeartbeatDef } from './heartbeat.js';
@@ -80,6 +80,7 @@ export async function loadDefinitions(appDir: string): Promise<{
     webhooks: WebhookDef[];
     services: AnyService[];
     buses: BusRef<unknown>[];
+    channels: ChannelConfig[];
 }> {
     const srcDir = resolve(appDir, "src");
     const allFiles = walkSourceFiles(srcDir);
@@ -89,6 +90,8 @@ export async function loadDefinitions(appDir: string): Promise<{
     const webhooks: WebhookDef[] = [];
     const services: AnyService[] = [];
     const buses: BusRef<unknown>[] = [];
+    const channels: ChannelConfig[] = [];
+    const channelNameSources = new Map<string, string>();
     const heartbeatSources = new Map<string, string>();
     const webhookNameSources = new Map<string, string>();
     const webhookPathSources = new Map<string, string>();
@@ -163,6 +166,25 @@ export async function loadDefinitions(appDir: string): Promise<{
                     }
                     busNameSources.set(value.$name, file);
                     buses.push(value);
+                } else if (isChannel(value)) {
+                    // Plan 4: discover channel() declarations so the
+                    // gateway can authorize subscriptions. Silently dedup
+                    // on name — a channel may legitimately be re-exported
+                    // from multiple modules.
+                    const existing = channelNameSources.get(value.name);
+                    if (existing && existing !== file) {
+                        // Duplicate from a different file is likely a bug
+                        // (two channels with the same name and different
+                        // access policies would be ambiguous).
+                        console.warn(
+                            `[workspace-service] duplicate channel '${value.name}' in ${file} (also defined in ${existing}); using first`,
+                        );
+                        continue;
+                    }
+                    if (!existing) {
+                        channelNameSources.set(value.name, file);
+                        channels.push(value);
+                    }
                 }
             }
         } catch (err) {
@@ -202,7 +224,7 @@ export async function loadDefinitions(appDir: string): Promise<{
         }
     }
 
-    return { entities, workflows, heartbeats, webhooks, services, buses };
+    return { entities, workflows, heartbeats, webhooks, services, buses, channels };
 }
 
 /**
@@ -293,7 +315,12 @@ const appDir = process.env.SYNCENGINE_APP_DIR;
 if (appDir) {
     void (async () => {
         const PORT = parseInt(process.env.PORT ?? "9080", 10);
-        const { entities, workflows, heartbeats, webhooks, services, buses } = await loadDefinitions(appDir);
+        const { entities, workflows, heartbeats, webhooks, services, buses, channels } = await loadDefinitions(appDir);
+
+        // Plan 4: register channels so the gateway's AuthHook can
+        // authorize subscriptions against their $access policies.
+        const { registerChannels } = await import('./auth/channel-registry.js');
+        registerChannels(channels);
 
         // Load config + extract overrides. Silently tolerates apps without a
         // syncengine.config.ts — dev-only harnesses and smoke fixtures skip it.

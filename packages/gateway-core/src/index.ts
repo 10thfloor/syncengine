@@ -7,6 +7,8 @@
 
 export { GatewayCore } from './gateway-core';
 export type { GatewayConfig, GatewaySessionHandle } from './gateway-core';
+export { PASSTHROUGH_AUTH_HOOK } from './auth-hook';
+export type { AuthHook, VerifyInitFn, AuthorizeChannelFn } from './auth-hook';
 export { ClientSession } from './client-session';
 export type { GatewayClientWs } from './client-session';
 export { WorkspaceBridge } from './workspace-bridge';
