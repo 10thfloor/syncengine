@@ -120,25 +120,16 @@ export interface RoleEnumCarrier<E extends readonly string[]> {
     readonly $enum: E;
 }
 
-function roleBare(...allowed: [string, ...string[]]): AccessPolicy {
+/** Shared implementation for both `role()` overloads. The typed
+ *  overload's first argument (the value-def carrier) is unused at
+ *  runtime — it only exists to give TypeScript the enum for the rest
+ *  parameter. */
+function makeRolePolicy(allowed: readonly string[]): AccessPolicy {
     return {
         $kind: 'access',
         check: (ctx) => {
-            if (!ctx.user?.roles) return false;
-            return allowed.some((r) => ctx.user!.roles!.includes(r));
-        },
-    };
-}
-
-function roleTyped<E extends readonly string[]>(
-    _def: RoleEnumCarrier<E>,
-    ...allowed: [E[number], ...E[number][]]
-): AccessPolicy {
-    return {
-        $kind: 'access',
-        check: (ctx) => {
-            if (!ctx.user?.roles) return false;
-            return allowed.some((r) => ctx.user!.roles!.includes(r));
+            const roles = ctx.user?.roles;
+            return roles ? allowed.some((r) => roles.includes(r)) : false;
         },
     };
 }
@@ -152,12 +143,8 @@ function role(
     defOrFirst: RoleEnumCarrier<readonly string[]> | string,
     ...rest: string[]
 ): AccessPolicy {
-    if (typeof defOrFirst === 'string') {
-        return roleBare(defOrFirst, ...rest);
-    }
-    // Overload enforces at-least-one role at the public boundary; internal
-    // dispatch casts to match the tuple signature.
-    return roleTyped(defOrFirst, ...(rest as [string, ...string[]]));
+    const allowed = typeof defOrFirst === 'string' ? [defOrFirst, ...rest] : rest;
+    return makeRolePolicy(allowed);
 }
 
 function owner(field: string = 'userId'): AccessPolicy {
