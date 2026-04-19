@@ -27,6 +27,7 @@
     "@syncengine/gateway-core": "workspace:*",
     "@syncengine/http-core": "workspace:*",
     "@syncengine/observe": "workspace:*",
+    "jose": "^6.2.2",
     "ws": "^8.20.0"
   },
   "devDependencies": {

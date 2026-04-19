@@ -411,6 +411,8 @@ export { ServiceContainer } from './service-container.js';
 // ── Auth adapters (Plan 3) ────────────────────────────────────────────────
 export { custom } from './auth/custom-adapter.js';
 export { unverified } from './auth/unverified-adapter.js';
+export { jwt } from './auth/jwt-adapter.js';
+export type { JwtAdapterOptions } from './auth/jwt-adapter.js';
 
 // ── Event bus — subscriber side ────────────────────────────────────────────
 export { on, From, isSubscription } from './bus-on.js';
