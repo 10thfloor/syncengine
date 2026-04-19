@@ -166,15 +166,38 @@ Declare a defineWorkflow({ on: on(orderEvents), ... }) or remove the bus.
 
 Auto-DLQ buses (`*.dlq`, `*.dead`) are exempted — it's common to let them pile up.
 
-## Phase 2 preview
+## Runtime — how dispatchers spawn
 
-These knobs land in the next release:
+Phase 2a wired the subscriber lifecycle. Every `syncengine start` process (and every handlers container in scale-out) boots a `BusManager` that owns the dispatcher-per-`(workspace × subscriber)` graph.
+
+**Spawn triggers**
+
+1. **At boot.** The manager calls JetStream's `streams.list()`, picks every stream whose name starts with `WS_`, and spawns a `BusDispatcher` for every subscriber workflow × every existing workspace.
+2. **On workspace provision.** The manager subscribes to the `syncengine.workspaces` topic (the same broadcast the gateway uses for its browser-facing registry). Every `WORKSPACE_PROVISIONED` message triggers a spawn for that workspace × every subscriber.
+
+Spawns are idempotent — keyed on `<wsKey>::<subscriberName>` — so boot discovery + a registry broadcast landing in the same second won't double-spawn.
+
+**Durable-consumer restart**
+
+Each dispatcher opens a JetStream consumer named `bus:<busName>:<subscriberName>` (with `.` sanitised to `_`, so DLQ durables like `bus:orderEvents_dlq:alertOnShippingFailure` don't hit NATS's dot ban). That name is stable across restarts: kill `syncengine start`, re-run it, and the dispatcher resumes from the last ack'd sequence. No replay, no duplicates.
+
+**Failure isolation**
+
+Dispatchers start in parallel via `Promise.allSettled`. One subscriber failing to boot (flaky NATS, bad retry config) logs a warn and drops its handle; the rest come up normally. A later `onWorkspaceProvisioned` call retries just the dropped pair.
+
+**Shutdown**
+
+`BusManager` installs `SIGTERM` / `SIGINT` handlers that drain every dispatcher. Set `SYNCENGINE_NO_BUS_SIGNALS=1` to skip this — the scale-out serve binary already owns shutdown through its shared controller.
+
+## Phase 2 preview (what's still ahead)
 
 - `.orderedBy(fn)`, `.ordered()`, `.concurrency(n)`, `.rate(Rate.perSecond(n))`, `.key(fn)` on `on()`.
 - `Layer 3` `JetStream.*` escape hatch for every NATS option.
 - `BusMode.inMemory()` + `override()` for tests without a running NATS.
 - Devtools "Buses" tab with live tail + DLQ inspector.
 - Scale-out smoke (emit from edge, handler consumes).
+- Subscriber workflow `ctx.services` injection (the hex-service wiring that workflows in non-bus code paths already have — bus-subscriber workflows currently see `ctx.services === undefined`).
+- Terminal-vs-retriable classification in the dispatcher (Restate 1.6 returns `TerminalError` as HTTP 500 with a JSON body; the DLQ path waits on the classifier).
 
 ## Links
 
