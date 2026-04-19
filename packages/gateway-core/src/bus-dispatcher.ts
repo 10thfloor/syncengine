@@ -323,10 +323,26 @@ function sleep(ms: number): Promise<void> {
  * is `${workspaceId}/${invocationId}` URL-encoded as a single segment
  * — same contract the `/rpc/workflow/<name>/<inv>` proxy already uses.
  *
- * Mapping:
- *   - 2xx                                → ok
- *   - 4xx with terminal-error body       → terminal (publish DLQ, ack)
- *   - 5xx, network failure, unknown 4xx  → retriable (nak)
+ * Mapping (Restate 1.6 ingress):
+ *   - 2xx                             → ok (workflow completed)
+ *   - 500                             → terminal. Restate's ingress blocks
+ *                                       until the workflow reaches a
+ *                                       terminal state; a 500 means the
+ *                                       workflow threw `TerminalError`
+ *                                       (or exhausted Restate's own
+ *                                       retries). JetStream must NOT
+ *                                       redeliver — publish to DLQ.
+ *   - 502 / 503 / 504                 → retriable. Restate cluster itself
+ *                                       is unavailable / gateway-timing
+ *                                       out / load-shedding. NAK; next
+ *                                       backoff slot retries.
+ *   - 429                             → retriable. Restate is throttling
+ *                                       (rare, but first-class).
+ *   - Other 4xx w/ terminal-error body → terminal (conservative — rare,
+ *                                        e.g. bad payload shape rejected
+ *                                        synchronously).
+ *   - Other 4xx                       → retriable.
+ *   - network / abort / DNS failure   → retriable.
  */
 export async function postToRestate(
     restateUrl: string,
@@ -336,11 +352,6 @@ export async function postToRestate(
     event: unknown,
     requestId: string | undefined,
 ): Promise<RestateOutcome> {
-    // Restate's ingress path for a workflow invocation:
-    //   POST /workflow_<name>/<workspaceId>/<invocationId>/run
-    // The `idempotency-key` header is what Restate uses for dedup;
-    // baking the seq into the invocation id also gives us a stable
-    // retry-safe identity for observability.
     const service = `workflow_${subscriberName}`;
     const key = `${workspaceId}/${invocationId}`;
     const url = `${restateUrl.replace(/\/$/, '')}/${encodeURIComponent(service)}/${encodeURIComponent(key)}/run`;
@@ -365,37 +376,72 @@ export async function postToRestate(
     }
 
     if (response.status >= 200 && response.status < 300) {
-        // Drain the body to free the underlying socket. Value isn't
-        // used — Restate returns invocation metadata we don't need here.
-        try { await response.text(); } catch { /* ignore */ }
+        try { await response.text(); } catch { /* drain socket */ }
         return { kind: 'ok' };
     }
 
-    // Parse body once — used for both terminal + unknown-error paths.
     let body = '';
     try { body = await response.text(); } catch { /* body read failed */ }
+    const contentType = response.headers.get('content-type') ?? '';
 
-    if (response.status >= 500) {
-        return { kind: 'retriable', reason: `restate ${response.status}: ${body.slice(0, 200)}` };
+    return classifyErrorResponse(response.status, contentType, body);
+}
+
+/** Pure classification — split out so unit tests can hammer it without
+ *  a real HTTP server. */
+export function classifyErrorResponse(
+    status: number,
+    contentType: string,
+    body: string,
+): RestateOutcome {
+    // Parse the body as JSON once up-front — Restate surfaces errors
+    // as `{ message, code? }` for both terminal and infra failures; the
+    // distinguishing signal is the status code, not the shape.
+    let parsed: { message?: unknown; code?: unknown } | null = null;
+    if (contentType.includes('json') || body.trimStart().startsWith('{')) {
+        try {
+            parsed = JSON.parse(body) as { message?: unknown; code?: unknown };
+        } catch { /* non-JSON body */ }
+    }
+    const terminalError = {
+        message:
+            (parsed && typeof parsed.message === 'string' ? parsed.message : body.slice(0, 500)) ||
+            `restate ${status}`,
+        ...(parsed && typeof parsed.code === 'string' ? { code: parsed.code } : {}),
+    };
+
+    // Infra 5xx — Restate itself is unavailable. Retry.
+    if (status === 502 || status === 503 || status === 504) {
+        return { kind: 'retriable', reason: `restate ${status}: ${body.slice(0, 200)}` };
     }
 
-    // 4xx — distinguish a Restate `TerminalError` response (the
-    // workflow body threw, JetStream should not retry) from
-    // everything else (unexpected 4xx we retry conservatively).
-    const contentType = response.headers.get('content-type') ?? '';
-    const isTerminal =
+    // 500 — Restate's ingress blocks until the workflow reaches a
+    // terminal state, so a 500 response means the workflow failed
+    // terminally. Every 500 is a DLQ candidate.
+    if (status === 500) {
+        return { kind: 'terminal', error: terminalError };
+    }
+
+    // Other 5xx — unknown; be conservative and retry.
+    if (status >= 500) {
+        return { kind: 'retriable', reason: `restate ${status}: ${body.slice(0, 200)}` };
+    }
+
+    // 429 — rate-limited by Restate. Retry.
+    if (status === 429) {
+        return { kind: 'retriable', reason: `restate ${status}: rate limited` };
+    }
+
+    // 4xx — legacy "terminal-error" content-type + body marker path
+    // handles Restate versions that surface the terminal synchronously.
+    const hasTerminalMarker =
         contentType.includes('application/terminal-error') ||
         /terminal[\s_-]?error/i.test(body);
-    if (isTerminal) {
-        let message = body.slice(0, 500);
-        let code: string | undefined;
-        try {
-            const parsed = JSON.parse(body) as { message?: unknown; code?: unknown };
-            if (typeof parsed.message === 'string') message = parsed.message;
-            if (typeof parsed.code === 'string') code = parsed.code;
-        } catch { /* non-JSON terminal body */ }
-        return { kind: 'terminal', error: { message, ...(code ? { code } : {}) } };
+    if (hasTerminalMarker) {
+        return { kind: 'terminal', error: terminalError };
     }
 
-    return { kind: 'retriable', reason: `restate ${response.status}: ${body.slice(0, 200)}` };
+    // Everything else 4xx — request shape bug, Restate didn't accept it.
+    // Retry conservatively; a persistent 4xx will exhaust max_deliver.
+    return { kind: 'retriable', reason: `restate ${status}: ${body.slice(0, 200)}` };
 }
