@@ -70,15 +70,18 @@ import {
 // the store when setWorkspace() is called.
 let currentWorkspaceId: string = runtimeWorkspaceId;
 
-// Current user getter — module-level so the store() can install a
-// reactive source (Plan 5's useUser()). Defaults to null — no user, no
-// roles, only Access.public policies pass optimistic enforcement. Plan 5
-// replaces this default with the React auth-provider subscription.
-let _getCurrentUser: () => AuthUser | null = () => null;
+// Current user getter — module-level so apps can install a reactive
+// source. Defaults (Plan 5) to reading from the shared authState, which
+// StoreProvider auth={...} pumps from the host's AuthClient. Apps that
+// never set an AuthClient see null users — only Access.public policies
+// pass optimistic enforcement, matching pre-Plan-5 behaviour.
+import { authState } from './auth-state';
+let _getCurrentUser: () => AuthUser | null = () => authState.getUser();
 
 /** Install a getter for the current authenticated user. Called by the
- *  store at boot. `useEntity`'s optimistic path reads this to enforce
- *  \$access policies client-side before the POST to Restate. */
+ *  store at boot (or by a custom auth integration that replaces the
+ *  default authState binding). `useEntity`'s optimistic path reads this
+ *  to enforce \$access policies client-side before the POST to Restate. */
 export function setCurrentUserGetter(fn: () => AuthUser | null): void {
     _getCurrentUser = fn;
 }
@@ -236,6 +239,23 @@ function getGateway(): Promise<WebSocket> {
                     gwEntityHandlers.get(matchKey)?.(
                         (msg['payload'] as Record<string, unknown>) ?? {},
                     );
+                } else if (msg['type'] === 'error') {
+                    // Plan 5: surface auth-layer errors from the gateway
+                    // (UNAUTHORIZED at init rejection, ACCESS_DENIED at
+                    // channel subscribe) onto authState so useAuthError
+                    // can render them. Other errors log but don't update
+                    // auth state.
+                    const code = msg['code'];
+                    if (code === 'UNAUTHORIZED' || code === 'ACCESS_DENIED') {
+                        const channelName = typeof msg['channel'] === 'string'
+                            ? msg['channel']
+                            : undefined;
+                        authState.setError({
+                            code,
+                            message: typeof msg['message'] === 'string' ? msg['message'] : code,
+                            ...(channelName ? { channel: channelName } : {}),
+                        });
+                    }
                 }
             },
             onClose: () => {
