@@ -13,12 +13,9 @@ export function custom(opts: {
     verify: (token: string) => Promise<AuthVerifyResult>;
     refresh?: (token: string) => Promise<string | null>;
 }): AuthProvider {
-    const provider: AuthProvider = {
+    return {
         name: 'custom',
         verify: opts.verify,
+        ...(opts.refresh ? { refresh: opts.refresh } : {}),
     };
-    if (opts.refresh) {
-        (provider as { refresh?: typeof opts.refresh }).refresh = opts.refresh;
-    }
-    return provider;
 }
