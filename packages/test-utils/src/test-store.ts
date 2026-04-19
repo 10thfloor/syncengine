@@ -3,6 +3,7 @@ import {
     type AnyTable,
     type ViewBuilder,
     type AnyEntity,
+    type AuthUser,
     type EmitInsert,
     extractMergeConfig,
     applyHandler as coreApplyHandler,
@@ -160,14 +161,18 @@ export class TestStore {
         return Object.freeze([...snap.values()]) as readonly T[];
     }
 
-    /** Run an entity handler. Returns new state + emits. Does NOT insert emits. */
+    /** Run an entity handler. Returns new state + emits. Does NOT insert emits.
+     *
+     *  Pass `auth` to exercise the entity's `$access` policies — omit for the
+     *  legacy no-enforcement path that earlier tests rely on. */
     applyHandler(
         entity: AnyEntity,
         handlerName: string,
         state: Record<string, unknown> | null,
         args: readonly unknown[],
+        auth?: { readonly user: AuthUser | null; readonly key: string },
     ): HandlerResult {
-        const nextState = coreApplyHandler(entity, handlerName, state, args);
+        const nextState = coreApplyHandler(entity, handlerName, state, args, auth);
         const emits = extractEmits(nextState) ?? [];
         return { state: nextState, emits };
     }
