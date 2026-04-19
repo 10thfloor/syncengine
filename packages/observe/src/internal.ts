@@ -408,6 +408,56 @@ function markWebhookWorkspace(workspace: string): void {
     trace.getActiveSpan()?.setAttribute(ATTR_WORKSPACE, workspace);
 }
 
+export interface GatewayMessageAttrs {
+    /** Incoming message type — 'init', 'subscribe', 'unsubscribe',
+     *  'rpc', 'ping', etc. Low-cardinality so it's safe as a span
+     *  name suffix. */
+    readonly messageType: string;
+    /** Client session id (stable for the connection lifetime).
+     *  APM queries filter by this to see one client's stream. */
+    readonly sessionId?: string;
+    readonly workspace?: string;
+}
+
+/**
+ * Wrap a single inbound WebSocket message's processing. We do NOT
+ * span the connection lifetime — OTel exporters don't flush until
+ * span.end() which would hold spans for the duration of a
+ * long-running WS. Tagging each message with the session id lets
+ * APMs group spans by session on read.
+ */
+async function gatewayMessage<T>(
+    attrs: GatewayMessageAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const spanAttrs: Attributes = {
+        [ATTR_PRIMITIVE]: 'gateway',
+        [ATTR_NAME]: attrs.messageType,
+    };
+    if (attrs.sessionId !== undefined) {
+        spanAttrs['syncengine.session_id'] = attrs.sessionId;
+    }
+    if (attrs.workspace !== undefined) {
+        spanAttrs[ATTR_WORKSPACE] = attrs.workspace;
+    }
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `gateway.${attrs.messageType}`,
+        { kind: SpanKind.SERVER, attributes: spanAttrs },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
 export interface HeartbeatTickAttrs {
     readonly name: string;
     readonly workspace: string;
@@ -520,4 +570,5 @@ export const instrument = {
     markWebhookDedup,
     markWebhookWorkspace,
     heartbeatTick,
+    gatewayMessage,
 };

@@ -14,6 +14,7 @@
  */
 
 import { type NatsConnection, type Subscription } from '@nats-io/transport-node';
+import { instrument } from '@syncengine/observe';
 import { ClientSession, type GatewayClientWs } from './client-session';
 import { WorkspaceBridge } from './workspace-bridge';
 import { connectNats } from './nats-connect';
@@ -73,24 +74,37 @@ export class GatewayCore {
 
         return {
             handleMessage: async (raw: string | Buffer) => {
-                // Every throw inside this handler becomes a graceful
-                // `error` frame + close instead of an unhandled
-                // rejection that would crash the host process.
+                // Parse the frame before spinning a span — invalid
+                // JSON / bad shape gets an inline error reply, no
+                // span emitted.
+                let msg: ClientMsg;
                 try {
-                    let msg: ClientMsg;
-                    try {
-                        const parsed: unknown = JSON.parse(raw.toString());
-                        if (!isValidClientMsg(parsed)) {
-                            ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
-                            return;
-                        }
-                        msg = parsed;
-                    } catch {
-                        ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+                    const parsed: unknown = JSON.parse(raw.toString());
+                    if (!isValidClientMsg(parsed)) {
+                        ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
                         return;
                     }
+                    msg = parsed;
+                } catch {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+                    return;
+                }
 
-                    if (msg.type === 'init') {
+                // Every throw inside the dispatch becomes a graceful
+                // `error` frame + close instead of an unhandled
+                // rejection that would crash the host process. Wrap
+                // the dispatch in a per-message span — session id and
+                // workspace may be absent for the first message (the
+                // init) so the attrs are optional.
+                await instrument.gatewayMessage(
+                    {
+                        messageType: msg.type,
+                        ...(session?.clientId !== undefined && { sessionId: session.clientId }),
+                        ...(session?.workspaceId !== undefined && { workspace: session.workspaceId }),
+                    },
+                    async () => {
+                        try {
+                            if (msg.type === 'init') {
                         if (session) {
                             ws.send(JSON.stringify({ type: 'error', message: 'Already initialized', code: 'REINIT' }));
                             return;
@@ -208,11 +222,13 @@ export class GatewayCore {
                             }
                             break;
                     }
-                } catch (err) {
-                    const message = err instanceof Error ? err.message : String(err);
-                    console.warn(`[gateway] session error: ${message}`);
-                    closeWith(`gateway bridge failed: ${message}`, 'BRIDGE_FAILED');
-                }
+                        } catch (err) {
+                            const message = err instanceof Error ? err.message : String(err);
+                            console.warn(`[gateway] session error: ${message}`);
+                            closeWith(`gateway bridge failed: ${message}`, 'BRIDGE_FAILED');
+                        }
+                    },
+                );
             },
             handleClose: () => {
                 if (session) this.allSessions.delete(session);

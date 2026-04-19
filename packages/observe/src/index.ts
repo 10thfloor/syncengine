@@ -42,6 +42,7 @@ export type {
     WebhookInboundAttrs,
     WebhookRunAttrs,
     HeartbeatTickAttrs,
+    GatewayMessageAttrs,
     RemoteHeaders,
     TraceCarrier,
 } from './internal';
