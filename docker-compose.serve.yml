@@ -1,0 +1,94 @@
+# Scale-out smoke stack — exercises the `syncengine serve` (Bun) edge
+# in front of a handlers-only Node process. Use this when you want the
+# two-tier topology described in docs/superpowers/specs/
+# 2026-04-17-syncengine-serve-design.md §9b/9c, where the edge binary
+# and the Restate handlers deploy independently.
+#
+# Usage:
+#   pnpm build                                  # produces dist/ on host
+#   APP_DIR=apps/notepad docker compose -f docker-compose.serve.yml up --build
+#   ./scripts/smoke-docker-serve.sh             # drive smoke assertions
+#
+# Compared to docker-compose.yml (the single-process / `syncengine start`
+# path), this compose:
+#   • adds a `handlers` service running the Node bundle with
+#     SYNCENGINE_HANDLERS_ONLY=1 (no HTTP server, just Restate endpoint)
+#   • adds an `edge` service — the Bun-compiled `syncengine-serve`
+#     binary — that owns the browser-facing :3000
+#   • shares nats + restate with the single-process compose (same
+#     images, same healthchecks)
+
+services:
+  nats:
+    image: nats:2.12-alpine
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./docker/nats.conf:/etc/nats/nats.conf:ro
+    expose:
+      - "4222"
+      - "8222"
+    ports:
+      - "${NATS_WS_HOST_PORT:-19222}:9222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  restate:
+    image: docker.restate.dev/restatedev/restate:1.6
+    environment:
+      RESTATE_LOG_FILTER: "warn,restate=info"
+      RESTATE_AUTO_PROVISION: "true"
+      RESTATE_CLUSTER_NAME: "syncengine-smoke"
+    ports:
+      - "${RESTATE_INGRESS_HOST_PORT:-18080}:8080"
+      - "9070:9070"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sSf http://localhost:9070/health || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # Node bundle in handlers-only mode — registers the Restate endpoint
+  # on :9080 and nothing else. Not reachable from the host; only the
+  # edge + restate containers need to talk to it.
+  handlers:
+    build:
+      context: ${APP_DIR:-apps/test}
+      dockerfile: Dockerfile.handlers
+    environment:
+      SYNCENGINE_NATS_URL: "ws://nats:9222"
+      SYNCENGINE_RESTATE_URL: "http://restate:8080"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      nats:
+        condition: service_healthy
+      restate:
+        condition: service_healthy
+    expose:
+      - "9080"
+
+  # Bun `syncengine-serve` binary — serves HTML + static + /_health +
+  # /_ready. Browser-facing. Points at the handlers service for
+  # workspace provisioning via SYNCENGINE_RESTATE_URL.
+  edge:
+    build:
+      context: .
+      dockerfile: Dockerfile.edge
+      args:
+        APP_DIR: ${APP_DIR:-apps/test}
+    environment:
+      SYNCENGINE_NATS_URL: "ws://nats:9222"
+      SYNCENGINE_RESTATE_URL: "http://restate:8080"
+      # Browser-facing overrides — see docker-compose.yml for the
+      # rationale on the split internal/public URLs.
+      SYNCENGINE_NATS_PUBLIC_URL: "ws://localhost:${NATS_WS_HOST_PORT:-19222}"
+      SYNCENGINE_RESTATE_PUBLIC_URL: "http://localhost:${RESTATE_INGRESS_HOST_PORT:-18080}"
+    depends_on:
+      handlers:
+        condition: service_started
+      restate:
+        condition: service_healthy
+    ports:
+      - "3000:3000"

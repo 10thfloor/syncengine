@@ -32,6 +32,16 @@ import { createShutdownController } from './shutdown.ts';
 // ── Boot ───────────────────────────────────────────────────────────────────
 
 async function main(argv: readonly string[]): Promise<void> {
+    // Orchestrator healthcheck path — the distroless edge image has no
+    // curl/wget/Node, only the compiled binary itself. A one-shot
+    // `syncengine-serve --health-check` fetches /_health on the port
+    // this process listens on and exits 0/1 so HEALTHCHECK directives
+    // remain self-contained.
+    if (argv.includes('--health-check')) {
+        await runHealthCheck();
+        return;
+    }
+
     let flags: Flags;
     try {
         flags = parseFlags(argv);
@@ -165,6 +175,26 @@ function eventFor(path: string, status: number): string {
     if (status === 404) return `${kind}.404`;
     if (status === 405) return `${kind}.405`;
     return `${kind}.ok`;
+}
+
+/**
+ * One-shot HTTP probe against this process's own /_health endpoint.
+ * Exits 0 if 2xx, 1 otherwise. Used by the Docker HEALTHCHECK in the
+ * distroless edge image where no separate probe tooling is available.
+ *
+ * Reads the port from $HTTP_PORT (aligning with the Dockerfile's
+ * ENV HTTP_PORT=3000); if unset, falls back to the spec default.
+ */
+async function runHealthCheck(): Promise<void> {
+    const port = process.env.HTTP_PORT ?? '3000';
+    try {
+        const res = await fetch(`http://127.0.0.1:${port}/_health`, {
+            signal: AbortSignal.timeout(2000),
+        });
+        process.exit(res.ok ? 0 : 1);
+    } catch {
+        process.exit(1);
+    }
 }
 
 let signalHandlersInstalled = false;

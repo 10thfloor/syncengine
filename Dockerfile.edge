@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1.7
+#
+# Edge image (scale-out path) — produces a distroless container running
+# the `@syncengine/serve` Bun binary in front of `dist/`. The app's
+# Restate handlers run elsewhere (see apps/*/Dockerfile.handlers) and
+# this image only serves HTML + static + /_health + /_ready.
+#
+# Build from the repo root so the monorepo's pnpm-workspace + workspace
+# symlinks resolve during `bun install`. Pass the app via ARG:
+#
+#   docker build -f Dockerfile.edge --build-arg APP_DIR=apps/notepad -t syncengine-edge .
+#
+# The builder stage cross-compiles to linux-x64/glibc. Override
+# --build-arg BUN_TARGET=bun-linux-arm64 for arm64 hosts.
+
+ARG APP_DIR=apps/test
+# TARGETPLATFORM / BUILDPLATFORM are provided automatically by buildx;
+# the Dockerfile is cross-aware by default.
+
+# ── Deps (Node+pnpm) ──────────────────────────────────────────────────────
+# pnpm owns install + workspace resolution. Do it in a Node image that
+# already has corepack; copy the resolved tree into the bun stage next.
+# Pinned to BUILDPLATFORM so this heavy stage runs natively on the
+# build host instead of under emulation.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS deps
+RUN corepack enable && corepack prepare pnpm@10.6.4 --activate
+
+WORKDIR /repo
+# Workspace descriptors first — install layer stays cached across
+# source-only changes.
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
+COPY packages packages
+COPY apps apps
+
+# --ignore-scripts skips the root postinstall's `build:wasm`, which we
+# don't need for the edge binary (it has no native deps).
+RUN pnpm install --frozen-lockfile --ignore-scripts
+
+# ── Compile (Bun) ─────────────────────────────────────────────────────────
+# Also pinned to BUILDPLATFORM so `bun build --compile` runs natively;
+# we cross-compile to the TARGETPLATFORM via --target=bun-linux-{x64|arm64}
+# below. Bun's cross-compile is a no-emulation operation — it just
+# packages the right runtime for the target arch.
+FROM --platform=$BUILDPLATFORM oven/bun:1.3-debian AS builder
+ARG TARGETARCH
+
+# Carry the pnpm-resolved node_modules (store + symlinks) verbatim.
+# Bun's bundler follows the symlinks the same way Node would.
+COPY --from=deps /repo /repo
+WORKDIR /repo
+
+# Resolve Docker's TARGETARCH → Bun's --target name. Bun understands
+# bun-linux-x64 / bun-linux-arm64 (glibc variants); swap to -musl if
+# you switch the runtime base to alpine.
+RUN case "$TARGETARCH" in \
+        amd64) BUN_TARGET=bun-linux-x64 ;; \
+        arm64) BUN_TARGET=bun-linux-arm64 ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /out && \
+    bun build \
+        --compile \
+        --minify \
+        --sourcemap=none \
+        --target=$BUN_TARGET \
+        --outfile /out/syncengine-serve \
+        /repo/packages/serve/src/index.ts
+
+# ── Runtime ───────────────────────────────────────────────────────────────
+# distroless/base has glibc ≥ 2.36 (debian12) — matches bun's minimum.
+# `:nonroot` variant runs as uid 65532, no shell, no package manager.
+FROM gcr.io/distroless/base-debian12:nonroot
+ARG APP_DIR
+
+COPY --from=builder --chown=nonroot:nonroot /out/syncengine-serve /usr/local/bin/syncengine-serve
+COPY --chown=nonroot:nonroot ${APP_DIR}/dist /app/dist
+
+WORKDIR /app
+
+ENV HTTP_PORT=3000
+EXPOSE 3000
+
+# The compiled binary probes itself — distroless has no curl/wget/node.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/usr/local/bin/syncengine-serve", "--health-check"]
+
+ENTRYPOINT ["/usr/local/bin/syncengine-serve"]
+CMD ["/app/dist", "--host", "0.0.0.0", "--port", "3000"]

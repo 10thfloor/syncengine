@@ -237,28 +237,35 @@ function generateServerEntry(
         ``,
     );
 
-    // Start HTTP server
+    // Start HTTP server — unless SYNCENGINE_HANDLERS_ONLY=1, in which
+    // case this process runs Restate handlers only (the scale-out
+    // topology's "handlers" tier; a Bun `syncengine serve` binary on
+    // the "edge" tier handles HTTP).
     lines.push(
-        `const HTTP_PORT = parseInt(process.env.HTTP_PORT ?? '3000', 10);`,
-        `const __dirname = dirname(fileURLToPath(import.meta.url));`,
-        `const staticDir = join(__dirname, '..');`,
-        `const indexHtml = readFileSync(join(staticDir, 'index.html'), 'utf8');`,
+        `if (process.env.SYNCENGINE_HANDLERS_ONLY !== '1') {`,
+        `    const HTTP_PORT = parseInt(process.env.HTTP_PORT ?? '3000', 10);`,
+        `    const __dirname = dirname(fileURLToPath(import.meta.url));`,
+        `    const staticDir = join(__dirname, '..');`,
+        `    const indexHtml = readFileSync(join(staticDir, 'index.html'), 'utf8');`,
         ``,
-        `startHttpServer({`,
-        `    staticDir,`,
-        `    indexHtml,`,
-        `    restateUrl: process.env.SYNCENGINE_RESTATE_URL ?? 'http://localhost:8080',`,
-        `    natsUrl: process.env.SYNCENGINE_NATS_URL ?? 'ws://localhost:9222',`,
+        `    startHttpServer({`,
+        `        staticDir,`,
+        `        indexHtml,`,
+        `        restateUrl: process.env.SYNCENGINE_RESTATE_URL ?? 'http://localhost:8080',`,
+        `        natsUrl: process.env.SYNCENGINE_NATS_URL ?? 'ws://localhost:9222',`,
         // Public URLs only differ from internal ones in split-network
         // deploys (e.g. Docker: server talks to 'http://restate:8080';
         // browser needs 'http://localhost:<published>'). Left unset
         // when the envs aren't provided — serve.ts falls back to the
         // internal URLs, preserving single-host semantics.
-        `    ...(process.env.SYNCENGINE_RESTATE_PUBLIC_URL ? { publicRestateUrl: process.env.SYNCENGINE_RESTATE_PUBLIC_URL } : {}),`,
-        `    ...(process.env.SYNCENGINE_NATS_PUBLIC_URL ? { publicNatsUrl: process.env.SYNCENGINE_NATS_PUBLIC_URL } : {}),`,
-        `    appConfig: _config,`,
-        `    port: HTTP_PORT,`,
-        `});`,
+        `        ...(process.env.SYNCENGINE_RESTATE_PUBLIC_URL ? { publicRestateUrl: process.env.SYNCENGINE_RESTATE_PUBLIC_URL } : {}),`,
+        `        ...(process.env.SYNCENGINE_NATS_PUBLIC_URL ? { publicNatsUrl: process.env.SYNCENGINE_NATS_PUBLIC_URL } : {}),`,
+        `        appConfig: _config,`,
+        `        port: HTTP_PORT,`,
+        `    });`,
+        `} else {`,
+        `    console.log('[syncengine] handlers-only mode — HTTP server skipped');`,
+        `}`,
     );
 
     return lines.join('\n') + '\n';
