@@ -49,12 +49,8 @@ export type {
 
 export { makeObservabilityCtx, type ObservabilityCtxScope } from './ctx';
 
-import { noopMetric } from './noop';
-import type { MetricFactory } from './types';
-
-/**
- * Declared metric factory. Phase A binds this to the noop factory so
- * call sites compile and run; Phase D1 swaps in the OTel-backed
- * implementation that routes through the global meter provider.
- */
-export const metric: MetricFactory = noopMetric;
+// Declared metric factory — OTel-backed via the global meter provider.
+// Safe to call before bootSdk: the API-level noop meter absorbs
+// increments until the SDK is installed, at which point instruments
+// are acquired lazily on the next call. See packages/observe/src/metric.ts.
+export { metric } from './metric';

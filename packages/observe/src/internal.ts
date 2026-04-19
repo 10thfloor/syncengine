@@ -33,6 +33,7 @@ import {
     ATTR_USER,
     ATTR_WORKSPACE,
 } from './semantic';
+import { runInScope } from './scope';
 
 const TRACER_NAME = '@syncengine/observe';
 
@@ -77,7 +78,15 @@ async function entityEffect<T>(
         { attributes: spanAttrs },
         async (span) => {
             try {
-                return await fn();
+                return await runInScope(
+                    {
+                        workspace: attrs.workspace,
+                        primitive: 'entity',
+                        name: attrs.name,
+                        ...(attrs.user !== undefined && { user: attrs.user }),
+                    },
+                    fn,
+                );
             } catch (err) {
                 span.recordException(err as Error);
                 span.setStatus({ code: SpanStatusCode.ERROR });
@@ -291,7 +300,10 @@ async function busConsume<T>(
             },
             async (span) => {
                 try {
-                    return await fn();
+                    return await runInScope(
+                        { workspace: attrs.workspace, primitive: 'bus', name: attrs.busName },
+                        fn,
+                    );
                 } catch (err) {
                     span.recordException(err as Error);
                     span.setStatus({ code: SpanStatusCode.ERROR });
@@ -489,7 +501,10 @@ async function heartbeatTick<T>(
         },
         async (span) => {
             try {
-                return await fn();
+                return await runInScope(
+                    { workspace: attrs.workspace, primitive: 'heartbeat', name: attrs.name },
+                    fn,
+                );
             } catch (err) {
                 span.recordException(err as Error);
                 span.setStatus({ code: SpanStatusCode.ERROR });
@@ -530,7 +545,10 @@ async function webhookRun<T>(
         },
         async (span) => {
             try {
-                return await fn();
+                return await runInScope(
+                    { workspace: attrs.workspace, primitive: 'webhook', name: attrs.name },
+                    fn,
+                );
             } catch (err) {
                 span.recordException(err as Error);
                 span.setStatus({ code: SpanStatusCode.ERROR });

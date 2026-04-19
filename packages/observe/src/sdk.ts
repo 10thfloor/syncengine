@@ -23,6 +23,7 @@ import {
     metrics,
     propagation,
     trace,
+    type MeterProvider,
     type TracerProvider,
 } from '@opentelemetry/api';
 import {
@@ -32,6 +33,7 @@ import {
     type SpanExporter,
     type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
+import type { PushMetricExporter } from '@opentelemetry/sdk-metrics';
 
 import type { ObservabilityConfig } from '@syncengine/core';
 
@@ -58,6 +60,13 @@ export interface BootSdkOptions {
      * `exporter.getFinishedSpans()`.
      */
     readonly traceExporterOverride?: SpanExporter;
+    /**
+     * Test-only: replace the default OTLP metric exporter. Wrapped in a
+     * `PeriodicExportingMetricReader` with a long interval — tests
+     * drive export via `handle.forceFlush()` rather than waiting on
+     * the timer.
+     */
+    readonly metricExporterOverride?: PushMetricExporter;
 }
 
 const DISABLED_HANDLE: SdkHandle = Object.freeze({
@@ -75,11 +84,20 @@ function resolveSamplerRatio(config: ObservabilityConfig | undefined): number {
  *  to the real delegate. The delegate is the BasicTracerProvider (or
  *  subclass) that SimpleSpanProcessor and friends are attached to, so
  *  its `forceFlush` drains the pending export queue. */
-function resolveActiveProvider(): TracerProvider & { forceFlush?: () => Promise<void> } {
+function resolveActiveTracerProvider(): TracerProvider & { forceFlush?: () => Promise<void> } {
     const top = trace.getTracerProvider() as TracerProvider & {
         getDelegate?: () => TracerProvider;
     };
     return top.getDelegate ? (top.getDelegate() as TracerProvider & { forceFlush?: () => Promise<void> }) : top;
+}
+
+/** Resolve the active meter provider — unlike trace, metrics API
+ *  doesn't use a proxy pattern, so the global IS the real provider.
+ *  Cast covers the forceFlush method on concrete MeterProvider impls. */
+function resolveActiveMeterProvider(): MeterProvider & { forceFlush?: () => Promise<void> } {
+    return metrics.getMeterProvider() as MeterProvider & {
+        forceFlush?: () => Promise<void>;
+    };
 }
 
 export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
@@ -99,10 +117,12 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
         root: new TraceIdRatioBasedSampler(resolveSamplerRatio(config)),
     });
 
-    const isTestOverride = opts.traceExporterOverride !== undefined;
+    const isTestOverride =
+        opts.traceExporterOverride !== undefined ||
+        opts.metricExporterOverride !== undefined;
 
-    const spanProcessors: SpanProcessor[] = isTestOverride
-        ? [new SimpleSpanProcessor(opts.traceExporterOverride!)]
+    const spanProcessors: SpanProcessor[] = opts.traceExporterOverride
+        ? [new SimpleSpanProcessor(opts.traceExporterOverride)]
         : [];
 
     // Split prod vs test-override paths so we only construct OTLP
@@ -112,7 +132,24 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
     // in-memory exporter we're injecting.
     let sdk: InstanceType<typeof NodeSDK>;
     if (isTestOverride) {
-        sdk = new NodeSDK({ resource, sampler, spanProcessors });
+        const ctorOpts: ConstructorParameters<typeof NodeSDK>[0] = {
+            resource,
+            sampler,
+            spanProcessors,
+        };
+        if (opts.metricExporterOverride) {
+            const { PeriodicExportingMetricReader } = await import(
+                '@opentelemetry/sdk-metrics'
+            );
+            ctorOpts.metricReaders = [
+                new PeriodicExportingMetricReader({
+                    exporter: opts.metricExporterOverride,
+                    // Long interval — tests drive via handle.forceFlush().
+                    exportIntervalMillis: 3_600_000,
+                }),
+            ];
+        }
+        sdk = new NodeSDK(ctorOpts);
     } else {
         const [
             { OTLPTraceExporter },
@@ -127,23 +164,32 @@ export async function bootSdk(opts: BootSdkOptions = {}): Promise<SdkHandle> {
             resource,
             sampler,
             traceExporter: new OTLPTraceExporter(),
-            metricReader: new PeriodicExportingMetricReader({
-                exporter: new OTLPMetricExporter(),
-                exportIntervalMillis: 60_000,
-            }),
+            metricReaders: [
+                new PeriodicExportingMetricReader({
+                    exporter: new OTLPMetricExporter(),
+                    exportIntervalMillis: 60_000,
+                }),
+            ],
         });
     }
 
     sdk.start();
 
-    // Snapshot the provider now so forceFlush can drive it directly.
-    const provider = resolveActiveProvider();
+    // Snapshot providers now so forceFlush can drive them directly —
+    // subsequent boot/shutdown cycles reinstall globals, and a handle
+    // referring to its original provider is the only way forceFlush
+    // survives that churn.
+    const tracerProvider = resolveActiveTracerProvider();
+    const meterProvider = resolveActiveMeterProvider();
 
     return {
         enabled: true,
         async forceFlush() {
-            if (typeof provider.forceFlush === 'function') {
-                await provider.forceFlush();
+            if (typeof tracerProvider.forceFlush === 'function') {
+                await tracerProvider.forceFlush();
+            }
+            if (typeof meterProvider.forceFlush === 'function') {
+                await meterProvider.forceFlush();
             }
         },
         async shutdown() {
