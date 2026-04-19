@@ -225,3 +225,14 @@ export type {
     RetryConfig,
     BackoffConfig,
 } from './bus-config';
+
+// ── bus() primitive ────────────────────────────────────────────────────────
+export { bus, isBus, deadEventSchema, setBusPublisher } from './bus';
+export type {
+    BusRef,
+    BusOptions,
+    BusConfig,
+    BusPublishCtx,
+    BusPublisher,
+    DeadEvent,
+} from './bus';
