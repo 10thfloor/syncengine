@@ -574,7 +574,12 @@ export function buildRpcMiddleware(
             try {
                 const upstream = await fetch(target.url, {
                     method: 'POST',
-                    headers: { 'content-type': 'application/json' },
+                    headers: {
+                        'content-type': 'application/json',
+                        // W3C TraceContext — see serve/rpc.ts for the
+                        // corresponding handler-side extraction.
+                        ...instrument.traceHeaders(),
+                    },
                     body,
                 });
                 const text = await upstream.text();

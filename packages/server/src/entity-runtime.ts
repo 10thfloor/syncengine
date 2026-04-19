@@ -387,9 +387,22 @@ function buildHandlerBag(entity: AnyEntity): Record<
                     ? []
                     : [args];
             const { workspaceId } = splitObjectKey(ctx.key);
-            return instrument.entityEffect(
-                { workspace: workspaceId, name: entity.$name, op: name },
-                () => runHandler(ctx, entity, name, argList),
+            // Restate is a separate process. For an upstream caller's
+            // span to be the parent of the entity-effect span we emit
+            // here, we extract traceparent from ctx.request().headers
+            // (set by the RPC proxy + bus-dispatcher on the way in).
+            // When no header is present, the entity effect becomes a
+            // new trace root, which is the right behavior for direct
+            // object-to-object invocations.
+            const headers = ctx.request().headers as unknown as ReadonlyMap<
+                string,
+                string | string[]
+            >;
+            return instrument.withRemoteParent(headers, () =>
+                instrument.entityEffect(
+                    { workspace: workspaceId, name: entity.$name, op: name },
+                    () => runHandler(ctx, entity, name, argList),
+                ),
             );
         };
     }

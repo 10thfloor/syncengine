@@ -505,6 +505,11 @@ export async function postToRestate(
     // "cannot use the idempotency key with workflow handlers".
     const headers: Record<string, string> = {
         'content-type': 'application/json',
+        // W3C TraceContext — the dispatcher runs inside the bus-consume
+        // span (see handleMessage); Restate extracts these headers on
+        // the receiving side so the workflow invocation nests under the
+        // consume span in the APM.
+        ...instrument.traceHeaders(),
     };
     if (requestId) headers['x-request-id'] = requestId;
 

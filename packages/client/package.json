@@ -19,7 +19,7 @@
     "@sqlite.org/sqlite-wasm": "3.51.2-build8",
     "@syncengine/core": "workspace:*",
     "@syncengine/dbsp": "file:../dbsp-engine/pkg",
-    "@nats-io/transport-node": "^3.3.1"
+    "@nats-io/transport-node": "3.3.1"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0"

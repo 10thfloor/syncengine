@@ -97,6 +97,12 @@ export function createRpcHandler(opts: RpcProxyOptions) {
                         // browser request.
                         'x-syncengine-workspace': wsResult,
                         'x-request-id': requestId,
+                        // W3C TraceContext — Restate relays these as-is into
+                        // ctx.request().headers; the handler-side adapter
+                        // (entity-runtime's instrument.withRemoteParent)
+                        // extracts them and nests handler spans under this
+                        // outbound rpc.* span.
+                        ...instrument.traceHeaders(),
                     },
                     body: bodyText,
                 });

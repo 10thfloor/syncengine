@@ -302,10 +302,73 @@ async function busConsume<T>(
     );
 }
 
+/** Minimal shape for the various header containers Restate exposes —
+ *  the TS SDK 1.13's `ctx.request().headers` is a `ReadonlyMap<string,
+ *  string>`, but some callers (node http, Connect) expose `string | string[]`
+ *  values. The adapter accepts either and normalizes. */
+export type RemoteHeaders = ReadonlyMap<string, string | string[]> | undefined;
+
+const W3C_KEYS = ['traceparent', 'tracestate'] as const;
+
+function firstHeader(headers: RemoteHeaders, key: string): string | undefined {
+    if (!headers) return undefined;
+    const v = headers.get(key);
+    if (v === undefined) return undefined;
+    return Array.isArray(v) ? v[0] : v;
+}
+
+/**
+ * Read W3C TraceContext from the inbound Restate handler's request
+ * headers and install it as the active parent for `fn`. All spans
+ * started inside `fn` become children of the upstream span that set
+ * the traceparent, stitching our pipeline's trace with whatever
+ * emitted it (another syncengine process, an external caller, or a
+ * future Restate-emitted invocation span).
+ *
+ * Safe to call with no headers / no traceparent — `fn` runs with
+ * whatever parent context is already active.
+ */
+async function withRemoteParent<T>(
+    headers: RemoteHeaders,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const carrier: TraceCarrier = {};
+    for (const key of W3C_KEYS) {
+        const v = firstHeader(headers, key);
+        if (v !== undefined) carrier[key] = v;
+    }
+    if (Object.keys(carrier).length === 0) {
+        // No propagation headers — run fn with the current context
+        // unchanged. Skipping propagation.extract avoids producing a
+        // child of nothing (which propagation impls handle gracefully
+        // but still wastes a context.with frame).
+        return await fn();
+    }
+    const parentCtx = propagation.extract(context.active(), carrier);
+    return context.with(parentCtx, fn);
+}
+
+/**
+ * Build an object containing W3C TraceContext headers (traceparent,
+ * and tracestate when present) for the currently active span. Callers
+ * spread the result onto outbound fetch headers so the downstream
+ * service can extract the parent context on receipt.
+ *
+ * When the SDK is disabled the result is `{}` so callers can unconditionally
+ * spread it without polluting headers with stale values.
+ */
+function traceHeaders(): TraceCarrier {
+    const carrier: TraceCarrier = {};
+    propagation.inject(context.active(), carrier);
+    return carrier;
+}
+
 export const instrument = {
     entityEffect,
     request,
     rpc,
     busPublish,
     busConsume,
+    withRemoteParent,
+    traceHeaders,
 };

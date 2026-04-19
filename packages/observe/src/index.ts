@@ -39,6 +39,7 @@ export type {
     RpcKind,
     BusPublishAttrs,
     BusConsumeAttrs,
+    RemoteHeaders,
     TraceCarrier,
 } from './internal';
 
