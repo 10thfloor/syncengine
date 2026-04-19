@@ -105,123 +105,123 @@ export class GatewayCore {
                     async () => {
                         try {
                             if (msg.type === 'init') {
-                        if (session) {
-                            ws.send(JSON.stringify({ type: 'error', message: 'Already initialized', code: 'REINIT' }));
-                            return;
-                        }
-                        const init = msg as ClientInitMessage;
+                                if (session) {
+                                    ws.send(JSON.stringify({ type: 'error', message: 'Already initialized', code: 'REINIT' }));
+                                    return;
+                                }
+                                const init = msg as ClientInitMessage;
 
-                        // Plan 4: verify the auth token via the injected
-                        // hook. Fail closed if a token was provided but
-                        // the hook rejects it. Absence of a token is OK
-                        // — the session stays anonymous (user = null) and
-                        // only Access.public channels will subscribe.
-                        const verifiedUser = await this.authHook.verifyInit(
-                            init.authToken,
-                            init.workspaceId,
-                        );
-                        if (init.authToken && verifiedUser === null) {
-                            closeWith('Unauthorized', 'UNAUTHORIZED');
-                            return;
-                        }
-
-                        session = new ClientSession(init.clientId, ws);
-                        session.user = verifiedUser;
-                        session.workspaceId = init.workspaceId;
-                        authToken = init.authToken;
-                        bridge = await this.getOrCreateBridge(init.workspaceId);
-                        bridge.addSession(session);
-
-                        await bridge.ensureEntityWritesConsumer();
-                        // Authorize each init-time channel BEFORE spinning
-                        // up its consumer. Rejected channels are silently
-                        // skipped — the client's `channels` config is a
-                        // hint, not a contract.
-                        for (const ch of init.channels) {
-                            const allowed = await this.authHook.authorizeChannel(
-                                verifiedUser,
-                                init.workspaceId,
-                                ch,
-                            );
-                            if (!allowed) {
-                                ws.send(JSON.stringify({
-                                    type: 'error',
-                                    message: `Access denied for channel '${ch}'`,
-                                    code: 'ACCESS_DENIED',
-                                }));
-                                continue;
-                            }
-                            await bridge.ensureChannelConsumer(ch);
-                        }
-
-                        this.allSessions.add(session);
-                        ws.send(JSON.stringify({ type: 'ready' }));
-                        return;
-                    }
-
-                    if (!session || !bridge) {
-                        ws.send(JSON.stringify({ type: 'error', message: 'Must send init first', code: 'NO_INIT' }));
-                        return;
-                    }
-
-                    switch (msg.type) {
-                        case 'subscribe':
-                            if (msg.kind === 'channel') {
-                                // Plan 4: authorize the channel subscription
-                                // before any NATS consumer spins up. If the
-                                // policy rejects, send ACCESS_DENIED and
-                                // skip — no data flows to this session for
-                                // this channel.
-                                const allowed = await this.authHook.authorizeChannel(
-                                    session.user,
-                                    session.workspaceId,
-                                    msg.name,
+                                // Plan 4: verify the auth token via the injected
+                                // hook. Fail closed if a token was provided but
+                                // the hook rejects it. Absence of a token is OK
+                                // — the session stays anonymous (user = null) and
+                                // only Access.public channels will subscribe.
+                                const verifiedUser = await this.authHook.verifyInit(
+                                    init.authToken,
+                                    init.workspaceId,
                                 );
-                                if (!allowed) {
-                                    ws.send(JSON.stringify({
-                                        type: 'error',
-                                        message: `Access denied for channel '${msg.name}'`,
-                                        code: 'ACCESS_DENIED',
-                                    }));
+                                if (init.authToken && verifiedUser === null) {
+                                    closeWith('Unauthorized', 'UNAUTHORIZED');
+                                    return;
+                                }
+
+                                session = new ClientSession(init.clientId, ws);
+                                session.user = verifiedUser;
+                                session.workspaceId = init.workspaceId;
+                                authToken = init.authToken;
+                                bridge = await this.getOrCreateBridge(init.workspaceId);
+                                bridge.addSession(session);
+
+                                await bridge.ensureEntityWritesConsumer();
+                                // Authorize each init-time channel BEFORE spinning
+                                // up its consumer. Rejected channels are silently
+                                // skipped — the client's `channels` config is a
+                                // hint, not a contract.
+                                for (const ch of init.channels) {
+                                    const allowed = await this.authHook.authorizeChannel(
+                                        verifiedUser,
+                                        init.workspaceId,
+                                        ch,
+                                    );
+                                    if (!allowed) {
+                                        ws.send(JSON.stringify({
+                                            type: 'error',
+                                            message: `Access denied for channel '${ch}'`,
+                                            code: 'ACCESS_DENIED',
+                                        }));
+                                        continue;
+                                    }
+                                    await bridge.ensureChannelConsumer(ch);
+                                }
+
+                                this.allSessions.add(session);
+                                ws.send(JSON.stringify({ type: 'ready' }));
+                                return;
+                            }
+
+                            if (!session || !bridge) {
+                                ws.send(JSON.stringify({ type: 'error', message: 'Must send init first', code: 'NO_INIT' }));
+                                return;
+                            }
+
+                            switch (msg.type) {
+                                case 'subscribe':
+                                    if (msg.kind === 'channel') {
+                                        // Plan 4: authorize the channel subscription
+                                        // before any NATS consumer spins up. If the
+                                        // policy rejects, send ACCESS_DENIED and
+                                        // skip — no data flows to this session for
+                                        // this channel.
+                                        const allowed = await this.authHook.authorizeChannel(
+                                            session.user,
+                                            session.workspaceId,
+                                            msg.name,
+                                        );
+                                        if (!allowed) {
+                                            ws.send(JSON.stringify({
+                                                type: 'error',
+                                                message: `Access denied for channel '${msg.name}'`,
+                                                code: 'ACCESS_DENIED',
+                                            }));
+                                            break;
+                                        }
+                                        // Mark replaying BEFORE subscribing so the live
+                                        // consumer skips this session until replay-end.
+                                        if (msg.lastSeq != null && msg.lastSeq > 0) {
+                                            session.replayingChannels.add(msg.name);
+                                        }
+                                        session.subscribeChannel(msg.name);
+                                        await bridge.ensureChannelConsumer(msg.name);
+                                        if (msg.lastSeq != null && msg.lastSeq > 0) {
+                                            bridge.replayChannel(session, msg.name, msg.lastSeq);
+                                            session.replayingChannels.delete(msg.name);
+                                        } else {
+                                            session.send({ type: 'replay-end', channel: msg.name });
+                                        }
+                                    } else if (msg.kind === 'entity') {
+                                        session.subscribeEntity(msg.entity, msg.key);
+                                    } else if (msg.kind === 'topic') {
+                                        session.subscribeTopic(msg.name, msg.key);
+                                    }
                                     break;
-                                }
-                                // Mark replaying BEFORE subscribing so the live
-                                // consumer skips this session until replay-end.
-                                if (msg.lastSeq != null && msg.lastSeq > 0) {
-                                    session.replayingChannels.add(msg.name);
-                                }
-                                session.subscribeChannel(msg.name);
-                                await bridge.ensureChannelConsumer(msg.name);
-                                if (msg.lastSeq != null && msg.lastSeq > 0) {
-                                    bridge.replayChannel(session, msg.name, msg.lastSeq);
-                                    session.replayingChannels.delete(msg.name);
-                                } else {
-                                    session.send({ type: 'replay-end', channel: msg.name });
-                                }
-                            } else if (msg.kind === 'entity') {
-                                session.subscribeEntity(msg.entity, msg.key);
-                            } else if (msg.kind === 'topic') {
-                                session.subscribeTopic(msg.name, msg.key);
-                            }
-                            break;
 
-                        case 'unsubscribe':
-                            if (msg.kind === 'channel') session.unsubscribeChannel(msg.name);
-                            else if (msg.kind === 'entity') session.unsubscribeEntity(msg.entity, msg.key);
-                            else if (msg.kind === 'topic') session.unsubscribeTopic(msg.name, msg.key);
-                            break;
+                                case 'unsubscribe':
+                                    if (msg.kind === 'channel') session.unsubscribeChannel(msg.name);
+                                    else if (msg.kind === 'entity') session.unsubscribeEntity(msg.entity, msg.key);
+                                    else if (msg.kind === 'topic') session.unsubscribeTopic(msg.name, msg.key);
+                                    break;
 
-                        case 'publish':
-                            if (msg.kind === 'delta') {
-                                const subject = `ws.${bridge.workspaceId}.ch.${msg.channel}.deltas`;
-                                bridge.publishDelta(subject, msg.payload);
-                            } else if (msg.kind === 'topic') {
-                                bridge.publishTopicLocal(msg.name, msg.key, msg.payload, session.clientId);
-                            } else if (msg.kind === 'authority') {
-                                void bridge.publishAuthority(msg.viewName, msg.deltas, authToken);
+                                case 'publish':
+                                    if (msg.kind === 'delta') {
+                                        const subject = `ws.${bridge.workspaceId}.ch.${msg.channel}.deltas`;
+                                        bridge.publishDelta(subject, msg.payload);
+                                    } else if (msg.kind === 'topic') {
+                                        bridge.publishTopicLocal(msg.name, msg.key, msg.payload, session.clientId);
+                                    } else if (msg.kind === 'authority') {
+                                        void bridge.publishAuthority(msg.viewName, msg.deltas, authToken);
+                                    }
+                                    break;
                             }
-                            break;
-                    }
                         } catch (err) {
                             const message = err instanceof Error ? err.message : String(err);
                             console.warn(`[gateway] session error: ${message}`);
