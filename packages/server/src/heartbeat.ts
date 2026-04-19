@@ -10,6 +10,7 @@
 
 import * as restate from '@restatedev/restate-sdk';
 import { errors, SchemaCode } from '@syncengine/core';
+import type { AnyService } from '@syncengine/core';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -37,6 +38,8 @@ export interface HeartbeatConfig {
     every: number | string;
     maxRuns?: number;
     runAtStart?: boolean;
+    /** Services required by this heartbeat handler. */
+    services?: readonly AnyService[];
     run: HeartbeatHandler;
 }
 
@@ -74,6 +77,7 @@ export interface HeartbeatDef<TName extends string = string> {
     readonly $every: IntervalSpec;
     readonly $maxRuns: number;
     readonly $runAtStart: boolean;
+    readonly $services: readonly AnyService[];
     readonly $handler: HeartbeatHandler;
 }
 
@@ -116,6 +120,7 @@ export function heartbeat<const TName extends string>(
         $every: every,
         $maxRuns: maxRuns,
         $runAtStart: config.runAtStart ?? false,
+        $services: config.services ?? [],
         $handler: config.run,
     };
 }

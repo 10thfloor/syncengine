@@ -1,10 +1,16 @@
 import * as restate from '@restatedev/restate-sdk';
 import { errors, SchemaCode } from '@syncengine/core';
+import type { AnyService } from '@syncengine/core';
+
+export interface WorkflowOptions {
+    readonly services?: readonly AnyService[];
+}
 
 export interface WorkflowDef<TName extends string = string, TInput = unknown> {
     readonly $tag: 'workflow';
     readonly $name: TName;
     readonly $handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>;
+    readonly $services: readonly AnyService[];
 }
 
 export function isWorkflow(value: unknown): value is WorkflowDef {
@@ -19,7 +25,17 @@ export const WORKFLOW_OBJECT_PREFIX = 'workflow_';
 
 export function defineWorkflow<const TName extends string, TInput>(
     name: TName,
+    options: WorkflowOptions,
     handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
+): WorkflowDef<TName, TInput>;
+export function defineWorkflow<const TName extends string, TInput>(
+    name: TName,
+    handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
+): WorkflowDef<TName, TInput>;
+export function defineWorkflow<const TName extends string, TInput>(
+    name: TName,
+    optionsOrHandler: WorkflowOptions | ((ctx: restate.WorkflowContext, input: TInput) => Promise<void>),
+    maybeHandler?: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
 ): WorkflowDef<TName, TInput> {
     if (!name || typeof name !== 'string') {
         throw errors.schema(SchemaCode.INVALID_WORKFLOW_NAME, {
@@ -34,7 +50,18 @@ export function defineWorkflow<const TName extends string, TInput>(
             context: { workflow: name },
         });
     }
-    return { $tag: 'workflow', $name: name, $handler: handler };
+
+    let handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>;
+    let services: readonly AnyService[] = [];
+
+    if (typeof optionsOrHandler === 'function') {
+        handler = optionsOrHandler;
+    } else {
+        services = optionsOrHandler.services ?? [];
+        handler = maybeHandler!;
+    }
+
+    return { $tag: 'workflow', $name: name, $handler: handler, $services: services };
 }
 
 export function buildWorkflowObject(def: WorkflowDef): ReturnType<typeof restate.workflow> {
