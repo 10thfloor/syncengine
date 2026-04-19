@@ -249,6 +249,13 @@ function generateServerEntry(
         `    indexHtml,`,
         `    restateUrl: process.env.SYNCENGINE_RESTATE_URL ?? 'http://localhost:8080',`,
         `    natsUrl: process.env.SYNCENGINE_NATS_URL ?? 'ws://localhost:9222',`,
+        // Public URLs only differ from internal ones in split-network
+        // deploys (e.g. Docker: server talks to 'http://restate:8080';
+        // browser needs 'http://localhost:<published>'). Left unset
+        // when the envs aren't provided — serve.ts falls back to the
+        // internal URLs, preserving single-host semantics.
+        `    ...(process.env.SYNCENGINE_RESTATE_PUBLIC_URL ? { publicRestateUrl: process.env.SYNCENGINE_RESTATE_PUBLIC_URL } : {}),`,
+        `    ...(process.env.SYNCENGINE_NATS_PUBLIC_URL ? { publicNatsUrl: process.env.SYNCENGINE_NATS_PUBLIC_URL } : {}),`,
         `    appConfig: _config,`,
         `    port: HTTP_PORT,`,
         `});`,

@@ -47,10 +47,20 @@ export interface ProductionServerConfig {
     staticDir: string;
     /** Raw HTML content of index.html (read once at startup). */
     indexHtml: string;
-    /** Restate ingress URL for RPC proxying. */
+    /** Restate ingress URL for server-side RPC proxying. Always the
+     *  network address reachable from INSIDE this process. */
     restateUrl: string;
-    /** NATS WebSocket URL (injected into meta tags). */
+    /** NATS URL used server-side. Always the address reachable from
+     *  inside this process. */
     natsUrl: string;
+    /** Optional override for the Restate URL injected into HTML. When
+     *  unset, `restateUrl` is used. Needed when the browser reaches
+     *  Restate on a different address than the server does (e.g.
+     *  Docker: server=http://restate:8080, browser=http://localhost:18080). */
+    publicRestateUrl?: string;
+    /** Optional override for the NATS URL injected into HTML. Same
+     *  rationale as publicRestateUrl. */
+    publicNatsUrl?: string;
     /** The loaded syncengine.config.ts default export. */
     appConfig: SyncengineConfig;
     /** Port to listen on. */
@@ -124,6 +134,8 @@ export function startHttpServer(config: ProductionServerConfig): void {
         indexHtml,
         restateUrl,
         natsUrl,
+        publicRestateUrl,
+        publicNatsUrl,
         appConfig,
         port,
     } = config;
@@ -187,6 +199,8 @@ export function startHttpServer(config: ProductionServerConfig): void {
                     indexHtml,
                     natsUrl,
                     restateUrl,
+                    ...(publicNatsUrl ? { publicNatsUrl } : {}),
+                    ...(publicRestateUrl ? { publicRestateUrl } : {}),
                     appConfig,
                     ensureProvisioned,
                 });
@@ -253,6 +267,8 @@ export function startHttpServer(config: ProductionServerConfig): void {
             indexHtml: string;
             natsUrl: string;
             restateUrl: string;
+            publicNatsUrl?: string;
+            publicRestateUrl?: string;
             appConfig: SyncengineConfig;
             ensureProvisioned: (wsKey: string) => Promise<void>;
         },
@@ -284,8 +300,8 @@ export function startHttpServer(config: ProductionServerConfig): void {
         const gatewayUrl = `${wsProto}://${req.headers.host}/gateway`;
         const html = injectMetaTags(opts.indexHtml, {
             workspaceId: wsKey,
-            natsUrl: opts.natsUrl,
-            restateUrl: opts.restateUrl,
+            natsUrl: opts.publicNatsUrl ?? opts.natsUrl,
+            restateUrl: opts.publicRestateUrl ?? opts.restateUrl,
             gatewayUrl,
         });
 
