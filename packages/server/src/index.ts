@@ -369,6 +369,10 @@ export {
 export { getRegisteredWebhooks } from './webhook-registry.js';
 export { ServiceContainer } from './service-container.js';
 
+// ── Auth adapters (Plan 3) ────────────────────────────────────────────────
+export { custom } from './auth/custom-adapter.js';
+export { unverified } from './auth/unverified-adapter.js';
+
 // ── Event bus — subscriber side ────────────────────────────────────────────
 export { on, From, isSubscription } from './bus-on.js';
 export type { Subscription, CursorConfig } from './bus-on.js';
