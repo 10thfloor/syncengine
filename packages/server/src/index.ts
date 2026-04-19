@@ -5,12 +5,15 @@ import * as restate from "@restatedev/restate-sdk";
 import { errors, SchemaCode } from "@syncengine/core";
 import { workspace } from "./workspace/workspace.js";
 import { bindEntities } from "./entity-runtime.js";
-import { isEntity, type AnyEntity } from "@syncengine/core";
+import { isEntity, type AnyEntity, isService, type AnyService } from "@syncengine/core";
 import { isWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
 import { isHeartbeat, type HeartbeatDef } from './heartbeat.js';
 import { buildHeartbeatWorkflow } from './heartbeat-workflow.js';
 import { heartbeatStatus, HEARTBEAT_STATUS_ENTITY_NAME } from '@syncengine/core';
 import { registerHeartbeats } from './heartbeat-registry.js';
+import { isWebhook, type WebhookDef } from './webhook.js';
+import { buildWebhookWorkflow } from './webhook-workflow.js';
+import { registerWebhooks } from './webhook-registry.js';
 
 // ── Load user entities (PLAN Phase 4) ────────────────────────────────────
 //
@@ -43,8 +46,18 @@ function walkSourceFiles(srcDir: string): string[] {
             } else if (st.isFile() && (
                 name.endsWith(".actor.ts") ||
                 name.endsWith(".workflow.ts") ||
-                name.endsWith(".heartbeat.ts")
+                name.endsWith(".heartbeat.ts") ||
+                name.endsWith(".webhook.ts")
             )) {
+                out.push(full);
+            } else if (
+                st.isFile() &&
+                name.endsWith(".ts") &&
+                !name.startsWith(".") &&
+                full.includes("/services/") &&
+                !full.includes("/services/test") &&
+                !full.includes("/services/staging")
+            ) {
                 out.push(full);
             }
         }
@@ -62,13 +75,20 @@ export async function loadDefinitions(appDir: string): Promise<{
     entities: AnyEntity[];
     workflows: WorkflowDef[];
     heartbeats: HeartbeatDef[];
+    webhooks: WebhookDef[];
+    services: AnyService[];
 }> {
     const srcDir = resolve(appDir, "src");
     const allFiles = walkSourceFiles(srcDir);
     const entities: AnyEntity[] = [];
     const workflows: WorkflowDef[] = [];
     const heartbeats: HeartbeatDef[] = [];
+    const webhooks: WebhookDef[] = [];
+    const services: AnyService[] = [];
     const heartbeatSources = new Map<string, string>();
+    const webhookNameSources = new Map<string, string>();
+    const webhookPathSources = new Map<string, string>();
+    const serviceNameSources = new Map<string, string>();
 
     for (const file of allFiles) {
         try {
@@ -96,6 +116,37 @@ export async function loadDefinitions(appDir: string): Promise<{
                     }
                     heartbeatSources.set(value.$name, file);
                     heartbeats.push(value);
+                } else if (isWebhook(value)) {
+                    const existingName = webhookNameSources.get(value.$name);
+                    if (existingName) {
+                        throw errors.schema(SchemaCode.DUPLICATE_WEBHOOK_NAME, {
+                            message: `Duplicate webhook name '${value.$name}':\n    ${existingName}\n    ${file}`,
+                            hint: `Webhook names must be unique; each compiles to one Restate workflow identity.`,
+                            context: { webhook: value.$name, files: [existingName, file] },
+                        });
+                    }
+                    const existingPath = webhookPathSources.get(value.$path);
+                    if (existingPath) {
+                        throw errors.schema(SchemaCode.DUPLICATE_WEBHOOK_PATH, {
+                            message: `Duplicate webhook path '${value.$path}':\n    ${existingPath}\n    ${file}`,
+                            hint: `Each webhook must have a unique path under /webhooks.`,
+                            context: { path: value.$path, files: [existingPath, file] },
+                        });
+                    }
+                    webhookNameSources.set(value.$name, file);
+                    webhookPathSources.set(value.$path, file);
+                    webhooks.push(value);
+                } else if (isService(value)) {
+                    const existing = serviceNameSources.get(value.$name);
+                    if (existing) {
+                        throw errors.schema(SchemaCode.DUPLICATE_SERVICE_NAME, {
+                            message: `Duplicate service name '${value.$name}':\n    ${existing}\n    ${file}`,
+                            hint: `Service names must be unique across the src/ tree.`,
+                            context: { service: value.$name, files: [existing, file] },
+                        });
+                    }
+                    serviceNameSources.set(value.$name, file);
+                    services.push(value);
                 }
             }
         } catch (err) {
@@ -110,7 +161,7 @@ export async function loadDefinitions(appDir: string): Promise<{
             `[workspace-service] appDir=${appDir} but no .actor.ts or .heartbeat.ts files found under src/`,
         );
     }
-    return { entities, workflows, heartbeats };
+    return { entities, workflows, heartbeats, webhooks, services };
 }
 
 /**
@@ -125,6 +176,8 @@ export async function startRestateEndpoint(
     workflows: WorkflowDef[],
     port: number,
     heartbeats: HeartbeatDef[] = [],
+    webhooks: WebhookDef[] = [],
+    services: AnyService[] = [],
 ): Promise<void> {
     const endpoint = restate.endpoint().bind(workspace);
 
@@ -139,10 +192,15 @@ export async function startRestateEndpoint(
     for (const hb of heartbeats) {
         bound.bind(buildHeartbeatWorkflow(hb));
     }
+    for (const wh of webhooks) {
+        bound.bind(buildWebhookWorkflow(wh));
+    }
 
-    // Make the definition list available to the workspace boot hook so
-    // `workspace.provision` can fire `trigger: 'boot'` heartbeats.
+    // Make the definition lists available to framework hooks:
+    // - heartbeats: workspace.provision fires `trigger: 'boot'`
+    // - webhooks: HTTP layer matches incoming /webhooks/... requests
     registerHeartbeats(heartbeats);
+    registerWebhooks(webhooks);
 
     await bound.listen(port);
 
@@ -154,6 +212,12 @@ export async function startRestateEndpoint(
             : "") +
         (heartbeats.length > 0
             ? ` (heartbeats: ${heartbeats.map((h) => h.$name).join(", ")})`
+            : "") +
+        (webhooks.length > 0
+            ? ` (webhooks: ${webhooks.map((w) => `${w.$name}@${w.$path}`).join(", ")})`
+            : "") +
+        (services.length > 0
+            ? ` (services: ${services.map((s) => s.$name).join(", ")})`
             : ""),
     );
 }
@@ -168,8 +232,8 @@ const appDir = process.env.SYNCENGINE_APP_DIR;
 if (appDir) {
     void (async () => {
         const PORT = parseInt(process.env.PORT ?? "9080", 10);
-        const { entities, workflows, heartbeats } = await loadDefinitions(appDir);
-        await startRestateEndpoint(entities, workflows, PORT, heartbeats);
+        const { entities, workflows, heartbeats, webhooks, services } = await loadDefinitions(appDir);
+        await startRestateEndpoint(entities, workflows, PORT, heartbeats, webhooks, services);
     })();
 }
 
@@ -193,3 +257,26 @@ export type {
     ParsedCron,
     CronField,
 } from './heartbeat.js';
+export {
+    webhook,
+    isWebhook,
+    WEBHOOK_WORKFLOW_PREFIX,
+} from './webhook.js';
+export type {
+    WebhookDef,
+    WebhookConfig,
+    WebhookContext,
+    WebhookHandler,
+    VerifyConfig,
+    VerifyResult,
+    HmacVerifyConfig,
+    CustomVerifyFn,
+} from './webhook.js';
+export {
+    dispatchWebhook,
+    findWebhook,
+    MAX_WEBHOOK_BODY_BYTES,
+    type WebhookDispatchResult,
+} from './webhook-http.js';
+export { getRegisteredWebhooks } from './webhook-registry.js';
+export { ServiceContainer } from './service-container.js';
