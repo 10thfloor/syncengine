@@ -25,6 +25,7 @@ Practical docs for building with syncengine primitives. Each guide opens with "w
 | [testing.md](testing.md) | Unit / integration / smoke patterns; `createBusTestHarness` |
 | [cli.md](cli.md) | `syncengine dev` / `start` / `build` / `serve` / `add` commands |
 | [deployment.md](deployment.md) | Dev vs single-process vs scale-out production topologies |
+| [observability.md](observability.md) | OTel traces + metrics + log correlation, wired into every seam |
 
 ## Start here
 
