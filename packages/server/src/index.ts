@@ -278,7 +278,7 @@ if (appDir) {
 }
 
 export { entityRef, type EntityRefProxy } from './entity-ref.js';
-export { defineWorkflow, isWorkflow, type WorkflowDef } from './workflow.js';
+export { defineWorkflow, isWorkflow, isBusSubscriberWorkflow, type WorkflowDef } from './workflow.js';
 export {
     heartbeat,
     isHeartbeat,

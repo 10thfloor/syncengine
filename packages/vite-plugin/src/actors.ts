@@ -104,7 +104,9 @@ function discoverActorFiles(srcDir: string): string[] {
                 st.isFile() && (
                     name.endsWith('.actor.ts') ||
                     name.endsWith('.workflow.ts') ||
-                    name.endsWith('.heartbeat.ts')
+                    name.endsWith('.heartbeat.ts') ||
+                    name.endsWith('.webhook.ts') ||
+                    name.endsWith('.bus.ts')
                 )
             ) {
                 out.push(full);
@@ -343,6 +345,58 @@ function stubHeartbeatModule(source: string, id: string): string {
     return lines.join('\n') + '\n';
 }
 
+// ── Webhook stub ───────────────────────────────────────────────────────────
+
+/**
+ * Replace a `.webhook.ts` module with a client-safe stub. The client
+ * bundle never dispatches webhooks (external senders do) — we just
+ * emit `{ $tag, $name, $path }` so any accidental import resolves
+ * without pulling `@syncengine/server` into the browser.
+ */
+function stubWebhookModule(source: string, id: string): string {
+    const exports: Array<{ exportName: string; name: string; path: string }> = [];
+
+    const callRe = /export\s+const\s+(\w+)\s*=\s*webhook\(\s*['"]([^'"]+)['"]\s*,\s*\{/g;
+    for (const m of source.matchAll(callRe)) {
+        const exportName = m[1]!;
+        const name = m[2]!;
+        const matchIndex = m.index ?? 0;
+        const openBraceIdx = matchIndex + m[0].length - 1;
+        const closeIdx = findBalancedClose(source, openBraceIdx, '{', '}');
+        if (closeIdx === -1) continue;
+        const body = source.slice(openBraceIdx + 1, closeIdx);
+        const path = extractStringField(body, 'path') ?? '';
+        exports.push({ exportName, name, path });
+    }
+
+    if (exports.length === 0) {
+        if (/\bwebhook\s*\(/.test(source)) {
+            throw new Error(
+                `[syncengine:vite-plugin] ${id}: found webhook() call but could not ` +
+                `extract a config literal. Pass the config inline:\n\n` +
+                `    export const myWebhook = webhook('myWebhook', {\n` +
+                `        path: '/vendor/event',\n` +
+                `        verify: { scheme: 'hmac-sha256', secret: () => process.env.SECRET! },\n` +
+                `        ...\n` +
+                `    });\n\n` +
+                `Framework statically extracts $name and $path from the config object literal.`,
+            );
+        }
+        return '// webhook stub: no webhook() calls found\n';
+    }
+    const lines = ['// Generated client stub — server code stripped by @syncengine/vite-plugin'];
+    for (const e of exports) {
+        lines.push(
+            `export const ${e.exportName} = {`,
+            `    $tag: 'webhook',`,
+            `    $name: ${JSON.stringify(e.name)},`,
+            `    $path: ${JSON.stringify(e.path)},`,
+            `};`,
+        );
+    }
+    return lines.join('\n') + '\n';
+}
+
 function extractStringField(body: string, field: string): string | null {
     const re = new RegExp(`(^|[,{\\s])${field}\\s*:\\s*['"]([^'"]+)['"]`);
     const m = body.match(re);
@@ -361,6 +415,94 @@ function extractBoolField(body: string, field: string): boolean | null {
     const re = new RegExp(`(^|[,{\\s])${field}\\s*:\\s*(true|false)`);
     const m = body.match(re);
     return m ? m[2] === 'true' : null;
+}
+
+// ── Dev middleware: /webhooks/* ─────────────────────────────────────────────
+
+import {
+    dispatchWebhook,
+    findWebhook,
+    isWebhook,
+    type WebhookDef,
+} from '@syncengine/server';
+import type { ViteDevServer } from 'vite';
+
+/**
+ * Load every `.webhook.ts` file through Vite's SSR pipeline (so imports
+ * resolve but server code isn't stubbed) and collect the exported defs.
+ * Re-runs on every request so HMR edits to webhook files are picked up
+ * without restart.
+ */
+async function loadWebhookDefs(
+    server: ViteDevServer,
+    webhookFiles: string[],
+): Promise<WebhookDef[]> {
+    const defs: WebhookDef[] = [];
+    for (const file of webhookFiles) {
+        try {
+            const mod = await server.ssrLoadModule(file);
+            for (const value of Object.values(mod)) {
+                if (isWebhook(value)) defs.push(value);
+            }
+        } catch (err) {
+            server.config.logger.error(
+                `[syncengine:vite-plugin] failed to load ${file}: ${(err as Error).message}`,
+            );
+        }
+    }
+    return defs;
+}
+
+function buildFetchRequest(req: Connect.IncomingMessage, rawBody: string): Request {
+    const host = req.headers.host ?? 'localhost';
+    const url = new URL(req.url ?? '/', `http://${host}`);
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === 'string') headers.set(k, v);
+        else if (Array.isArray(v)) headers.set(k, v.join(', '));
+    }
+    return new Request(url, {
+        method: req.method ?? 'POST',
+        headers,
+        body: rawBody || null,
+    });
+}
+
+export function buildWebhookMiddleware(
+    server: ViteDevServer,
+    webhookFiles: () => string[],
+    restateUrlFn: () => string,
+): Connect.NextHandleFunction {
+    return async (req, res, next) => {
+        const url = req.url ?? '';
+        if (!url.startsWith('/webhooks')) return next();
+        const pathname = url.split('?')[0]!;
+
+        if (req.method !== 'POST') {
+            res.statusCode = 405;
+            res.setHeader('content-type', 'application/json');
+            res.end(JSON.stringify({ ok: false, reason: 'webhooks accept POST only' }));
+            return;
+        }
+
+        const defs = await loadWebhookDefs(server, webhookFiles());
+        const def = findWebhook(pathname, defs);
+        if (!def) {
+            res.statusCode = 404;
+            res.setHeader('content-type', 'application/json');
+            res.end(JSON.stringify({ ok: false, reason: `no webhook registered at ${pathname}` }));
+            return;
+        }
+
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const rawBody = Buffer.concat(chunks).toString('utf8');
+        const request = buildFetchRequest(req, rawBody);
+        const result = await dispatchWebhook(def, request, rawBody, restateUrlFn());
+        res.statusCode = result.status;
+        if (result.contentType) res.setHeader('content-type', result.contentType);
+        res.end(result.body);
+    };
 }
 
 // ── Dev middleware: /__syncengine/rpc/<entity>/<key>/<handler> ─────────────
@@ -482,7 +624,12 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
             }
         },
 
-        transform(code, id) {
+        transform(code, id, options) {
+            // SSR mode loads the real server code (used by the dev
+            // /webhooks middleware to dispatch incoming requests);
+            // client graph gets the stubbed, dependency-free version.
+            const ssr = options?.ssr === true;
+
             // ── .workflow.ts: replace with a client-safe stub ──────────
             // Workflow files are server-only (they import @syncengine/server
             // which pulls in Node-only deps like nats). The client only
@@ -490,6 +637,7 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
             // replace the entire module with a lightweight stub that
             // preserves the export names and their $name values.
             if (id.endsWith('.workflow.ts')) {
+                if (ssr) return null;
                 return { code: stubWorkflowModule(code), map: null };
             }
 
@@ -499,7 +647,17 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
             // wire useHeartbeat(def); handler + interval parser stay
             // server-side.
             if (id.endsWith('.heartbeat.ts')) {
+                if (ssr) return null;
                 return { code: stubHeartbeatModule(code, id), map: null };
+            }
+
+            // ── .webhook.ts: replace with a client-safe stub ───────────
+            // Webhook files are server-only. Clients never dispatch them
+            // (external senders do); stubbing prevents accidental imports
+            // from pulling @syncengine/server into the bundle.
+            if (id.endsWith('.webhook.ts')) {
+                if (ssr) return null;
+                return { code: stubWebhookModule(code, id), map: null };
             }
 
             if (!id.endsWith('.actor.ts')) return null;
@@ -522,11 +680,27 @@ export function actorsPlugin(opts: ActorsPluginOptions = {}): Plugin {
             // ActorsPluginOptions no longer exposes workspaceId, so
             // this hashed default is the only fallback that makes sense.
             const fallbackWsKey = hashWorkspaceId('default');
+            const restateUrlFn = () =>
+                opts.restateUrl ??
+                readDevRuntime(viteRoot ?? server.config.root).restateUrl ??
+                'http://localhost:8080';
+
             const middleware = buildRpcMiddleware(
-                () => opts.restateUrl ?? readDevRuntime(viteRoot ?? server.config.root).restateUrl ?? 'http://localhost:8080',
+                restateUrlFn,
                 () => fallbackWsKey,
             );
             server.middlewares.use(middleware);
+
+            // /webhooks/* — external senders. We re-derive the webhook
+            // file list from the registry on each request so HMR-added
+            // files work without a restart.
+            const webhookMw = buildWebhookMiddleware(
+                server,
+                () =>
+                    Array.from(registry.paths).filter((p) => p.endsWith('.webhook.ts')),
+                restateUrlFn,
+            );
+            server.middlewares.use(webhookMw);
         },
 
         // ── Phase 9: emit server manifest during production build ──
