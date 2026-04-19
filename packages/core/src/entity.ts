@@ -569,11 +569,31 @@ export function insert<T extends AnyTable>(
     return { $effect: 'insert', table: tableRef, record };
 }
 
-/** Create a typed trigger effect for use in `emit({ state, effects })`. */
+/** Test-only — resets the deprecation-warning latch so successive
+ *  runs in the same vitest process can each observe the first warn. */
+let triggerDeprecationWarned = false;
+export function __resetTriggerDeprecation(): void {
+    triggerDeprecationWarned = false;
+}
+
+/**
+ * @deprecated Use `publish(bus, event)` instead. `trigger()` is a tight
+ * 1:1 coupling from an entity to a single named workflow; `publish()`
+ * + a `defineWorkflow({ on: on(bus) })` subscriber decouple the emitter
+ * from its consumers and unlock fan-out, DLQ, replay, and compensating
+ * sagas. See `docs/migrations/2026-04-20-trigger-to-publish.md`.
+ */
 export function trigger<TInput>(
     workflow: { readonly $tag: 'workflow'; readonly $name: string },
     input: TInput,
 ): { readonly $effect: 'trigger'; readonly workflow: { readonly $tag: 'workflow'; readonly $name: string }; readonly input: TInput } {
+    if (!triggerDeprecationWarned) {
+        triggerDeprecationWarned = true;
+        console.warn(
+            `[syncengine] trigger() is deprecated and will be removed in a future release. ` +
+            `Migrate to bus + publish(). See docs/migrations/2026-04-20-trigger-to-publish.md.`,
+        );
+    }
     return { $effect: 'trigger', workflow, input };
 }
 
