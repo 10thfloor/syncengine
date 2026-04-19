@@ -45,8 +45,11 @@ import {
     rebase,
     errors,
     ConnectionCode,
+    AuthCode,
     SyncEngineError,
+    AccessDeniedError,
     type AnyEntity,
+    type AuthUser,
     type EntityDef,
     type EntityState,
     type EntityStateShape,
@@ -66,6 +69,19 @@ import {
 // Current workspace — defaults to the compile-time value, updated by
 // the store when setWorkspace() is called.
 let currentWorkspaceId: string = runtimeWorkspaceId;
+
+// Current user getter — module-level so the store() can install a
+// reactive source (Plan 5's useUser()). Defaults to null — no user, no
+// roles, only Access.public policies pass optimistic enforcement. Plan 5
+// replaces this default with the React auth-provider subscription.
+let _getCurrentUser: () => AuthUser | null = () => null;
+
+/** Install a getter for the current authenticated user. Called by the
+ *  store at boot. `useEntity`'s optimistic path reads this to enforce
+ *  \$access policies client-side before the POST to Restate. */
+export function setCurrentUserGetter(fn: () => AuthUser | null): void {
+    _getCurrentUser = fn;
+}
 
 /** Read-only accessor for the current workspace id (used by useHeartbeat). */
 export function getEntityClientWorkspace(): string {
@@ -441,6 +457,25 @@ function notify(sub: EntitySubscription): void {
     for (const fn of sub.listeners) fn();
 }
 
+/** Parse a server-side error into the right typed client-side error.
+ *  Restate TerminalError messages come across as plain strings prefixed
+ *  with the error code (see server/entity-runtime.ts error handler):
+ *    [ACCESS_DENIED] ...       → AccessDeniedError
+ *    [<category::code>] ...    → SyncEngineError (as-is)
+ *  Falls back to ConnectionCode.HTTP_ERROR for network / parse failures.
+ *  Exported for test coverage — not part of the public client API. */
+export function classifyActionError(err: unknown): SyncEngineError {
+    if (err instanceof SyncEngineError) return err;
+    const message = err instanceof Error ? err.message : String(err);
+    const accessMatch = message.match(/^\[ACCESS_DENIED\]\s*(.+)$/);
+    if (accessMatch) {
+        return errors.accessDenied(AuthCode.ACCESS_DENIED, {
+            message: accessMatch[1]!,
+        });
+    }
+    return errors.connection(ConnectionCode.HTTP_ERROR, { message });
+}
+
 // ── RPC helper (PLAN Phase 4 — via dev middleware) ────────────────────────
 
 /**
@@ -647,10 +682,22 @@ function buildActionProxy<TState, THandlers>(
             if (sub.confirmed !== null) {
                 const base = sub.optimistic ?? sub.confirmed;
                 try {
-                    applyHandler(entity, name, base, args);
-                } catch {
-                    // Local run failed — no optimistic preview is possible.
-                    // Proceed to the POST path; the server decides.
+                    applyHandler(entity, name, base, args, {
+                        user: _getCurrentUser(),
+                        key,
+                    });
+                } catch (localErr) {
+                    // AccessDenied locally — the server would reject too.
+                    // Fail fast: set error, notify, and reject the promise
+                    // without ever POSTing. Business-logic rejections fall
+                    // through to the POST so the server has the final say.
+                    if (localErr instanceof AccessDeniedError) {
+                        sub.error = localErr;
+                        notify(sub);
+                        throw localErr;
+                    }
+                    // Local run failed for other reasons — no optimistic
+                    // preview, proceed to POST.
                 }
             }
 
@@ -682,12 +729,7 @@ function buildActionProxy<TState, THandlers>(
                 const prevOptimistic = sub.optimistic;
                 sub.pending = sub.pending.filter((a) => a.id !== action.id);
                 rebaseSub(sub, entity);
-                const error =
-                    err instanceof SyncEngineError
-                        ? err
-                        : errors.connection(ConnectionCode.HTTP_ERROR, {
-                              message: err instanceof Error ? err.message : String(err),
-                          });
+                const error = classifyActionError(err);
                 sub.error = error;
                 // Always notify on error — the UI needs to show it.
                 if (sub.optimistic !== prevOptimistic || sub.error) notify(sub);
