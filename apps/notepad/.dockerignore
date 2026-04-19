@@ -1,0 +1,7 @@
+# Only dist/ is actually COPY-ed (see Dockerfile). Everything else is
+# excluded defensively so a sibling `.env`, source checkout, or stray
+# node_modules can never land in the build context / image layer.
+
+**
+!dist/
+!dist/**
