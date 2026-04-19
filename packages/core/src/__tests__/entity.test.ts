@@ -5,13 +5,19 @@ import {
     validateEntityState,
     applyHandler,
     rebase,
+    emit,
+    extractEmits,
+    insert,
+    trigger,
+    extractTriggers,
+    TRIGGER_KEY,
     EntityError,
     getTerminalStates,
     getTransitionGraph,
     type EntityRecord,
     type EntityHandlers,
 } from '../entity';
-import { integer, text, real, boolean } from '../schema';
+import { integer, text, real, boolean, table, id } from '../schema';
 import { SyncEngineError, EntityCode } from '../errors';
 
 describe('defineEntity (Phase 4)', () => {
@@ -606,5 +612,97 @@ describe('defineEntity (Phase 4)', () => {
             });
             expect(toggle.$statusField).toBe('mode');
         });
+    });
+});
+
+describe('emit() redesign — { state, effects } form', () => {
+    const notes = table('notes', {
+        id: id(),
+        body: text(),
+        author: text(),
+    });
+
+    it('accepts { state, effects } with insert()', () => {
+        const result = emit({
+            state: { count: 1 },
+            effects: [
+                insert(notes, { body: 'hello', author: 'alice' }),
+            ],
+        });
+        expect(result.count).toBe(1);
+        const emits = extractEmits(result);
+        expect(emits).toHaveLength(1);
+        expect(emits![0].table).toBe('notes');
+        expect(emits![0].record).toEqual({ body: 'hello', author: 'alice' });
+    });
+
+    it('accepts { state, effects } with trigger()', () => {
+        const fakeWorkflow = { $tag: 'workflow' as const, $name: 'processPayment', $handler: async () => {} };
+        const result = emit({
+            state: { status: 'pending' },
+            effects: [
+                trigger(fakeWorkflow, { total: 100 }),
+            ],
+        });
+        expect(result.status).toBe('pending');
+        const triggers = extractTriggers(result);
+        expect(triggers).toHaveLength(1);
+        expect(triggers![0].workflow).toBe('processPayment');
+        expect(triggers![0].input).toEqual({ total: 100 });
+    });
+
+    it('accepts mixed insert and trigger effects', () => {
+        const fakeWorkflow = { $tag: 'workflow' as const, $name: 'notify', $handler: async () => {} };
+        const result = emit({
+            state: { count: 2 },
+            effects: [
+                insert(notes, { body: 'test' }),
+                trigger(fakeWorkflow, { msg: 'hi' }),
+            ],
+        });
+        expect(extractEmits(result)).toHaveLength(1);
+        expect(extractTriggers(result)).toHaveLength(1);
+    });
+
+    it('returns clean state when effects is empty', () => {
+        const result = emit({
+            state: { count: 5 },
+            effects: [],
+        });
+        expect(result.count).toBe(5);
+        expect(extractEmits(result)).toBeUndefined();
+        expect(extractTriggers(result)).toBeUndefined();
+    });
+
+    it('legacy emit(state, ...inserts) still works', () => {
+        const result = emit(
+            { count: 1 },
+            { table: notes, record: { body: 'legacy' } },
+        );
+        expect(result.count).toBe(1);
+        expect(extractEmits(result)).toHaveLength(1);
+    });
+
+    it('triggers survive applyHandler validation', () => {
+        const fakeWorkflow = { $tag: 'workflow' as const, $name: 'test', $handler: async () => {} };
+        const e = defineEntity('triggerTest', {
+            state: { value: integer() },
+            handlers: {
+                doWork(state) {
+                    return emit({
+                        state: { value: state.value + 1 },
+                        effects: [
+                            trigger(fakeWorkflow, { data: 'hello' }),
+                        ],
+                    });
+                },
+            },
+        });
+        const result = applyHandler(e, 'doWork', { value: 0 }, []);
+        expect(result.value).toBe(1);
+        const triggers = extractTriggers(result);
+        expect(triggers).toHaveLength(1);
+        expect(triggers![0].workflow).toBe('test');
+        expect(triggers![0].input).toEqual({ data: 'hello' });
     });
 });

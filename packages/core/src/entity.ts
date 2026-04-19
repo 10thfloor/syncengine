@@ -502,6 +502,16 @@ export function isEntity(x: unknown): x is AnyEntity {
  *  handler's return value. Non-enumerable, invisible to JSON.stringify. */
 export const EMIT_KEY: unique symbol = Symbol.for("syncengine.emit");
 
+/** Well-known Symbol key used to carry workflow triggers on the
+ *  handler's return value. Non-enumerable, invisible to JSON.stringify. */
+export const TRIGGER_KEY: unique symbol = Symbol.for("syncengine.trigger");
+
+/** A workflow trigger attached to a handler's return value via TRIGGER_KEY. */
+export interface EmitTrigger {
+    readonly workflow: string;
+    readonly input: unknown;
+}
+
 /** A table row to publish as an INSERT delta (runtime representation —
  *  always carries the table name as a string). */
 export interface EmitInsert {
@@ -547,6 +557,22 @@ function normalizeInsert(insert: TypedEmitInsert<AnyTable> | LegacyEmitInsert): 
   };
 }
 
+/** Create a typed insert effect for use in `emit({ state, effects })`. */
+export function insert<T extends AnyTable>(
+    tableRef: T,
+    record: EmitRecord<T['$columns']>,
+): { readonly $effect: 'insert'; readonly table: T; readonly record: EmitRecord<T['$columns']> } {
+    return { $effect: 'insert', table: tableRef, record };
+}
+
+/** Create a typed trigger effect for use in `emit({ state, effects })`. */
+export function trigger<TInput>(
+    workflow: { readonly $tag: 'workflow'; readonly $name: string },
+    input: TInput,
+): { readonly $effect: 'trigger'; readonly workflow: { readonly $tag: 'workflow'; readonly $name: string }; readonly input: TInput } {
+    return { $effect: 'trigger', workflow, input };
+}
+
 /**
  * Wrap a handler's return state with table inserts that the entity
  * runtime will publish to the sync pipeline. The returned object IS
@@ -567,6 +593,11 @@ function normalizeInsert(insert: TypedEmitInsert<AnyTable> | LegacyEmitInsert): 
  * }
  * ```
  */
+/** New form: `emit({ state, effects })` — carries both inserts and triggers. */
+export function emit<S extends Record<string, unknown>>(
+  opts: { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> },
+): S;
+/** Legacy form: `emit(state, ...inserts)` — typed table references. */
 export function emit<S extends Record<string, unknown>, T extends AnyTable>(
   state: S,
   ...inserts: TypedEmitInsert<T>[]
@@ -577,10 +608,55 @@ export function emit<S extends Record<string, unknown>>(
   ...inserts: LegacyEmitInsert[]
 ): S;
 export function emit<S extends Record<string, unknown>>(
-  state: S,
+  stateOrOpts: S | { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> },
   ...inserts: (TypedEmitInsert<AnyTable> | LegacyEmitInsert)[]
 ): S {
-  const wrapped = { ...state };
+  // Detect new { state, effects } form
+  if (
+    typeof stateOrOpts === 'object' &&
+    stateOrOpts !== null &&
+    'state' in stateOrOpts &&
+    'effects' in stateOrOpts &&
+    Array.isArray((stateOrOpts as { effects: unknown }).effects)
+  ) {
+    const { state, effects } = stateOrOpts as { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> };
+    const wrapped = { ...state };
+
+    // Separate effects into inserts and triggers
+    const insertEffects: EmitInsert[] = [];
+    const triggerEffects: EmitTrigger[] = [];
+
+    for (const effect of effects) {
+      if (effect.$effect === 'insert') {
+        const typed = effect as unknown as { table: AnyTable; record: Record<string, unknown> };
+        insertEffects.push(normalizeInsert(typed));
+      } else if (effect.$effect === 'trigger') {
+        const typed = effect as unknown as { workflow: { $name: string }; input: unknown };
+        triggerEffects.push({ workflow: typed.workflow.$name, input: typed.input });
+      }
+    }
+
+    if (insertEffects.length > 0) {
+      Object.defineProperty(wrapped, EMIT_KEY, {
+        value: insertEffects,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+
+    if (triggerEffects.length > 0) {
+      Object.defineProperty(wrapped, TRIGGER_KEY, {
+        value: triggerEffects,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+
+    return wrapped as S;
+  }
+
+  // Legacy form: emit(state, ...inserts)
+  const wrapped = { ...(stateOrOpts as S) };
   const normalized = inserts.map(normalizeInsert);
   // Non-enumerable: the symbol must NOT survive `{ ...base, ...result }`
   // spreading in `applyHandler`, otherwise stale emits bleed through to
@@ -601,6 +677,15 @@ export function extractEmits(
 ): EmitInsert[] | undefined {
   return (state as Record<symbol, unknown>)[EMIT_KEY] as
     | EmitInsert[]
+    | undefined;
+}
+
+/** Extract workflow triggers from a handler return value, if any. */
+export function extractTriggers(
+  state: Record<string, unknown>,
+): EmitTrigger[] | undefined {
+  return (state as Record<symbol, unknown>)[TRIGGER_KEY] as
+    | EmitTrigger[]
     | undefined;
 }
 
@@ -830,14 +915,16 @@ export function applyHandler(
 
   let next: Record<string, unknown>;
   let emits: EmitInsert[] | undefined;
+  let triggers: EmitTrigger[] | undefined;
   let rawResult: Record<string, unknown> | undefined;
   try {
     const result = handlerFn(base, ...args);
     rawResult = result as Record<string, unknown>;
-    // Capture emit()ed inserts before the spread (they survive the
-    // spread since EMIT_KEY is enumerable, but validateEntityState
-    // builds a fresh object that drops them).
+    // Capture emit()ed inserts and triggers before the spread (they
+    // survive the spread since EMIT_KEY/TRIGGER_KEY are non-enumerable,
+    // but validateEntityState builds a fresh object that drops them).
     emits = extractEmits(rawResult);
+    triggers = extractTriggers(rawResult);
     // Allow handlers to return a partial state — merge into the current
     // record. Returning the full state also works (the spread is a no-op).
     next = { ...base, ...result };
@@ -902,6 +989,16 @@ export function applyHandler(
   if (emits) {
     Object.defineProperty(validated, EMIT_KEY, {
       value: emits,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  // Re-attach workflow triggers to the validated state so the entity
+  // runtime can extract them after applyHandler returns.
+  if (triggers) {
+    Object.defineProperty(validated, TRIGGER_KEY, {
+      value: triggers,
       enumerable: false,
       configurable: true,
     });

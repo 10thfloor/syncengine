@@ -98,8 +98,12 @@ export {
     applyHandler,
     rebase,
     emit,
+    insert,
+    trigger,
     extractEmits,
+    extractTriggers,
     EMIT_KEY,
+    TRIGGER_KEY,
     sourceSum,
     sourceCount,
     sourceMin,
@@ -125,6 +129,7 @@ export type {
 } from './config';
 export type {
     EmitInsert,
+    EmitTrigger,
     TypedEmitInsert,
     LegacyEmitInsert,
     SourceProjectionDef,
