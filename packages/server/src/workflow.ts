@@ -1,6 +1,6 @@
 import * as restate from '@restatedev/restate-sdk';
 import { errors, SchemaCode } from '@syncengine/core';
-import type { AnyService } from '@syncengine/core';
+import type { AnyService, RetryConfig } from '@syncengine/core';
 import type { Subscription } from './bus-on.js';
 
 export interface WorkflowOptions<TInput = unknown> {
@@ -11,6 +11,11 @@ export interface WorkflowOptions<TInput = unknown> {
      *  invocation id derived from `<bus>:<seq>`. See
      *  @syncengine/gateway-core BusDispatcher. */
     readonly on?: Subscription<TInput>;
+    /** Per-subscriber retry override. Applies only when `on` is set
+     *  (non-subscriber workflows have Restate's own invocation
+     *  retry semantics and don't consult this field). Falls back to
+     *  the BusManager's default retry when absent. */
+    readonly retry?: RetryConfig;
 }
 
 export interface WorkflowDef<TName extends string = string, TInput = unknown> {
@@ -20,6 +25,10 @@ export interface WorkflowDef<TName extends string = string, TInput = unknown> {
     readonly $services: readonly AnyService[];
     /** Present iff the workflow was declared with `{ on: on(bus) }`. */
     readonly $subscription?: Subscription<TInput>;
+    /** Present iff the workflow was declared with `{ retry: ... }`.
+     *  `BusManager.spawnOne` reads this before falling back to the
+     *  manager's default retry. */
+    readonly $retry?: RetryConfig;
 }
 
 /** Narrowing guard for subscriber workflows. */
@@ -70,12 +79,14 @@ export function defineWorkflow<const TName extends string, TInput>(
     let handler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>;
     let services: readonly AnyService[] = [];
     let subscription: Subscription<TInput> | undefined;
+    let retry: RetryConfig | undefined;
 
     if (typeof optionsOrHandler === 'function') {
         handler = optionsOrHandler;
     } else {
         services = optionsOrHandler.services ?? [];
         subscription = optionsOrHandler.on;
+        retry = optionsOrHandler.retry;
         handler = maybeHandler!;
     }
 
@@ -85,6 +96,7 @@ export function defineWorkflow<const TName extends string, TInput>(
         $handler: handler,
         $services: services,
         ...(subscription ? { $subscription: subscription } : {}),
+        ...(retry ? { $retry: retry } : {}),
     };
 }
 

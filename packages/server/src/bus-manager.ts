@@ -225,12 +225,7 @@ export class BusManager {
                 ? { filterPredicate: sub.$subscription.predicate as (event: unknown) => boolean }
                 : {}),
             cursor: sub.$subscription.cursor ?? { kind: 'latest' },
-            // `$retry` lands on WorkflowDef in Task A4; until then, the
-            // cast keeps A1 compile-clean without forcing a schema
-            // change into the wrong task.
-            retry: (sub as SubscriberWorkflow & { $retry?: RetryConfig }).$retry
-                ?? this.config.defaultRetry
-                ?? DEFAULT_RETRY,
+            retry: sub.$retry ?? this.config.defaultRetry ?? DEFAULT_RETRY,
         };
         const handle = this.config.dispatcherFactory(cfg);
         this.handles.set(key, handle);

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { bus } from '@syncengine/core';
+import { bus, Retry, seconds, minutes } from '@syncengine/core';
 import type { BusDispatcherConfig } from '@syncengine/gateway-core';
 import { defineWorkflow, type WorkflowDef } from '../workflow';
 import { on } from '../bus-on';
@@ -177,6 +177,46 @@ describe('BusManager', () => {
         const { instance, configs } = build([shipOnPay], ['ws1']);
         await instance.start();
         expect(configs[0]!.cursor).toEqual({ kind: 'latest' });
+    });
+
+    it('per-subscriber retry overrides the manager default', async () => {
+        const customRetry = Retry.exponential({
+            attempts: 9,
+            initial: seconds(5),
+            max: minutes(10),
+        });
+        const slowSub = defineWorkflow(
+            'slowSub',
+            { on: on(orderEvents), retry: customRetry },
+            async () => { /* noop */ },
+        );
+        const { instance, configs } = build([slowSub], ['ws1']);
+        await instance.start();
+        expect(configs[0]!.retry).toEqual(customRetry);
+    });
+
+    it('manager default retry applies when subscriber has no retry', async () => {
+        const customDefault = Retry.fixed({ attempts: 7, interval: seconds(30) });
+        const stub = stubFactory();
+        const instance = new BusManager({
+            natsUrl: 'nats://test',
+            restateUrl: 'http://test',
+            workflows: [shipOnPay] as unknown as readonly WorkflowDef[],
+            dispatcherFactory: stub.factory,
+            initialWorkspaceIds: ['ws1'],
+            installSignalHandlers: false,
+            defaultRetry: customDefault,
+        });
+        await instance.start();
+        expect(stub.configs[0]!.retry).toEqual(customDefault);
+    });
+
+    it('built-in default retry applies when neither subscriber nor manager declares one', async () => {
+        const { instance, configs } = build([shipOnPay], ['ws1']);
+        await instance.start();
+        expect(configs[0]!.retry.kind).toBe('exponential');
+        if (configs[0]!.retry.kind !== 'exponential') return;
+        expect(configs[0]!.retry.attempts).toBe(3);
     });
 });
 
