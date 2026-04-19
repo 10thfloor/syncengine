@@ -107,7 +107,8 @@ function discoverActorFiles(srcDir: string): string[] {
                     name.endsWith('.workflow.ts') ||
                     name.endsWith('.heartbeat.ts') ||
                     name.endsWith('.webhook.ts') ||
-                    name.endsWith('.bus.ts')
+                    name.endsWith('.bus.ts') ||
+                    name.endsWith('.metrics.ts')
                 )
             ) {
                 out.push(full);
