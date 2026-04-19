@@ -70,15 +70,18 @@ import {
 // the store when setWorkspace() is called.
 let currentWorkspaceId: string = runtimeWorkspaceId;
 
-// Current user getter — module-level so the store() can install a
-// reactive source (Plan 5's useUser()). Defaults to null — no user, no
-// roles, only Access.public policies pass optimistic enforcement. Plan 5
-// replaces this default with the React auth-provider subscription.
-let _getCurrentUser: () => AuthUser | null = () => null;
+// Current user getter — module-level so apps can install a reactive
+// source. Defaults (Plan 5) to reading from the shared authState, which
+// StoreProvider auth={...} pumps from the host's AuthClient. Apps that
+// never set an AuthClient see null users — only Access.public policies
+// pass optimistic enforcement, matching pre-Plan-5 behaviour.
+import { authState } from './auth-state';
+let _getCurrentUser: () => AuthUser | null = () => authState.getUser();
 
 /** Install a getter for the current authenticated user. Called by the
- *  store at boot. `useEntity`'s optimistic path reads this to enforce
- *  \$access policies client-side before the POST to Restate. */
+ *  store at boot (or by a custom auth integration that replaces the
+ *  default authState binding). `useEntity`'s optimistic path reads this
+ *  to enforce \$access policies client-side before the POST to Restate. */
 export function setCurrentUserGetter(fn: () => AuthUser | null): void {
     _getCurrentUser = fn;
 }
