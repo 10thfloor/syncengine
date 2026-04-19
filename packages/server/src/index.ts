@@ -5,8 +5,8 @@ import * as restate from "@restatedev/restate-sdk";
 import { errors, SchemaCode } from "@syncengine/core";
 import { workspace } from "./workspace/workspace.js";
 import { bindEntities } from "./entity-runtime.js";
-import { isEntity, type AnyEntity, isService, type AnyService } from "@syncengine/core";
-import { isWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
+import { isEntity, type AnyEntity, isService, type AnyService, isBus, type BusRef } from "@syncengine/core";
+import { isWorkflow, isBusSubscriberWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
 import { isHeartbeat, type HeartbeatDef } from './heartbeat.js';
 import { buildHeartbeatWorkflow } from './heartbeat-workflow.js';
 import { heartbeatStatus, HEARTBEAT_STATUS_ENTITY_NAME } from '@syncengine/core';
@@ -47,7 +47,8 @@ function walkSourceFiles(srcDir: string): string[] {
                 name.endsWith(".actor.ts") ||
                 name.endsWith(".workflow.ts") ||
                 name.endsWith(".heartbeat.ts") ||
-                name.endsWith(".webhook.ts")
+                name.endsWith(".webhook.ts") ||
+                name.endsWith(".bus.ts")
             )) {
                 out.push(full);
             } else if (
@@ -77,6 +78,7 @@ export async function loadDefinitions(appDir: string): Promise<{
     heartbeats: HeartbeatDef[];
     webhooks: WebhookDef[];
     services: AnyService[];
+    buses: BusRef<unknown>[];
 }> {
     const srcDir = resolve(appDir, "src");
     const allFiles = walkSourceFiles(srcDir);
@@ -85,10 +87,12 @@ export async function loadDefinitions(appDir: string): Promise<{
     const heartbeats: HeartbeatDef[] = [];
     const webhooks: WebhookDef[] = [];
     const services: AnyService[] = [];
+    const buses: BusRef<unknown>[] = [];
     const heartbeatSources = new Map<string, string>();
     const webhookNameSources = new Map<string, string>();
     const webhookPathSources = new Map<string, string>();
     const serviceNameSources = new Map<string, string>();
+    const busNameSources = new Map<string, string>();
 
     for (const file of allFiles) {
         try {
@@ -147,6 +151,17 @@ export async function loadDefinitions(appDir: string): Promise<{
                     }
                     serviceNameSources.set(value.$name, file);
                     services.push(value);
+                } else if (isBus(value)) {
+                    const existing = busNameSources.get(value.$name);
+                    if (existing) {
+                        throw errors.schema(SchemaCode.DUPLICATE_BUS_NAME, {
+                            message: `Duplicate bus name '${value.$name}':\n    ${existing}\n    ${file}`,
+                            hint: `Bus names must be unique across the src/ tree.`,
+                            context: { bus: value.$name, files: [existing, file] },
+                        });
+                    }
+                    busNameSources.set(value.$name, file);
+                    buses.push(value);
                 }
             }
         } catch (err) {
@@ -161,7 +176,32 @@ export async function loadDefinitions(appDir: string): Promise<{
             `[workspace-service] appDir=${appDir} but no .actor.ts or .heartbeat.ts files found under src/`,
         );
     }
-    return { entities, workflows, heartbeats, webhooks, services };
+
+    // Orphan-bus warning: every BusRef without at least one subscriber
+    // workflow has its published events piling up in JetStream until
+    // retention expires. Usually this means the developer declared a
+    // bus() and forgot to defineWorkflow({ on: ... }). Log once per
+    // bus so it's visible in `syncengine dev` boot output.
+    const subscribedBusNames = new Set<string>();
+    for (const wf of workflows) {
+        if (isBusSubscriberWorkflow(wf)) {
+            subscribedBusNames.add(wf.$subscription.bus.$name);
+        }
+    }
+    for (const b of buses) {
+        // DLQ buses are auto-generated and often intentionally
+        // unsubscribed; don't nag about them.
+        if (b.$name.endsWith('.dlq') || b.$name.endsWith('.dead')) continue;
+        if (!subscribedBusNames.has(b.$name)) {
+            console.warn(
+                `[syncengine] bus('${b.$name}') has no subscribers — ` +
+                `events will accumulate on JetStream until the retention window expires. ` +
+                `Declare a defineWorkflow({ on: on(${b.$name}), ... }) or remove the bus.`,
+            );
+        }
+    }
+
+    return { entities, workflows, heartbeats, webhooks, services, buses };
 }
 
 /**
