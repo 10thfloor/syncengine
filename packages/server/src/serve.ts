@@ -205,6 +205,9 @@ export function startHttpServer(config: ProductionServerConfig): void {
         provider: config.appConfig.auth?.provider,
         lookupRole: (userId, workspaceId) =>
             workspaceMemberRole(config.restateUrl, workspaceId, userId),
+        ...(config.appConfig.auth?.requireWorkspaceMembership
+            ? { requireMembership: true }
+            : {}),
     });
 
     const gateway = new GatewayServer({

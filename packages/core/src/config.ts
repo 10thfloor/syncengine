@@ -84,6 +84,23 @@ export interface AuthConfig {
      * `unverified()` for local dev, or a dedicated OIDC adapter.
      */
     readonly provider?: AuthProvider;
+    /**
+     * When `true`, the gateway rejects WebSocket init from users who
+     * aren't members of the requested workspace. Default `false` —
+     * non-members connect as authenticated-but-roleless, and
+     * `Access.role(...)` policies naturally reject their subscribes.
+     *
+     * Turn this on when:
+     *   - you maintain explicit workspace membership (invitations,
+     *     add/removeMember calls) and want a hard fail-fast boundary
+     *   - the UX can handle a 1011 close code on unauthorized connects
+     *
+     * Leave off when:
+     *   - workspaces are auto-provisioned (including the default one)
+     *     and every authenticated user is implicitly a member
+     *   - you prefer per-channel access policies to decide visibility
+     */
+    readonly requireWorkspaceMembership?: boolean;
 }
 
 export interface ServicesConfig {

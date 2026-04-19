@@ -21,6 +21,10 @@ import { getChannelAccess } from './channel-registry.js';
 export function buildAuthHook(opts: {
     provider: AuthProvider | undefined;
     lookupRole: (userId: string, workspaceId: string) => Promise<string | null>;
+    /** When true, non-members are rejected at WebSocket init — gateway
+     *  sends UNAUTHORIZED and closes the socket. Wired from
+     *  `auth.requireWorkspaceMembership` in SyncengineConfig. */
+    requireMembership?: boolean;
 }): AuthHook {
     return {
         verifyInit: (authToken: string | undefined, workspaceId: string): Promise<AuthUser | null> =>
@@ -29,6 +33,7 @@ export function buildAuthHook(opts: {
                 authHeader: authToken ? `Bearer ${authToken}` : undefined,
                 workspaceId,
                 lookupRole: opts.lookupRole,
+                ...(opts.requireMembership ? { requireMembership: true } : {}),
             }),
         authorizeChannel: async (user, _workspaceId, channelName) => {
             const policy = getChannelAccess(channelName);
