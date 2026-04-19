@@ -36,6 +36,7 @@ import {
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
+    AccessDeniedError,
     EntityError,
     SyncEngineError,
     errors,
@@ -89,17 +90,28 @@ async function runHandler(
 
     let validated: Record<string, unknown>;
     try {
-        validated = applyHandler(entity, handlerName, merged, args);
+        // Plan 2: thread auth context to applyHandler so $access policies
+        // are enforced server-side. user is stubbed null until Plan 3 wires
+        // the authenticated identity from the Restate/WebSocket connection.
+        validated = applyHandler(entity, handlerName, merged, args, {
+            user: null,
+            key: entityKey,
+        });
     } catch (err) {
+        // AccessDenied gets its own prefix so the client can distinguish
+        // permission-denied from business-logic rejection on the rebase path.
+        if (err instanceof AccessDeniedError) {
+            throw new restate.TerminalError(`[${err.code}] ${err.message}`);
+        }
         // Typed errors carry structured fields; encode them into the
         // TerminalError message so they survive the Restate wire boundary.
         // hint/context drop here — clients that need structure must parse
         // the message format. See docs/.../error-system.md.
-        if (err instanceof SyncEngineError) {
-            throw new restate.TerminalError(`[${err.category}::${err.code}] ${err.message}`);
-        }
         if (err instanceof EntityError) {
             throw new restate.TerminalError(`[${err.code}] ${err.message}`);
+        }
+        if (err instanceof SyncEngineError) {
+            throw new restate.TerminalError(`[${err.category}::${err.code}] ${err.message}`);
         }
         // applyHandler wraps everything else as UserHandlerError (a
         // SyncEngineError), so this fallback is defensive only.

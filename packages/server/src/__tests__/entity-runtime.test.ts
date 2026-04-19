@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { defineEntity, applyHandler, integer, text, real } from '@syncengine/core';
+import { defineEntity, applyHandler, integer, text, real, Access, AccessDeniedError } from '@syncengine/core';
 import { splitObjectKey } from '../entity-keys';
 import { resolveEmitPlaceholders } from '../entity-runtime';
 
@@ -211,5 +211,40 @@ describe('resolveEmitPlaceholders', () => {
         expect(resolved[1].record.u).toBe('bob');
         expect(resolved[1].record.k).toBe('ent1');
         expect(resolved[2].record.plain).toBe('value');
+    });
+});
+
+describe('access enforcement (server seam)', () => {
+    // Server passes { user: null, key } to applyHandler. Policies that require
+    // a user (authenticated, role, owner) should reject. Access.public passes.
+    const guarded = defineEntity('guarded', {
+        state: { n: integer() },
+        access: {
+            inc: Access.deny,
+            read: Access.public,
+            restock: Access.role('admin'),
+        },
+        handlers: {
+            inc(state) { return { ...state, n: state.n + 1 }; },
+            read(state) { return state; },
+            restock(state) { return state; },
+        },
+    });
+
+    it('rejects Access.deny with AccessDeniedError when server stub user is null', () => {
+        expect(() =>
+            applyHandler(guarded, 'inc', { n: 0 }, [], { user: null, key: 'k1' }),
+        ).toThrow(AccessDeniedError);
+    });
+
+    it('rejects Access.role when server stub user is null (no roles)', () => {
+        expect(() =>
+            applyHandler(guarded, 'restock', { n: 0 }, [], { user: null, key: 'k1' }),
+        ).toThrow(AccessDeniedError);
+    });
+
+    it('allows Access.public even when server stub user is null', () => {
+        const result = applyHandler(guarded, 'read', { n: 0 }, [], { user: null, key: 'k1' });
+        expect(result.n).toBe(0);
     });
 });
