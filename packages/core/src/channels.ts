@@ -13,6 +13,7 @@
  */
 
 import type { AnyTable } from './schema';
+import type { AccessPolicy } from './auth';
 
 /** A sync channel: maps a set of tables to a NATS subject. */
 export interface ChannelConfig<TName extends string = string> {
@@ -20,6 +21,10 @@ export interface ChannelConfig<TName extends string = string> {
     readonly name: TName;
     /** Tables whose mutations publish to this channel. */
     readonly tables: readonly AnyTable[];
+    /** Access policy evaluated at subscription time. Optional — `undefined`
+     *  or `null` means every authenticated workspace member can subscribe.
+     *  Enforcement lives in the gateway — see gateway-core's AuthHook. */
+    readonly $access?: AccessPolicy | null;
 }
 
 /**
@@ -27,15 +32,21 @@ export interface ChannelConfig<TName extends string = string> {
  * a single JetStream subject and replay together.
  *
  *     channel('realtime', [clicks, notes])
+ *     channel('admin', [audit], { access: Access.role('admin') })
  *
  * Tables not assigned to any explicit channel get their own
  * auto-generated channel (one per table).
+ *
+ * An optional `access` policy is evaluated at subscription time. When
+ * omitted, the channel is public to every authenticated workspace
+ * member (workspace membership is the outer gate).
  */
 export function channel<const TName extends string>(
     name: TName,
     tables: readonly AnyTable[],
+    opts?: { readonly access?: AccessPolicy },
 ): ChannelConfig<TName> {
-    return { name, tables };
+    return { name, tables, $access: opts?.access ?? null };
 }
 
 /**

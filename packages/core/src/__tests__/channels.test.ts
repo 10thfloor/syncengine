@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
     buildChannelRouting,
+    channel,
     resolvePublishSubjects,
     type ChannelConfig,
     type ChannelRouting,
 } from '../channels';
+import { Access } from '../auth';
 import { table, id, text } from '../schema';
 import type { SyncConfig } from '../internal/sync-types';
 
@@ -135,5 +137,39 @@ describe('Channel routing (Phase 2.5)', () => {
                 `ws.${workspaceId}.ch.m.deltas`,
             ]);
         });
+    });
+});
+
+describe('channel() access policy (Plan 4)', () => {
+    const t = table('t', { id: id(), body: text() });
+
+    it('accepts an access policy in options', () => {
+        const ch = channel('admin', [t], { access: Access.role('admin') });
+        expect(ch.$access?.$kind).toBe('access');
+    });
+
+    it('defaults $access to null when opts omitted', () => {
+        const ch = channel('public', [t]);
+        expect(ch.$access).toBeNull();
+    });
+
+    it('defaults $access to null when opts provided without access', () => {
+        const ch = channel('public', [t], {});
+        expect(ch.$access).toBeNull();
+    });
+
+    it('accepts composed policies', () => {
+        const ch = channel('restricted', [t], {
+            access: Access.any(Access.role('admin'), Access.owner()),
+        });
+        expect(ch.$access?.$kind).toBe('access');
+    });
+
+    it('preserves the typed name generic', () => {
+        const ch = channel('typed', [t], { access: Access.authenticated });
+        // Type-level check: ch.name is the literal 'typed'
+        const _nameType: 'typed' = ch.name;
+        void _nameType;
+        expect(ch.name).toBe('typed');
     });
 });
