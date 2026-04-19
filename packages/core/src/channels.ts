@@ -17,6 +17,11 @@ import type { AccessPolicy } from './auth';
 
 /** A sync channel: maps a set of tables to a NATS subject. */
 export interface ChannelConfig<TName extends string = string> {
+    /** Runtime discriminator so `isChannel(value)` can distinguish a
+     *  channel from other config objects during source-tree discovery.
+     *  Optional on the interface for backward compatibility with inline
+     *  object literals in tests; the `channel()` factory always sets it. */
+    readonly $tag?: 'channel';
     /** Channel name — used to build the NATS subject. */
     readonly name: TName;
     /** Tables whose mutations publish to this channel. */
@@ -25,6 +30,15 @@ export interface ChannelConfig<TName extends string = string> {
      *  or `null` means every authenticated workspace member can subscribe.
      *  Enforcement lives in the gateway — see gateway-core's AuthHook. */
     readonly $access?: AccessPolicy | null;
+}
+
+/** Type guard — does this value look like a `channel(...)` result? */
+export function isChannel(value: unknown): value is ChannelConfig {
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        (value as { $tag?: unknown }).$tag === 'channel'
+    );
 }
 
 /**
@@ -46,7 +60,7 @@ export function channel<const TName extends string>(
     tables: readonly AnyTable[],
     opts?: { readonly access?: AccessPolicy },
 ): ChannelConfig<TName> {
-    return { name, tables, $access: opts?.access ?? null };
+    return { $tag: 'channel', name, tables, $access: opts?.access ?? null };
 }
 
 /**
