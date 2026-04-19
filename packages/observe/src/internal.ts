@@ -24,6 +24,8 @@ import {
 } from '@opentelemetry/api';
 
 import {
+    ATTR_DEDUP_HIT,
+    ATTR_INVOCATION,
     ATTR_NAME,
     ATTR_OP,
     ATTR_PRIMITIVE,
@@ -348,6 +350,105 @@ async function withRemoteParent<T>(
     return context.with(parentCtx, fn);
 }
 
+export interface WebhookInboundAttrs {
+    readonly name: string;
+    /** Workspace may be unknown at the start of inbound processing
+     *  (it's derived from the payload inside the helper's fn). Callers
+     *  can stamp it later via markWebhookWorkspace. */
+    readonly workspace?: string;
+}
+
+/**
+ * Wrap the HTTP-layer processing of an inbound webhook: signature
+ * verification, workspace resolution, and the dispatch to Restate.
+ * The caller marks dedup hits and late-resolved workspace via the
+ * markWebhookDedup / markWebhookWorkspace helpers below so we don't
+ * leak OTel types into the webhook-http module.
+ */
+async function webhookInbound<T>(
+    attrs: WebhookInboundAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const spanAttrs: Attributes = {
+        [ATTR_PRIMITIVE]: 'webhook',
+        [ATTR_NAME]: attrs.name,
+    };
+    if (attrs.workspace !== undefined) spanAttrs[ATTR_WORKSPACE] = attrs.workspace;
+
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `webhook.${attrs.name}.inbound`,
+        { kind: SpanKind.SERVER, attributes: spanAttrs },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
+/** Mark the active span as a Restate-dedup'd webhook retry. Called
+ *  by webhook-http when the upstream POST returns 409 / "already
+ *  completed" so the APM shows which retries absorbed load without
+ *  running user code. */
+function markWebhookDedup(): void {
+    trace.getActiveSpan()?.setAttribute(ATTR_DEDUP_HIT, true);
+}
+
+/** Late-stamp the workspace on the active webhook.inbound span —
+ *  workspace is derived from the request payload after signature
+ *  verification, so we can't tag it up-front. */
+function markWebhookWorkspace(workspace: string): void {
+    trace.getActiveSpan()?.setAttribute(ATTR_WORKSPACE, workspace);
+}
+
+export interface WebhookRunAttrs {
+    readonly name: string;
+    readonly workspace: string;
+    readonly idempotencyKey: string;
+}
+
+/**
+ * Wrap the user's webhook handler run (inside the Restate workflow).
+ * The inbound span is on a different process; parent context arrives
+ * via the `traceparent` header stamped by webhook-http, extracted by
+ * the caller with instrument.withRemoteParent before invoking this.
+ */
+async function webhookRun<T>(
+    attrs: WebhookRunAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `webhook.${attrs.name}.run`,
+        {
+            attributes: {
+                [ATTR_PRIMITIVE]: 'webhook',
+                [ATTR_NAME]: attrs.name,
+                [ATTR_WORKSPACE]: attrs.workspace,
+                [ATTR_INVOCATION]: attrs.idempotencyKey,
+            },
+        },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
 /**
  * Build an object containing W3C TraceContext headers (traceparent,
  * and tracestate when present) for the currently active span. Callers
@@ -371,4 +472,8 @@ export const instrument = {
     busConsume,
     withRemoteParent,
     traceHeaders,
+    webhookInbound,
+    webhookRun,
+    markWebhookDedup,
+    markWebhookWorkspace,
 };

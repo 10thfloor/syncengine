@@ -6,6 +6,7 @@
 // framework glue — pure request → response contract.
 
 import { hashWorkspaceId } from '@syncengine/core/http';
+import { instrument } from '@syncengine/observe';
 import { runVerify } from './webhook-verify.js';
 import type { WebhookDef } from './webhook.js';
 import { WEBHOOK_WORKFLOW_PREFIX } from './webhook.js';
@@ -44,82 +45,91 @@ export async function dispatchWebhook(
     rawBody: string,
     restateUrl: string,
 ): Promise<WebhookDispatchResult> {
-    if (rawBody.length > MAX_WEBHOOK_BODY_BYTES) {
-        return error(413, 'request body exceeds 5 MiB limit');
-    }
+    return instrument.webhookInbound({ name: def.$name }, async () => {
+        if (rawBody.length > MAX_WEBHOOK_BODY_BYTES) {
+            return error(413, 'request body exceeds 5 MiB limit');
+        }
 
-    // 1. Signature verification — fail fast, no body parsing on bad sig.
-    let verified;
-    try {
-        verified = await runVerify(def.$verify, req, rawBody);
-    } catch (e) {
-        return error(500, `verify threw: ${(e as Error).message}`);
-    }
-    if (!verified.ok) {
-        return error(401, verified.reason);
-    }
+        // 1. Signature verification — fail fast, no body parsing on bad sig.
+        let verified;
+        try {
+            verified = await runVerify(def.$verify, req, rawBody);
+        } catch (e) {
+            return error(500, `verify threw: ${(e as Error).message}`);
+        }
+        if (!verified.ok) {
+            return error(401, verified.reason);
+        }
 
-    // 2. Parse body.
-    let payload: unknown;
-    try {
-        payload = JSON.parse(rawBody);
-    } catch {
-        return error(400, 'body is not valid JSON');
-    }
+        // 2. Parse body.
+        let payload: unknown;
+        try {
+            payload = JSON.parse(rawBody);
+        } catch {
+            return error(400, 'body is not valid JSON');
+        }
 
-    // 3. Derive workspace + idempotency key via user callbacks.
-    let workspace: string;
-    let idempotencyKey: string;
-    try {
-        workspace = String(def.$resolveWorkspace(payload));
-        idempotencyKey = String(def.$idempotencyKey(req, payload));
-    } catch (e) {
-        return error(400, `resolver threw: ${(e as Error).message}`);
-    }
-    if (!workspace) return error(400, 'resolveWorkspace returned empty string');
-    if (!idempotencyKey) return error(400, 'idempotencyKey returned empty string');
+        // 3. Derive workspace + idempotency key via user callbacks.
+        let workspace: string;
+        let idempotencyKey: string;
+        try {
+            workspace = String(def.$resolveWorkspace(payload));
+            idempotencyKey = String(def.$idempotencyKey(req, payload));
+        } catch (e) {
+            return error(400, `resolver threw: ${(e as Error).message}`);
+        }
+        if (!workspace) return error(400, 'resolveWorkspace returned empty string');
+        if (!idempotencyKey) return error(400, 'idempotencyKey returned empty string');
 
-    const wsKey = hashWorkspaceId(workspace);
+        const wsKey = hashWorkspaceId(workspace);
+        // Late-stamp the workspace on the active inbound span — derived
+        // from the payload so we don't know it until after verify.
+        instrument.markWebhookWorkspace(wsKey);
 
-    // 4. Forward all incoming headers so the handler can inspect them
-    //    (common: x-github-event, x-shopify-topic, etc).
-    const headers: Record<string, string> = {};
-    req.headers.forEach((v, k) => { headers[k] = v; });
+        // 4. Forward all incoming headers so the handler can inspect them
+        //    (common: x-github-event, x-shopify-topic, etc). Also include
+        //    W3C TraceContext so the workflow-side span nests under this
+        //    inbound span.
+        const headers: Record<string, string> = {};
+        req.headers.forEach((v, k) => { headers[k] = v; });
+        Object.assign(headers, instrument.traceHeaders());
 
-    // 5. Invoke the compiled Restate workflow. Key = `{wsKey}/{idemKey}`
-    //    so dedup is scoped per workspace AND per sender event id.
-    const base = restateUrl.replace(/\/+$/, '');
-    const wfKey = `${wsKey}/${idempotencyKey}`;
-    const url = `${base}/${WEBHOOK_WORKFLOW_PREFIX}${def.$name}/${encodeURIComponent(wfKey)}/run`;
-    const body = JSON.stringify({
-        workspace: wsKey,
-        idempotencyKey,
-        payload,
-        headers,
-    });
-
-    try {
-        const upstream = await fetch(url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body,
+        // 5. Invoke the compiled Restate workflow. Key = `{wsKey}/{idemKey}`
+        //    so dedup is scoped per workspace AND per sender event id.
+        const base = restateUrl.replace(/\/+$/, '');
+        const wfKey = `${wsKey}/${idempotencyKey}`;
+        const url = `${base}/${WEBHOOK_WORKFLOW_PREFIX}${def.$name}/${encodeURIComponent(wfKey)}/run`;
+        const body = JSON.stringify({
+            workspace: wsKey,
+            idempotencyKey,
+            payload,
+            headers,
         });
-        if (upstream.ok) {
-            return ok(202, { ok: true, invocationId: idempotencyKey });
+
+        try {
+            const upstream = await fetch(url, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body,
+            });
+            if (upstream.ok) {
+                return ok(202, { ok: true, invocationId: idempotencyKey });
+            }
+            // Restate signals duplicate invocations with 409 or an "already
+            // completed" message in the body. Map to the user's onDuplicate
+            // preference; default 409 with duplicate: true so the sender
+            // knows it was a retry.
+            const text = await upstream.text().catch(() => '<no body>');
+            if (upstream.status === 409 || /already (completed|running)/i.test(text)) {
+                instrument.markWebhookDedup();
+                const status = def.$onDuplicate === '200' ? 200 : 409;
+                return ok(status, { ok: true, duplicate: true, invocationId: idempotencyKey });
+            }
+            return error(502, `restate ${upstream.status}: ${text.slice(0, 200)}`);
+        } catch (e) {
+            return error(502, `fetch to Restate failed: ${(e as Error).message}`);
         }
-        // Restate signals duplicate invocations with 409 or an "already
-        // completed" message in the body. Map to the user's onDuplicate
-        // preference; default 409 with duplicate: true so the sender
-        // knows it was a retry.
-        const text = await upstream.text().catch(() => '<no body>');
-        if (upstream.status === 409 || /already (completed|running)/i.test(text)) {
-            const status = def.$onDuplicate === '200' ? 200 : 409;
-            return ok(status, { ok: true, duplicate: true, invocationId: idempotencyKey });
-        }
-        return error(502, `restate ${upstream.status}: ${text.slice(0, 200)}`);
-    } catch (e) {
-        return error(502, `fetch to Restate failed: ${(e as Error).message}`);
-    }
+    });
 }
 
 function ok(status: number, body: Record<string, unknown>): WebhookDispatchResult {

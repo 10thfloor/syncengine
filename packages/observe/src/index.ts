@@ -39,6 +39,8 @@ export type {
     RpcKind,
     BusPublishAttrs,
     BusConsumeAttrs,
+    WebhookInboundAttrs,
+    WebhookRunAttrs,
     RemoteHeaders,
     TraceCarrier,
 } from './internal';

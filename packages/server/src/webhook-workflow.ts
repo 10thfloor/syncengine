@@ -9,6 +9,7 @@
 // with `idempotencyKey` as the workflow key.
 
 import * as restate from '@restatedev/restate-sdk';
+import { instrument } from '@syncengine/observe';
 import type { WebhookDef, WebhookContext } from './webhook.js';
 import { WEBHOOK_WORKFLOW_PREFIX } from './webhook.js';
 
@@ -28,9 +29,24 @@ export function buildWebhookWorkflow(
         name: `${WEBHOOK_WORKFLOW_PREFIX}${def.$name}`,
         handlers: {
             run: async (ctx: restate.WorkflowContext, input: WebhookInvocation) => {
-                const hbCtx = buildWebhookContext(ctx, def, input);
-                (hbCtx as unknown as { services: typeof resolvedServices }).services = resolvedServices;
-                await def.$handler(hbCtx, input.payload);
+                // input.headers carries the inbound W3C traceparent that
+                // webhook-http stamped before posting to Restate. Extract
+                // it so the handler's span nests under the inbound span.
+                const inboundHeaders = new Map(Object.entries(input.headers));
+                await instrument.withRemoteParent(inboundHeaders, () =>
+                    instrument.webhookRun(
+                        {
+                            name: def.$name,
+                            workspace: input.workspace,
+                            idempotencyKey: input.idempotencyKey,
+                        },
+                        async () => {
+                            const hbCtx = buildWebhookContext(ctx, def, input);
+                            (hbCtx as unknown as { services: typeof resolvedServices }).services = resolvedServices;
+                            await def.$handler(hbCtx, input.payload);
+                        },
+                    ),
+                );
             },
         },
     });
