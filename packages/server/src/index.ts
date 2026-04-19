@@ -280,3 +280,14 @@ export {
 } from './webhook-http.js';
 export { getRegisteredWebhooks } from './webhook-registry.js';
 export { ServiceContainer } from './service-container.js';
+
+// ── Event bus — subscriber side ────────────────────────────────────────────
+export { on, From, isSubscription } from './bus-on.js';
+export type { Subscription, CursorConfig } from './bus-on.js';
+export {
+    runInBusContext,
+    installBusPublisher,
+    uninstallBusPublisher,
+    busContextStorage,
+} from './bus-context.js';
+export type { BusContext } from './bus-context.js';
