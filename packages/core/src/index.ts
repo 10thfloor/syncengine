@@ -86,8 +86,8 @@ export { generateNatsPermissions } from './nats-acl';
 export type { RoleSpec, Roles, NatsPermissions } from './nats-acl';
 
 // ── Service DSL (hex architecture — driven ports) ────────────────────────
-export { service, isService } from './service';
-export type { ServiceDef, ServicePort, ServiceName, AnyService } from './service';
+export { service, isService, override, isServiceOverride } from './service';
+export type { ServiceDef, ServicePort, ServiceName, AnyService, ServiceOverride, AnyServiceOverride } from './service';
 
 // ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
 export {

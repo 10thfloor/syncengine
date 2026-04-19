@@ -103,3 +103,65 @@ export function isService(value: unknown): value is AnyService {
         (value as { $tag?: string }).$tag === 'service'
     );
 }
+
+// ── Service override (test/staging adapter swaps) ──────────────────────────
+
+export interface ServiceOverride<
+    TName extends string = string,
+    TMethods extends Record<string, (...args: any[]) => Promise<any>> = Record<string, (...args: any[]) => Promise<any>>,
+> {
+    readonly $tag: 'service-override';
+    readonly $targetName: TName;
+    readonly $methods: Partial<TMethods>;
+    readonly $partial: boolean;
+}
+
+export type AnyServiceOverride = ServiceOverride<string, Record<string, (...args: any[]) => Promise<any>>>;
+
+export function override<
+    TName extends string,
+    TMethods extends Record<string, (...args: any[]) => Promise<any>>,
+>(
+    target: ServiceDef<TName, TMethods>,
+    methods: TMethods,
+): ServiceOverride<TName, TMethods>;
+export function override<
+    TName extends string,
+    TMethods extends Record<string, (...args: any[]) => Promise<any>>,
+>(
+    target: ServiceDef<TName, TMethods>,
+    methods: Partial<TMethods>,
+    opts: { partial: true },
+): ServiceOverride<TName, TMethods>;
+export function override<
+    TName extends string,
+    TMethods extends Record<string, (...args: any[]) => Promise<any>>,
+>(
+    target: ServiceDef<TName, TMethods>,
+    methods: Partial<TMethods>,
+    opts?: { partial?: boolean },
+): ServiceOverride<TName, TMethods> {
+    for (const [key, fn] of Object.entries(methods)) {
+        if (typeof fn !== 'function') {
+            throw errors.schema(SchemaCode.INVALID_SERVICE_CONFIG, {
+                message: `override('${target.$name}'): method '${key}' must be a function.`,
+                hint: `All override methods must be async functions.`,
+                context: { service: target.$name, method: key },
+            });
+        }
+    }
+    return {
+        $tag: 'service-override',
+        $targetName: target.$name,
+        $methods: methods,
+        $partial: opts?.partial ?? false,
+    };
+}
+
+export function isServiceOverride(value: unknown): value is AnyServiceOverride {
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        (value as { $tag?: string }).$tag === 'service-override'
+    );
+}

@@ -1,6 +1,6 @@
 // packages/core/src/__tests__/service.test.ts
 import { describe, it, expect } from 'vitest';
-import { service, isService, type ServiceDef, type ServicePort } from '../service';
+import { service, isService, override, type ServiceDef, type ServicePort } from '../service';
 
 describe('service()', () => {
     it('creates a ServiceDef with $tag and $name', () => {
@@ -59,5 +59,47 @@ describe('ServicePort type extraction', () => {
             refund: async (chargeId: string) => ({ id: 'x', status: 'y' }),
         };
         expect(port).toBeDefined();
+    });
+});
+
+describe('override()', () => {
+    const payments = service('payments', {
+        async charge(amount: number, currency: string) {
+            return { id: 'ch_real', status: 'succeeded' };
+        },
+        async refund(chargeId: string) {
+            return { id: 're_real', status: 'succeeded' };
+        },
+    });
+
+    it('creates a total override (all methods required)', () => {
+        const testPayments = override(payments, {
+            async charge(amount, currency) {
+                return { id: 'ch_test', status: 'succeeded' };
+            },
+            async refund(chargeId) {
+                return { id: 're_test', status: 'succeeded' };
+            },
+        });
+        expect(testPayments.$tag).toBe('service-override');
+        expect(testPayments.$targetName).toBe('payments');
+        expect(typeof testPayments.$methods.charge).toBe('function');
+        expect(typeof testPayments.$methods.refund).toBe('function');
+    });
+
+    it('creates a partial override when opt-in', () => {
+        const partialOverride = override(payments, {
+            async charge(amount, currency) {
+                return { id: 'ch_test', status: 'succeeded' };
+            },
+        }, { partial: true });
+        expect(partialOverride.$partial).toBe(true);
+        expect(typeof partialOverride.$methods.charge).toBe('function');
+        expect(partialOverride.$methods.refund).toBeUndefined();
+    });
+
+    it('rejects non-function override methods', () => {
+        expect(() => override(payments, { charge: 42 } as any))
+            .toThrow(/must be a function/);
     });
 });
