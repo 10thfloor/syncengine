@@ -30,7 +30,7 @@
 
 import type { NatsConnection, Subscription } from '@nats-io/transport-node';
 import { jetstream } from '@nats-io/jetstream';
-import type { BusDispatcherConfig } from '@syncengine/gateway-core';
+import { BusDispatcher, type BusDispatcherConfig } from '@syncengine/gateway-core';
 
 /** Minimal JSM slice the manager reads. Accepts a full
  *  `JetStreamManager` or a stub with just the `streams.list()` bit. */
@@ -261,3 +261,16 @@ export class BusManager {
 function dispatcherKey(workspaceId: string, subscriberName: string): string {
     return `${workspaceId}::${subscriberName}`;
 }
+
+/**
+ * Production dispatcher factory — constructs a real
+ * `@syncengine/gateway-core` `BusDispatcher` from a shared
+ * `BusDispatcherConfig`. Drop-in for `dispatcherFactory` in
+ * production wiring (the CLI's generated server entry).
+ *
+ * Tests keep using a stub factory so they don't need NATS. Config
+ * shape is identical because `BusManager` and `BusDispatcher` both
+ * consume `BusDispatcherConfig` directly.
+ */
+export const realDispatcherFactory: DispatcherFactory = (cfg) =>
+    new BusDispatcher(cfg);
