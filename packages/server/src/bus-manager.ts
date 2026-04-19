@@ -28,7 +28,17 @@
  *   controller owns the signals; it invokes `stop()` itself.
  */
 
+import type { NatsConnection, Subscription } from '@nats-io/transport-node';
+import { jetstream } from '@nats-io/jetstream';
 import type { BusDispatcherConfig } from '@syncengine/gateway-core';
+
+/** Minimal JSM slice the manager reads. Accepts a full
+ *  `JetStreamManager` or a stub with just the `streams.list()` bit. */
+interface JsmLike {
+    readonly streams: {
+        list(subject?: string): AsyncIterable<{ config: { name: string } }>;
+    };
+}
 import {
     Retry, seconds, minutes,
     type RetryConfig,
@@ -79,6 +89,7 @@ export class BusManager {
     private readonly subscribers: readonly SubscriberWorkflow[];
     private signalHandlersInstalled = false;
     private stopping = false;
+    private registrySub: Subscription | null = null;
 
     constructor(config: BusManagerConfig) {
         this.config = config;
@@ -93,12 +104,81 @@ export class BusManager {
         await Promise.all(seed.map((wsId) => this.spawnFor(wsId)));
     }
 
+    /**
+     * Wire the manager to a live NATS connection. Performs an initial
+     * JetStream `streams.list()` scan to seed dispatchers for every
+     * existing `WS_*` stream, then subscribes to the
+     * `syncengine.workspaces` topic to react to future workspace
+     * provisions.
+     *
+     * Call after `start()` (so explicit `initialWorkspaceIds` seed
+     * ahead) and after the server's Restate endpoint is listening (so
+     * new dispatchers have a live POST target).
+     *
+     * `jsm` is injectable so unit tests can substitute a stub without
+     * having to monkey-patch the `jetstream()` factory; prod callers
+     * pass `undefined` and let the manager build it from the NC.
+     */
+    async attachToNats(
+        nc: NatsConnection,
+        jsm?: JsmLike,
+    ): Promise<void> {
+        // 1. Initial discovery from existing JetStream streams. The
+        // stream-name convention is `WS_<wsKey>` (see
+        // @syncengine/gateway-core workspace-bridge streamName()).
+        const resolvedJsm: JsmLike =
+            jsm ?? (await jetstream(nc).jetstreamManager() as unknown as JsmLike);
+        const discovered: string[] = [];
+        for await (const info of resolvedJsm.streams.list()) {
+            if (info.config.name.startsWith('WS_')) {
+                discovered.push(info.config.name.slice(3));
+            }
+        }
+        await Promise.all(discovered.map((wsId) => this.spawnFor(wsId)));
+
+        // 2. Live subscription. The workspace virtual object's
+        // `provision` handler publishes into `syncengine.workspaces`
+        // with a `{ type: 'WORKSPACE_PROVISIONED', workspaceId }`
+        // payload; we spawn dispatchers for the new workspace on each
+        // such message. Decode errors are swallowed — the server's
+        // gateway also subscribes here for its own reasons, so
+        // malformed payloads shouldn't take us down.
+        this.registrySub = nc.subscribe('syncengine.workspaces');
+        void this.consumeRegistry();
+    }
+
+    private async consumeRegistry(): Promise<void> {
+        if (!this.registrySub) return;
+        try {
+            for await (const msg of this.registrySub) {
+                if (this.stopping) break;
+                try {
+                    const data = msg.json<{ type?: string; workspaceId?: string }>();
+                    if (
+                        data.type === 'WORKSPACE_PROVISIONED' &&
+                        typeof data.workspaceId === 'string'
+                    ) {
+                        await this.onWorkspaceProvisioned(data.workspaceId);
+                    }
+                } catch {
+                    // Decode error — not our problem.
+                }
+            }
+        } catch {
+            // Subscription closed — expected on stop().
+        }
+    }
+
     async onWorkspaceProvisioned(workspaceId: string): Promise<void> {
         await this.spawnFor(workspaceId);
     }
 
     async stop(): Promise<void> {
         this.stopping = true;
+        if (this.registrySub) {
+            try { this.registrySub.unsubscribe(); } catch { /* best effort */ }
+            this.registrySub = null;
+        }
         const pending = Array.from(this.handles.values()).map((h) =>
             h.stop().catch(() => {
                 /* best effort drain — a dispatcher that can't stop

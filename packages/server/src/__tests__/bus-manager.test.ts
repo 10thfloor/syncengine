@@ -179,3 +179,151 @@ describe('BusManager', () => {
         expect(configs[0]!.cursor).toEqual({ kind: 'latest' });
     });
 });
+
+describe('BusManager.attachToNats', () => {
+    /** Minimal stub JSM. Manager only reads `.streams.list()`. */
+    function fakeJsm(streamNames: string[]) {
+        return {
+            streams: {
+                list: () => (async function* () {
+                    for (const name of streamNames) {
+                        yield { config: { name } } as never;
+                    }
+                })(),
+            },
+        };
+    }
+
+    function attachHarness() {
+        const fakeSub = makeFakeSubscription();
+        const fakeNc = {
+            subscribe: vi.fn(() => fakeSub),
+            isClosed: () => false,
+            drain: async () => {},
+        };
+        return { fakeSub, fakeNc };
+    }
+
+    it('initial discovery seeds dispatchers for existing WS_* streams', async () => {
+        const { instance, starts } = build([shipOnPay]);
+        await instance.start();
+
+        const { fakeNc } = attachHarness();
+        await instance.attachToNats(
+            fakeNc as never,
+            fakeJsm(['WS_ws1', 'WS_ws2', 'OTHER']),
+        );
+
+        const workspaces = starts.map((s) => s.workspaceId).sort();
+        expect(workspaces).toEqual(['ws1', 'ws2']);
+        await instance.stop();
+    });
+
+    it('registry subscription spawns on WORKSPACE_PROVISIONED messages', async () => {
+        const { instance, starts } = build([shipOnPay]);
+        await instance.start();
+        starts.length = 0;
+
+        const { fakeSub, fakeNc } = attachHarness();
+        await instance.attachToNats(fakeNc as never, fakeJsm([]));
+
+        fakeSub.emit({
+            json: () => ({ type: 'WORKSPACE_PROVISIONED', workspaceId: 'ws3' }),
+        });
+        await new Promise((r) => setImmediate(r));
+
+        expect(starts.map((s) => s.workspaceId)).toEqual(['ws3']);
+        await instance.stop();
+    });
+
+    it('stop() cancels the registry subscription loop via unsubscribe()', async () => {
+        const { instance } = build([shipOnPay]);
+        await instance.start();
+
+        const { fakeSub, fakeNc } = attachHarness();
+        await instance.attachToNats(fakeNc as never, fakeJsm([]));
+
+        expect(fakeSub.unsubscribeCalls).toBe(0);
+        await instance.stop();
+        expect(fakeSub.unsubscribeCalls).toBe(1);
+    });
+
+    it('ignores malformed messages instead of crashing the loop', async () => {
+        const { instance, starts } = build([shipOnPay]);
+        await instance.start();
+        starts.length = 0;
+
+        const { fakeSub, fakeNc } = attachHarness();
+        await instance.attachToNats(fakeNc as never, fakeJsm([]));
+
+        fakeSub.emit({ json: () => { throw new Error('decode-error'); } });
+        fakeSub.emit({
+            json: () => ({ type: 'WORKSPACE_PROVISIONED', workspaceId: 'ws-after' }),
+        });
+        await new Promise((r) => setImmediate(r));
+
+        expect(starts.map((s) => s.workspaceId)).toEqual(['ws-after']);
+        await instance.stop();
+    });
+
+    it('ignores stream names that do not start with WS_', async () => {
+        const { instance, starts } = build([shipOnPay]);
+        await instance.start();
+
+        const { fakeNc } = attachHarness();
+        await instance.attachToNats(
+            fakeNc as never,
+            fakeJsm(['HEARTBEAT_STATUS', 'NOT_A_WORKSPACE']),
+        );
+
+        expect(starts).toEqual([]);
+        await instance.stop();
+    });
+});
+
+// ── Test scaffolding helpers ───────────────────────────────────────────────
+
+type FakeMsg = { json: () => unknown };
+
+type FakeSub = {
+    [Symbol.asyncIterator](): AsyncIterator<FakeMsg>;
+    unsubscribe(): void;
+    emit(msg: FakeMsg): void;
+    unsubscribeCalls: number;
+};
+
+/** Minimal Subscription-like object: async iterable that yields
+ *  messages pushed via `emit()` and returns `done` after
+ *  `unsubscribe()`. */
+function makeFakeSubscription(): FakeSub {
+    const queue: FakeMsg[] = [];
+    let waiters: Array<(r: IteratorResult<FakeMsg>) => void> = [];
+    let closed = false;
+    let unsubscribeCalls = 0;
+
+    const next = (): Promise<IteratorResult<FakeMsg>> => {
+        if (closed) return Promise.resolve({ value: undefined as never, done: true });
+        if (queue.length > 0) return Promise.resolve({ value: queue.shift()!, done: false });
+        return new Promise((resolve) => waiters.push(resolve));
+    };
+
+    return {
+        [Symbol.asyncIterator]() { return this; },
+        next,
+        emit(msg: FakeMsg) {
+            if (closed) return;
+            const waiter = waiters.shift();
+            if (waiter) waiter({ value: msg, done: false });
+            else queue.push(msg);
+        },
+        unsubscribe() {
+            closed = true;
+            unsubscribeCalls++;
+            const pending = waiters;
+            waiters = [];
+            for (const w of pending) w({ value: undefined as never, done: true });
+        },
+        get unsubscribeCalls() { return unsubscribeCalls; },
+    } as unknown as FakeSub;
+}
+
