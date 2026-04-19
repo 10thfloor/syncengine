@@ -31,7 +31,7 @@
 //   ActivityTab → useView({ salesByProduct, recentActivity, totalSales })
 //     └─ reads the rows emitted by sell(), rendered as a live dashboard
 
-import { entity, integer, text, emit, sourceCount, EntityError } from '@syncengine/core';
+import { entity, integer, text, emit, sourceCount, EntityError, Access } from '@syncengine/core';
 import { transactions } from '../schema';
 
 // Reservation TTL — if a client disappears, the lock auto-expires so
@@ -51,6 +51,14 @@ export const inventory = entity('inventory', {
   // Handlers don't need to manage it — it appears as a read-only state field.
   source: {
     totalSold: sourceCount(transactions, transactions.productSlug),
+  },
+
+  // Auth — every mutation requires an authenticated user. `unverified()`
+  // in syncengine.config.ts trusts the `?user=<id>` query string as the
+  // bearer token, so the enforcement layer sees a real user id without
+  // any login UI. Swap for jwt({ jwksUri, ... }) in production.
+  access: {
+    '*': Access.authenticated,
   },
 
   handlers: {

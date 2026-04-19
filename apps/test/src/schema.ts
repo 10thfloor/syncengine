@@ -1,6 +1,6 @@
 import {
   table, id, real, text, integer, view,
-  sum, count, max, channel,
+  sum, count, max, channel, Access,
 } from '@syncengine/core';
 
 // ── Domain constants ──────────────────────────────────────────────
@@ -91,8 +91,14 @@ export const allOrders = view(orderIndex)
 
 // ── Channels ──────────────────────────────────────────────────────
 
+// Catalog is public — anyone can browse products even without a user id.
 export const catalogChannel = channel('catalog', [products]);
-export const ledgerChannel = channel('ledger', [transactions, orderIndex]);
+
+// Ledger (transactions + orders) requires authentication — anonymous
+// clients get ACCESS_DENIED on subscribe instead of seeing every sale.
+export const ledgerChannel = channel('ledger', [transactions, orderIndex], {
+  access: Access.authenticated,
+});
 
 // ── Seed data ─────────────────────────────────────────────────────
 

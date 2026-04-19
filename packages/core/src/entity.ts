@@ -1093,7 +1093,12 @@ export function applyHandler(
   // auth context — legacy callers (pure test-store, older entity runtimes
   // that don't yet know about users) skip enforcement. Server + client
   // entry points always pass auth context post-Plan-2.
-  if (auth && entity.$access) {
+  //
+  // `$system` user (Gap 2) bypasses enforcement entirely — workflow-
+  // initiated and other framework-internal calls are trusted because
+  // the authorization happened upstream (a bus subscription firing
+  // inherits the authorization of the handler that published the event).
+  if (auth && entity.$access && auth.user?.id !== '$system') {
     const policy: AccessPolicy | undefined =
       entity.$access[handlerName] ?? entity.$access['*'];
     if (policy) {

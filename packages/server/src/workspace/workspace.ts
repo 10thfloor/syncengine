@@ -406,7 +406,19 @@ export const workspace = restate.object({
       const removed = filtered.length < members.length;
       ctx.set(Keys.MEMBERS, filtered);
 
-      if (removed) ctx.console.log(`Removed ${req.userId} from workspace ${ctx.key}`);
+      if (removed) {
+        ctx.console.log(`Removed ${req.userId} from workspace ${ctx.key}`);
+        // Broadcast revocation so any connected gateway sessions for this
+        // (workspace × user) pair can close with WORKSPACE_ACCESS_REVOKED.
+        // Best-effort — the membership state is already flipped; the
+        // broadcast just makes the disconnect fast instead of waiting
+        // for the next channel subscribe to fail.
+        await publishToNats(ctx, 'broadcast-member-removed', 'syncengine.workspaces', {
+          type: 'WORKSPACE_ACCESS_REVOKED',
+          workspaceId: ctx.key,
+          userId: req.userId,
+        });
+      }
       return { removed, workspaceId: ctx.key, userId: req.userId };
     },
 

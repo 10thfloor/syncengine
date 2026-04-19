@@ -7,6 +7,8 @@ import type { AuthProvider, AuthUser } from '@syncengine/core';
  *     still work; other policies fail closed)
  *   - no Authorization header is present
  *   - the provider rejects the token
+ *   - `requireMembership` is true and the verified user is NOT a member
+ *     of the workspace (role lookup returned null)
  *
  * The null path intentionally does NOT throw. Access.public is the only
  * policy that permits null users; all other policies reject the null
@@ -17,6 +19,10 @@ export async function resolveAuth(input: {
     authHeader: string | undefined;
     workspaceId: string;
     lookupRole: (userId: string, workspaceId: string) => Promise<string | null>;
+    /** When true, a verified user with no workspace role is rejected
+     *  (returns null instead of returning an authenticated-but-roleless
+     *  user). Wired from `auth.requireWorkspaceMembership` in config. */
+    requireMembership?: boolean;
 }): Promise<AuthUser | null> {
     if (!input.provider) return null;
 
@@ -27,6 +33,11 @@ export async function resolveAuth(input: {
     if (!result.ok) return null;
 
     const role = await input.lookupRole(result.user.id, input.workspaceId);
+
+    if (input.requireMembership && !role) {
+        return null;
+    }
+
     return {
         ...result.user,
         roles: role ? [role] : [],

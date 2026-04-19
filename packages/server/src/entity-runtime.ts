@@ -105,23 +105,31 @@ async function runHandler(
     // Plan 3: verify the Authorization header and enrich with workspace
     // membership role. Returns null for unauthenticated callers — only
     // Access.public handlers accept that; other policies reject it.
-    const authHeader = ctx.request().headers.get('authorization') ?? undefined;
-    const user = await resolveAuth({
-        provider: _authProvider,
-        authHeader,
-        workspaceId,
-        lookupRole: async (userId, wsId) => {
-            // Call workspace.isMember on the workspace virtual object.
-            // `ctx.objectClient` is the in-Restate RPC to another object.
-            // Restate types are opaque here; the handler contract comes
-            // from packages/server/src/workspace/workspace.ts:isMember.
-            const wsClient = ctx.objectClient({ name: 'workspace' }, wsId) as unknown as {
-                isMember(args: { userId: string }): Promise<{ isMember: boolean; role?: string }>;
-            };
-            const result = await wsClient.isMember({ userId });
-            return result.role ?? null;
-        },
-    });
+    //
+    // Gap 2: `x-syncengine-system` header (set by `entityRef({ asSystem })`
+    // / `systemRef` on internal Restate objectClient calls) shortcuts the
+    // whole pipeline — the handler sees `user = { id: '$system' }` and
+    // access enforcement is skipped.
+    const requestHeaders = ctx.request().headers;
+    const isSystemCall = requestHeaders.get('x-syncengine-system') === '1';
+    const user = isSystemCall
+        ? { id: '$system', roles: [] as string[] }
+        : await resolveAuth({
+              provider: _authProvider,
+              authHeader: requestHeaders.get('authorization') ?? undefined,
+              workspaceId,
+              lookupRole: async (userId, wsId) => {
+                  // Call workspace.isMember on the workspace virtual object.
+                  // `ctx.objectClient` is the in-Restate RPC to another object.
+                  // Restate types are opaque here; the handler contract comes
+                  // from packages/server/src/workspace/workspace.ts:isMember.
+                  const wsClient = ctx.objectClient({ name: 'workspace' }, wsId) as unknown as {
+                      isMember(args: { userId: string }): Promise<{ isMember: boolean; role?: string }>;
+                  };
+                  const result = await wsClient.isMember({ userId });
+                  return result.role ?? null;
+              },
+          });
 
     let validated: Record<string, unknown>;
     try {

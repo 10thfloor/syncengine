@@ -36,7 +36,7 @@
 //     OrdersTab uses `useView({ allOrders })` to list orders, then each
 //     row opens its own `useEntity` subscription for live status updates.
 
-import { entity, integer, real, text, emit, publish } from '@syncengine/core';
+import { entity, integer, real, text, emit, publish, Access } from '@syncengine/core';
 import { orderIndex } from '../schema';
 import { orderEvents, OrderEvent } from '../events/orders.bus';
 
@@ -69,6 +69,16 @@ export const order = entity('order', {
     delivered: [],
     cancelled: [],
   },
+
+  // Auth — place + cancel must be called by an authenticated user;
+  // fulfillment transitions (pack/ship/deliver) can also be driven by
+  // workflows (e.g. shipOnPay → markShipped), so they accept any
+  // authenticated caller. `$system` identity from workflow-initiated
+  // calls is handled separately once gap 2 lands.
+  access: {
+    '*': Access.authenticated,
+  },
+
   handlers: {
     // ── place: called via RPC from CheckoutTab (saga step 2) ────────
     // Emits a row into `orderIndex` so the order appears in the

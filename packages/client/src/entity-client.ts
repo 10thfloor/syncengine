@@ -242,11 +242,16 @@ function getGateway(): Promise<WebSocket> {
                 } else if (msg['type'] === 'error') {
                     // Plan 5: surface auth-layer errors from the gateway
                     // (UNAUTHORIZED at init rejection, ACCESS_DENIED at
-                    // channel subscribe) onto authState so useAuthError
-                    // can render them. Other errors log but don't update
-                    // auth state.
+                    // channel subscribe, WORKSPACE_ACCESS_REVOKED for
+                    // mid-session membership removal) onto authState so
+                    // useAuthError can render them. Other errors log but
+                    // don't update auth state.
                     const code = msg['code'];
-                    if (code === 'UNAUTHORIZED' || code === 'ACCESS_DENIED') {
+                    if (
+                        code === 'UNAUTHORIZED' ||
+                        code === 'ACCESS_DENIED' ||
+                        code === 'WORKSPACE_ACCESS_REVOKED'
+                    ) {
                         const channelName = typeof msg['channel'] === 'string'
                             ? msg['channel']
                             : undefined;
@@ -525,7 +530,12 @@ export async function invokeHandler(
         'content-type': 'application/json',
         'x-syncengine-workspace': currentWorkspaceId,
     };
-    if (runtimeAuthToken) headers.authorization = `Bearer ${runtimeAuthToken}`;
+    // Prefer the live token from authState (Plan 5 StoreProvider
+    // auth={...} pumps the host's bearer token here). Fall back to the
+    // compile-time runtimeAuthToken so pre-auth apps keep working.
+    const liveToken = authState.getToken();
+    const token = liveToken ?? runtimeAuthToken ?? null;
+    if (token) headers.authorization = `Bearer ${token}`;
 
     const res = await fetch(url, {
         method: 'POST',

@@ -267,6 +267,32 @@ export class GatewayCore {
             for await (const msg of this.systemSub!) {
                 try {
                     const data = msg.json<Record<string, unknown>>();
+                    // Revocation: close any connected session belonging to
+                    // the removed member so their view of the workspace
+                    // drops fast instead of waiting for the next channel
+                    // subscribe to fail (Plan 4 / Gap 3).
+                    if (data['type'] === 'WORKSPACE_ACCESS_REVOKED') {
+                        const revokedWs = typeof data['workspaceId'] === 'string' ? data['workspaceId'] : '';
+                        const revokedUser = typeof data['userId'] === 'string' ? data['userId'] : '';
+                        for (const session of this.allSessions) {
+                            if (
+                                session.workspaceId === revokedWs &&
+                                session.user?.id === revokedUser
+                            ) {
+                                session.send({
+                                    type: 'error',
+                                    code: 'WORKSPACE_ACCESS_REVOKED',
+                                    message: `Membership in workspace '${revokedWs}' was revoked`,
+                                });
+                                // The WS close is best-effort — ClientSession
+                                // doesn't own the underlying socket, the host
+                                // adapter does. An error frame + the client
+                                // reading code === WORKSPACE_ACCESS_REVOKED
+                                // is the defined contract.
+                            }
+                        }
+                        continue;
+                    }
                     for (const session of this.allSessions) {
                         session.send({ type: 'workspace-registry', ...data });
                     }

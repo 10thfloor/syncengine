@@ -153,6 +153,28 @@ describe('applyHandler access enforcement', () => {
         expect((result as { stock: number }).stock).toBe(8);
     });
 
+    it('$system user bypasses all access policies', () => {
+        // Gap 2 — workflow-initiated calls pass user.id = '$system'.
+        // Even Access.deny on the handler lets these through.
+        const denyAll = entity('denyAll', {
+            state: { n: integer() },
+            access: {
+                '*': Access.deny,
+            },
+            handlers: {
+                inc(state) { return { ...state, n: state.n + 1 }; },
+            },
+        });
+        const result = applyHandler(
+            denyAll,
+            'inc',
+            { n: 5 },
+            [],
+            { user: { id: '$system', roles: [] }, key: 'k' },
+        );
+        expect(result.n).toBe(6);
+    });
+
     it('error context carries entity, handler, userId, and key', () => {
         try {
             applyHandler(

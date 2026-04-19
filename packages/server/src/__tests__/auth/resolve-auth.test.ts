@@ -92,3 +92,52 @@ describe('resolveAuth', () => {
         expect(user).toBeNull();
     });
 });
+
+describe('resolveAuth requireMembership', () => {
+    it('default (false): returns an authenticated user even with no role', async () => {
+        const user = await resolveAuth({
+            provider: unverified(),
+            authHeader: 'Bearer alice',
+            workspaceId: 'ws1',
+            lookupRole: async () => null,
+        });
+        expect(user).toEqual({ id: 'alice', roles: [] });
+    });
+
+    it('true: returns null when the verified user has no workspace role', async () => {
+        const user = await resolveAuth({
+            provider: unverified(),
+            authHeader: 'Bearer alice',
+            workspaceId: 'ws1',
+            lookupRole: async () => null,
+            requireMembership: true,
+        });
+        expect(user).toBeNull();
+    });
+
+    it('true: returns the user when they DO have a role', async () => {
+        const user = await resolveAuth({
+            provider: unverified(),
+            authHeader: 'Bearer alice',
+            workspaceId: 'ws1',
+            lookupRole: async () => 'admin',
+            requireMembership: true,
+        });
+        expect(user).toEqual({ id: 'alice', roles: ['admin'] });
+    });
+
+    it('true + invalid token: returns null (rejected at verify before membership check)', async () => {
+        const provider = {
+            name: 'fail',
+            verify: async () => ({ ok: false as const, reason: 'expired' }),
+        };
+        const user = await resolveAuth({
+            provider,
+            authHeader: 'Bearer bad',
+            workspaceId: 'ws1',
+            lookupRole: async () => 'admin',
+            requireMembership: true,
+        });
+        expect(user).toBeNull();
+    });
+});
