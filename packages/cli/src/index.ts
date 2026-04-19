@@ -54,6 +54,11 @@ async function main(): Promise<void> {
         case 'ws':
             await workspaceCommand(args);
             break;
+        case 'add': {
+            const { addCommand } = await import('./add.js');
+            await addCommand(args);
+            break;
+        }
         case 'entity':
             await entityCommand(args.slice(1));
             break;
@@ -75,6 +80,7 @@ function printHelp(): void {
 
 Usage:
   syncengine init [dir]           Scaffold a new project
+  syncengine add service <name>   Generate a new service file
   syncengine dev [--fresh]        Start NATS + Restate + workspace + Vite
   syncengine build                Production build (client + server bundles)
   syncengine start                Run the production server
