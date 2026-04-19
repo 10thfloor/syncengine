@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { defineEntity, applyHandler, integer, text, real } from '@syncengine/core';
 import { splitObjectKey } from '../entity-keys';
+import { resolveEmitPlaceholders } from '../entity-runtime';
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -146,5 +147,69 @@ describe('full handler flow', () => {
         // the demo's real lock entity will guard differently.
         state = applyHandler(cart, 'pay', state, []);
         expect(state.status).toBe('paid');
+    });
+});
+
+describe('resolveEmitPlaceholders', () => {
+    it('substitutes "$key" with the entity key', () => {
+        const inserts = [
+            { table: 'transactions', record: { productSlug: '$key', amount: 100 } },
+        ];
+        const resolved = resolveEmitPlaceholders(inserts, {
+            entityKey: 'keyboard',
+            userId: null,
+        });
+        expect(resolved[0].record.productSlug).toBe('keyboard');
+        expect(resolved[0].record.amount).toBe(100);
+    });
+
+    it('substitutes "$user" with the authenticated user id when provided', () => {
+        const inserts = [
+            { table: 'transactions', record: { userId: '$user', productSlug: '$key', amount: 100 } },
+        ];
+        const resolved = resolveEmitPlaceholders(inserts, {
+            entityKey: 'keyboard',
+            userId: 'alice',
+        });
+        expect(resolved[0].record.userId).toBe('alice');
+        expect(resolved[0].record.productSlug).toBe('keyboard');
+    });
+
+    it('leaves "$user" unresolved when userId is null', () => {
+        const inserts = [
+            { table: 't', record: { userId: '$user', amount: 5 } },
+        ];
+        const resolved = resolveEmitPlaceholders(inserts, {
+            entityKey: 'k',
+            userId: null,
+        });
+        expect(resolved[0].record.userId).toBe('$user');
+    });
+
+    it('returns the original insert unchanged when no placeholders present', () => {
+        const inserts = [
+            { table: 't', record: { staticValue: 42, other: 'hello' } },
+        ];
+        const resolved = resolveEmitPlaceholders(inserts, {
+            entityKey: 'k',
+            userId: 'alice',
+        });
+        expect(resolved[0]).toBe(inserts[0]);
+    });
+
+    it('handles multiple inserts with mixed placeholder patterns', () => {
+        const inserts = [
+            { table: 'a', record: { k: '$key' } },
+            { table: 'b', record: { u: '$user', k: '$key' } },
+            { table: 'c', record: { plain: 'value' } },
+        ];
+        const resolved = resolveEmitPlaceholders(inserts, {
+            entityKey: 'ent1',
+            userId: 'bob',
+        });
+        expect(resolved[0].record.k).toBe('ent1');
+        expect(resolved[1].record.u).toBe('bob');
+        expect(resolved[1].record.k).toBe('ent1');
+        expect(resolved[2].record.plain).toBe('value');
     });
 });
