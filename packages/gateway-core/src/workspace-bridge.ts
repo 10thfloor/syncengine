@@ -1,7 +1,8 @@
-import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
+import { type NatsConnection, type Subscription } from '@nats-io/transport-node';
 import { jetstream, DeliverPolicy, type JetStreamClient } from '@nats-io/jetstream';
 import { RingBuffer } from './ring-buffer';
 import { ClientSession } from './client-session';
+import { connectNats } from './nats-connect';
 import { provisionWorkspace } from '@syncengine/core/http';
 
 // Inlined from @syncengine/server to keep this package framework-free.
@@ -52,7 +53,7 @@ export class WorkspaceBridge {
         // where the new workspace hasn't been seen by this dev session.
         await provisionWorkspace(this.restateUrl, this.workspaceId);
 
-        this.nc = await connect({ servers: this.natsUrl });
+        this.nc = await connectNats(this.natsUrl);
         this.js = jetstream(this.nc);
         const wsId = this.workspaceId;
 

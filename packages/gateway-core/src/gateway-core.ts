@@ -13,9 +13,10 @@
  *   4. At shutdown → `core.shutdown()`.
  */
 
-import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
+import { type NatsConnection, type Subscription } from '@nats-io/transport-node';
 import { ClientSession, type GatewayClientWs } from './client-session';
 import { WorkspaceBridge } from './workspace-bridge';
+import { connectNats } from './nats-connect';
 import { isValidClientMsg } from './protocol';
 import type { ClientInitMessage, ClientMsg } from './protocol';
 
@@ -200,7 +201,7 @@ export class GatewayCore {
     }
 
     private async subscribeWorkspaceRegistry(): Promise<void> {
-        this.systemNc = await connect({ servers: this.config.natsUrl });
+        this.systemNc = await connectNats(this.config.natsUrl);
         this.systemSub = this.systemNc.subscribe('syncengine.workspaces');
         (async () => {
             for await (const msg of this.systemSub!) {
