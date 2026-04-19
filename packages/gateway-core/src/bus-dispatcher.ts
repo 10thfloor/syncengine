@@ -108,7 +108,12 @@ export class BusDispatcher {
     }
 
     private consumerName(): string {
-        return `bus:${this.config.busName}:${this.config.subscriberName}`;
+        // NATS durable consumer names reject '.', '>', '*', and whitespace —
+        // so `orderEvents.dlq` → `orderEvents_dlq` for the purpose of the
+        // durable name only. The bus name on the wire (subject filter
+        // below) still uses the original dot form.
+        const safeBus = this.config.busName.replace(/\./g, '_');
+        return `bus:${safeBus}:${this.config.subscriberName}`;
     }
 
     private filterSubject(): string {
@@ -221,6 +226,7 @@ export class BusDispatcher {
             outcome = await postToRestate(
                 this.config.restateUrl,
                 subscriber,
+                this.config.workspaceId,
                 invocationId,
                 event,
                 requestId,
@@ -311,6 +317,12 @@ function sleep(ms: number): Promise<void> {
  * the invocation id — every redelivery lands on the same invocation
  * and the workflow body runs exactly once.
  *
+ * URL shape matches the `workflow_` service prefix every user workflow
+ * registers under (see `packages/server/src/workflow.ts` and the
+ * resolveWorkflowTarget helper in http-core). The virtual-object key
+ * is `${workspaceId}/${invocationId}` URL-encoded as a single segment
+ * — same contract the `/rpc/workflow/<name>/<inv>` proxy already uses.
+ *
  * Mapping:
  *   - 2xx                                → ok
  *   - 4xx with terminal-error body       → terminal (publish DLQ, ack)
@@ -319,19 +331,25 @@ function sleep(ms: number): Promise<void> {
 export async function postToRestate(
     restateUrl: string,
     subscriberName: string,
+    workspaceId: string,
     invocationId: string,
     event: unknown,
     requestId: string | undefined,
 ): Promise<RestateOutcome> {
     // Restate's ingress path for a workflow invocation:
-    //   POST /<service>/<invocationId>/run
+    //   POST /workflow_<name>/<workspaceId>/<invocationId>/run
     // The `idempotency-key` header is what Restate uses for dedup;
     // baking the seq into the invocation id also gives us a stable
     // retry-safe identity for observability.
-    const url = `${restateUrl.replace(/\/$/, '')}/${encodeURIComponent(subscriberName)}/${encodeURIComponent(invocationId)}/run`;
+    const service = `workflow_${subscriberName}`;
+    const key = `${workspaceId}/${invocationId}`;
+    const url = `${restateUrl.replace(/\/$/, '')}/${encodeURIComponent(service)}/${encodeURIComponent(key)}/run`;
+    // Restate workflow handlers reject `idempotency-key` — the workflow
+    // key itself (${workspaceId}/${invocationId}) already disambiguates,
+    // so Restate dedups on its own. Sending the header yields a 400
+    // "cannot use the idempotency key with workflow handlers".
     const headers: Record<string, string> = {
         'content-type': 'application/json',
-        'idempotency-key': invocationId,
     };
     if (requestId) headers['x-request-id'] = requestId;
 

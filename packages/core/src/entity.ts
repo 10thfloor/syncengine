@@ -992,15 +992,18 @@ export function applyHandler(
   let next: Record<string, unknown>;
   let emits: EmitInsert[] | undefined;
   let triggers: EmitTrigger[] | undefined;
+  let publishes: EmitPublish[] | undefined;
   let rawResult: Record<string, unknown> | undefined;
   try {
     const result = handlerFn(base, ...args);
     rawResult = result as Record<string, unknown>;
-    // Capture emit()ed inserts and triggers before the spread (they
-    // survive the spread since EMIT_KEY/TRIGGER_KEY are non-enumerable,
-    // but validateEntityState builds a fresh object that drops them).
+    // Capture emit()ed inserts, triggers, and publishes before the
+    // spread. All three Symbol keys are non-enumerable so spreads skip
+    // them, but validateEntityState rebuilds the object from its
+    // declared fields and drops the Symbols — re-attach below.
     emits = extractEmits(rawResult);
     triggers = extractTriggers(rawResult);
+    publishes = extractPublishes(rawResult);
     // Allow handlers to return a partial state — merge into the current
     // record. Returning the full state also works (the spread is a no-op).
     next = { ...base, ...result };
@@ -1075,6 +1078,19 @@ export function applyHandler(
   if (triggers) {
     Object.defineProperty(validated, TRIGGER_KEY, {
       value: triggers,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+
+  // Re-attach bus publishes to the validated state so the entity
+  // runtime can hand them to publishBusEvents → NATS JetStream.
+  // Without this re-attachment, publishes declared inside emit({...})
+  // are silently dropped — validateEntityState builds a fresh object
+  // from $state fields and the PUBLISH_KEY Symbol doesn't survive.
+  if (publishes) {
+    Object.defineProperty(validated, PUBLISH_KEY, {
+      value: publishes,
       enumerable: false,
       configurable: true,
     });
