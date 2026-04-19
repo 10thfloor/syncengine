@@ -43,7 +43,11 @@ interface HeartbeatStatusState {
  * Compile a HeartbeatDef into a Restate workflow. Caller passes the
  * result to `endpoint.bind()` alongside regular workflows.
  */
-export function buildHeartbeatWorkflow(def: HeartbeatDef): ReturnType<typeof restate.workflow> {
+export function buildHeartbeatWorkflow(
+    def: HeartbeatDef,
+    services?: Record<string, Record<string, (...args: unknown[]) => Promise<unknown>>>,
+): ReturnType<typeof restate.workflow> {
+    const resolvedServices = services ?? {};
     return restate.workflow({
         name: `${HEARTBEAT_WORKFLOW_PREFIX}${def.$name}`,
         handlers: {
@@ -90,6 +94,7 @@ export function buildHeartbeatWorkflow(def: HeartbeatDef): ReturnType<typeof res
 
                     try {
                         const hbCtx = buildHeartbeatContext(ctx, def, scopeKey, runNumber, trigger);
+                        (hbCtx as unknown as { services: typeof resolvedServices }).services = resolvedServices;
                         await def.$handler(hbCtx);
                         const now = await ctx.date.now();
                         const nextAt = now + computeSleepMs(def.$every, now);

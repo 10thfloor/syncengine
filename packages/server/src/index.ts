@@ -7,6 +7,7 @@ import { workspace } from "./workspace/workspace.js";
 import { bindEntities } from "./entity-runtime.js";
 import { isEntity, type AnyEntity, isService, type AnyService, isBus, type BusRef } from "@syncengine/core";
 import { isWorkflow, isBusSubscriberWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
+import { ServiceContainer } from './service-container.js';
 import { isHeartbeat, type HeartbeatDef } from './heartbeat.js';
 import { buildHeartbeatWorkflow } from './heartbeat-workflow.js';
 import { heartbeatStatus, HEARTBEAT_STATUS_ENTITY_NAME } from '@syncengine/core';
@@ -226,14 +227,26 @@ export async function startRestateEndpoint(
     const allEntities: AnyEntity[] = [heartbeatStatus, ...entities];
     const bound = bindEntities(endpoint, allEntities);
 
+    // Build the ServiceContainer once at boot so every workflow /
+    // heartbeat / webhook invocation sees the same port instances.
+    // Overrides (services/test, services/staging) flow through the
+    // SyncengineConfig.services.overrides pathway — not plumbed here
+    // yet, deferred to a follow-up task.
+    const serviceContainer = new ServiceContainer(services);
+    const resolve = (defs: readonly AnyService[]) =>
+        serviceContainer.resolveAll(defs) as Record<
+            string,
+            Record<string, (...args: unknown[]) => Promise<unknown>>
+        >;
+
     for (const wf of workflows) {
-        bound.bind(buildWorkflowObject(wf));
+        bound.bind(buildWorkflowObject(wf, resolve(wf.$services)));
     }
     for (const hb of heartbeats) {
-        bound.bind(buildHeartbeatWorkflow(hb));
+        bound.bind(buildHeartbeatWorkflow(hb, resolve(hb.$services)));
     }
     for (const wh of webhooks) {
-        bound.bind(buildWebhookWorkflow(wh));
+        bound.bind(buildWebhookWorkflow(wh, resolve(wh.$services)));
     }
 
     // Make the definition lists available to framework hooks:

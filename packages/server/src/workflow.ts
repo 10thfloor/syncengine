@@ -100,13 +100,35 @@ export function defineWorkflow<const TName extends string, TInput>(
     };
 }
 
-export function buildWorkflowObject(def: WorkflowDef): ReturnType<typeof restate.workflow> {
+export type ResolvedServices = Record<string, Record<string, (...args: unknown[]) => Promise<unknown>>>;
+
+/** Wrap a user workflow handler with `ctx.services` injection. Exported
+ *  so unit tests can exercise the injection without the Restate SDK's
+ *  opaque workflow() wrapper. */
+export function wrapWorkflowHandler<TInput>(
+    userHandler: (ctx: restate.WorkflowContext, input: TInput) => Promise<void>,
+    services: ResolvedServices,
+): (ctx: restate.WorkflowContext, input: TInput) => Promise<void> {
+    return async (ctx, input) => {
+        (ctx as unknown as { services: ResolvedServices }).services = services;
+        await userHandler(ctx, input);
+    };
+}
+
+export function buildWorkflowObject(
+    def: WorkflowDef,
+    services?: ResolvedServices,
+): ReturnType<typeof restate.workflow> {
+    // Services are resolved once per workflow DEFINITION at bind time
+    // (server boot), not per invocation. That matches the hex adapter
+    // pattern — a port is a pure method bag; replaying the same
+    // handler against the same services is deterministic from the
+    // Restate journal's perspective.
+    const wrapped = wrapWorkflowHandler(def.$handler, services ?? {});
     return restate.workflow({
         name: `${WORKFLOW_OBJECT_PREFIX}${def.$name}`,
         handlers: {
-            run: async (ctx: restate.WorkflowContext, input: unknown) => {
-                await def.$handler(ctx, input);
-            },
+            run: wrapped,
         },
     });
 }
