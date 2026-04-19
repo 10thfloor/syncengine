@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import * as restate from "@restatedev/restate-sdk";
 import { errors, SchemaCode } from "@syncengine/core";
 import { workspace } from "./workspace/workspace.js";
-import { bindEntities } from "./entity-runtime.js";
+import { bindEntities, setAuthProvider } from "./entity-runtime.js";
 import { isEntity, type AnyEntity, isService, type AnyService, isBus, type BusRef } from "@syncengine/core";
 import { isWorkflow, isBusSubscriberWorkflow, buildWorkflowObject, type WorkflowDef } from './workflow.js';
 import { ServiceContainer } from './service-container.js';
@@ -220,7 +220,12 @@ export async function startRestateEndpoint(
     webhooks: WebhookDef[] = [],
     services: AnyService[] = [],
     serviceOverrides: import('@syncengine/core').AnyServiceOverride[] = [],
+    authProvider?: import('@syncengine/core').AuthProvider,
 ): Promise<void> {
+    // Plan 3: install the auth provider so entity-runtime verifies
+    // incoming Authorization headers on every handler invocation.
+    setAuthProvider(authProvider);
+
     const endpoint = restate.endpoint().bind(workspace);
 
     // Framework-owned entities come first so heartbeat workflows can
@@ -300,9 +305,16 @@ if (appDir) {
         } catch { /* no config file — that's fine for dev */ }
         const { serviceOverrides, busOverrides } = await loadConfigOverrides(appConfig);
 
+        // Extract auth provider from the loaded SyncengineConfig — may be
+        // undefined (pre-auth apps). entity-runtime uses this to verify
+        // Authorization headers on every handler call.
+        const authProvider = (appConfig as { auth?: { provider?: import('@syncengine/core').AuthProvider } } | null)
+            ?.auth?.provider;
+
         await startRestateEndpoint(
             entities, workflows, PORT, heartbeats, webhooks, services,
             [...serviceOverrides],
+            authProvider,
         );
 
         const { bootBusRuntime } = await import('./bus-boot.js');
@@ -368,6 +380,10 @@ export {
 } from './webhook-http.js';
 export { getRegisteredWebhooks } from './webhook-registry.js';
 export { ServiceContainer } from './service-container.js';
+
+// ── Auth adapters (Plan 3) ────────────────────────────────────────────────
+export { custom } from './auth/custom-adapter.js';
+export { unverified } from './auth/unverified-adapter.js';
 
 // ── Event bus — subscriber side ────────────────────────────────────────────
 export { on, From, isSubscription } from './bus-on.js';

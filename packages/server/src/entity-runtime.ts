@@ -39,6 +39,7 @@ import {
     AccessDeniedError,
     EntityError,
     SyncEngineError,
+    type AuthProvider,
     errors,
     SchemaCode,
     type AnyEntity,
@@ -49,10 +50,23 @@ import {
 import { instrument } from '@syncengine/observe';
 import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
 import { WORKFLOW_OBJECT_PREFIX } from './workflow.js';
+import { resolveAuth } from './auth/resolve-auth.js';
 
 
 const STATE_KEY = "state";
 const SOURCE_KEY = "source";
+
+// Module-level auth provider — installed at startRestateEndpoint via
+// setAuthProvider(). Undefined in pre-auth apps and in tests that don't
+// wire a provider. runHandler reads this to verify the bearer token on
+// every handler invocation.
+let _authProvider: AuthProvider | undefined;
+
+/** Install the auth provider used by all entity handler invocations.
+ *  Called at startRestateEndpoint; `undefined` disables RPC-path auth. */
+export function setAuthProvider(provider: AuthProvider | undefined): void {
+    _authProvider = provider;
+}
 
 /** Result envelope returned by every entity handler. */
 interface HandlerResult {
@@ -88,13 +102,31 @@ async function runHandler(
     const base = stored ?? (entity.$initialState as Record<string, unknown>);
     const merged = hasSource ? mergeSourceIntoState(base, projections) : base;
 
+    // Plan 3: verify the Authorization header and enrich with workspace
+    // membership role. Returns null for unauthenticated callers — only
+    // Access.public handlers accept that; other policies reject it.
+    const authHeader = ctx.request().headers.get('authorization') ?? undefined;
+    const user = await resolveAuth({
+        provider: _authProvider,
+        authHeader,
+        workspaceId,
+        lookupRole: async (userId, wsId) => {
+            // Call workspace.isMember on the workspace virtual object.
+            // `ctx.objectClient` is the in-Restate RPC to another object.
+            // Restate types are opaque here; the handler contract comes
+            // from packages/server/src/workspace/workspace.ts:isMember.
+            const wsClient = ctx.objectClient({ name: 'workspace' }, wsId) as unknown as {
+                isMember(args: { userId: string }): Promise<{ isMember: boolean; role?: string }>;
+            };
+            const result = await wsClient.isMember({ userId });
+            return result.role ?? null;
+        },
+    });
+
     let validated: Record<string, unknown>;
     try {
-        // Plan 2: thread auth context to applyHandler so $access policies
-        // are enforced server-side. user is stubbed null until Plan 3 wires
-        // the authenticated identity from the Restate/WebSocket connection.
         validated = applyHandler(entity, handlerName, merged, args, {
-            user: null,
+            user,
             key: entityKey,
         });
     } catch (err) {
@@ -127,7 +159,7 @@ async function runHandler(
     const rawTriggers = extractTriggers(validated);
     const rawPublishes = extractPublishes(validated);
     const emits = rawEmits
-        ? resolveEmitPlaceholders(rawEmits, { entityKey, userId: null })
+        ? resolveEmitPlaceholders(rawEmits, { entityKey, userId: user?.id ?? null })
         : undefined;
 
     // Split: persist user state fields only (not projection fields)

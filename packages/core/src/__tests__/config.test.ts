@@ -69,3 +69,38 @@ describe('config() — observability block', () => {
         expectTypeOf<Cfg>().toMatchTypeOf<{ observability?: ObservabilityConfig }>();
     });
 });
+
+describe('auth.provider (Plan 3)', () => {
+    it('accepts an auth.provider on config()', () => {
+        const cfg = config({
+            workspaces: { resolve: () => 'default' },
+            auth: {
+                provider: {
+                    name: 'stub',
+                    verify: async () => ({ ok: true, user: { id: 'u1' } }),
+                },
+            },
+        });
+        expect(cfg.auth?.provider?.name).toBe('stub');
+    });
+
+    it('auth is optional entirely', () => {
+        const cfg: SyncengineConfig = config({ workspaces: { resolve: () => 'default' } });
+        expect(cfg.auth).toBeUndefined();
+    });
+
+    it('auth.verify and auth.provider can coexist', () => {
+        const cfg = config({
+            workspaces: { resolve: () => 'default' },
+            auth: {
+                verify: () => ({ id: 'alice' }),
+                provider: {
+                    name: 'stub',
+                    verify: async () => ({ ok: true, user: { id: 'u1' } }),
+                },
+            },
+        });
+        expect(cfg.auth?.verify).toBeDefined();
+        expect(cfg.auth?.provider).toBeDefined();
+    });
+});
