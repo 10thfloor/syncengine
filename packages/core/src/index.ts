@@ -213,3 +213,15 @@ export { milliseconds, seconds, minutes, hours, days } from './duration';
 export type { Duration } from './duration';
 export { bytes } from './bytes';
 export type { Bytes } from './bytes';
+
+// ── Bus config factory namespaces ──────────────────────────────────────────
+export { Retention, Delivery, Storage, Retry, Backoff } from './bus-config';
+export type {
+    RetentionConfig,
+    DeliveryConfig,
+    DeliveryMode,
+    StorageConfig,
+    StorageKind,
+    RetryConfig,
+    BackoffConfig,
+} from './bus-config';
