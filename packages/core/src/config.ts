@@ -1,3 +1,5 @@
+import type { AuthProvider } from './auth-provider';
+
 // ── syncengine.config.ts DSL (PLAN Phase 8) ────────────────────────────────
 //
 // `defineConfig({...})` is a typed identity function used in the project
@@ -69,9 +71,19 @@ export interface AuthConfig {
      * are equivalent and degrade the request to anonymous (user.id =
      * 'anonymous'). Not a redirect hook.
      */
-    readonly verify: (
+    readonly verify?: (
         ctx: AuthVerifyContext,
     ) => SyncengineUser | null | undefined | Promise<SyncengineUser | null | undefined>;
+    /**
+     * RPC-path auth provider. When set, every entity handler invocation
+     * verifies the `Authorization: Bearer` header against this provider
+     * before dispatching — unauthenticated calls get `user: null` and
+     * only `Access.public` policies pass.
+     *
+     * Pluggable: use `custom({ verify })` for bring-your-own JWT,
+     * `unverified()` for local dev, or a dedicated OIDC adapter.
+     */
+    readonly provider?: AuthProvider;
 }
 
 export interface ServicesConfig {
