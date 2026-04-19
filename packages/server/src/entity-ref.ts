@@ -77,42 +77,56 @@ export function entityRef<
     const fullKey = `${workspaceId}/${key}`;
     const service = `${ENTITY_OBJECT_PREFIX}${entityDef.$name}`;
 
-    if (opts?.asSystem) {
-        // System-privileged path — uses Restate's genericCall so we can
-        // attach the SYSTEM_CALL_HEADER. The entity runtime reads this
-        // header and sets auth.user = { id: '$system' } before the
-        // handler runs, bypassing access policies.
-        if (!ctx.genericCall) {
-            throw new Error(
-                'entityRef({ asSystem: true }) requires a context that exposes genericCall — ' +
-                'only available inside Restate handlers.',
-            );
-        }
-        const genericCall = ctx.genericCall;
-        return new Proxy({} as EntityRefProxy<THandlers>, {
-            get(_, handlerName: string) {
-                return (...args: unknown[]) =>
-                    genericCall({
-                        service,
-                        method: handlerName,
-                        key: fullKey,
-                        parameter: args,
-                        headers: { [SYSTEM_CALL_HEADER]: '1' },
-                    });
-            },
-        });
-    }
+    // Pick the invocation strategy once, then share the Proxy machinery.
+    // - asSystem: Restate's genericCall so we can attach SYSTEM_CALL_HEADER.
+    //   The entity runtime reads the header and sets auth.user = $system
+    //   before the handler runs, bypassing access policies.
+    // - default: the typed objectClient — the callee sees whatever auth
+    //   header the outer invocation carried (often none for workflow
+    //   chains, so its access policies see user=null).
+    const invoke = opts?.asSystem
+        ? buildSystemInvoker(ctx, service, fullKey)
+        : buildDefaultInvoker(ctx, service, fullKey);
 
-    // Default path — no system privilege; the callee sees whatever auth
-    // header was on the original invocation (typically none for
-    // workflow chains, which means the callee will hit its access
-    // policies with user=null).
-    const client = ctx.objectClient({ name: service }, fullKey);
     return new Proxy({} as EntityRefProxy<THandlers>, {
         get(_, handlerName: string) {
-            return (...args: unknown[]) => client[handlerName](args);
+            return (...args: unknown[]) => invoke(handlerName, args);
         },
     });
+}
+
+type Invoker = (handlerName: string, args: unknown[]) => Promise<unknown>;
+
+function buildSystemInvoker(
+    ctx: { genericCall?(call: unknown): Promise<unknown> },
+    service: string,
+    fullKey: string,
+): Invoker {
+    if (!ctx.genericCall) {
+        throw new Error(
+            'entityRef({ asSystem: true }) requires a context that exposes genericCall — ' +
+            'only available inside Restate handlers.',
+        );
+    }
+    const genericCall = ctx.genericCall;
+    return (handlerName, args) =>
+        genericCall({
+            service,
+            method: handlerName,
+            key: fullKey,
+            parameter: args,
+            headers: { [SYSTEM_CALL_HEADER]: '1' },
+        });
+}
+
+function buildDefaultInvoker(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ctx: { objectClient(opts: { name: string }, key: string): any },
+    service: string,
+    fullKey: string,
+): Invoker {
+    const client = ctx.objectClient({ name: service }, fullKey);
+    return (handlerName, args) => client[handlerName](args);
 }
 
 /**
