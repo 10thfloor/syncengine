@@ -50,10 +50,9 @@ services:
       timeout: 2s
       retries: 30
 
-  # Full Node bundle — registers the Restate endpoint on :9080 AND
-  # serves /gateway WebSocket on :3000. Not published to the host;
-  # only the edge + restate containers need to reach it over the
-  # compose network.
+  # Handlers tier — Node bundle in handlers-only mode. Registers
+  # with Restate and does NOTHING else (no HTTP server, no gateway,
+  # no static files). Browser traffic never touches this container.
   handlers:
     build:
       context: ${APP_DIR:-apps/test}
@@ -69,11 +68,10 @@ services:
         condition: service_healthy
     expose:
       - "9080"
-      - "3000"
 
-  # Bun `syncengine-serve` binary — serves HTML + static + /_health +
-  # /_ready. Browser-facing. Points at the handlers service for
-  # workspace provisioning via SYNCENGINE_RESTATE_URL.
+  # Edge tier — Bun `syncengine-serve` binary. Owns every browser-
+  # facing surface: HTML + static + /_health + /_ready + RPC proxy +
+  # /gateway WebSocket (in-process, no upstream proxy).
   edge:
     build:
       context: .
@@ -83,17 +81,10 @@ services:
     environment:
       SYNCENGINE_NATS_URL: "ws://nats:9222"
       SYNCENGINE_RESTATE_URL: "http://restate:8080"
-      # Browser-facing overrides — see docker-compose.yml for the
-      # rationale on the split internal/public URLs.
+      # Browser-facing overrides — these URLs land in HTML meta tags.
+      # They must resolve from the browser's network, not ours.
       SYNCENGINE_NATS_PUBLIC_URL: "ws://localhost:${NATS_WS_HOST_PORT:-19222}"
       SYNCENGINE_RESTATE_PUBLIC_URL: "http://localhost:${RESTATE_INGRESS_HOST_PORT:-18080}"
-      # Enable the /gateway WebSocket reverse proxy to the handlers
-      # service. The browser connects to ws://<edge>/gateway (same
-      # origin as HTML); the edge pipes frames to the full gateway
-      # server inside the handlers container. Leaving this unset turns
-      # the edge into a static-only server, which is fine for demos
-      # but breaks real-time sync.
-      SYNCENGINE_GATEWAY_UPSTREAM_URL: "ws://handlers:3000/gateway"
     depends_on:
       handlers:
         condition: service_started

@@ -1,4 +1,17 @@
-import type { ServerMsg } from './protocol.js';
+import type { ServerMsg } from './protocol';
+
+/**
+ * Minimal WebSocket-like interface the gateway needs from its client
+ * transport. Node's `ws` and Bun's `ServerWebSocket` both satisfy this
+ * via thin adapters, so the same gateway core works in either runtime.
+ * `send` on a closed socket is a no-op — the adapter is expected to
+ * keep `isOpen` honest.
+ */
+export interface GatewayClientWs {
+    send(data: string): void;
+    close(code?: number, reason?: string): void;
+    readonly isOpen: boolean;
+}
 
 export class ClientSession {
     readonly clientId: string;
@@ -9,9 +22,9 @@ export class ClientSession {
     /** Channels currently being replayed — live messages are buffered until replay-end. */
     readonly replayingChannels = new Set<string>();
 
-    private readonly ws: { send(data: string): void; readyState: number; OPEN: number };
+    private readonly ws: GatewayClientWs;
 
-    constructor(clientId: string, ws: { send(data: string): void; readyState: number; OPEN: number }) {
+    constructor(clientId: string, ws: GatewayClientWs) {
         this.clientId = clientId;
         this.ws = ws;
     }
@@ -24,7 +37,7 @@ export class ClientSession {
     unsubscribeTopic(name: string, key: string): void { this.topics.delete(`${name}:${key}`); }
 
     send(msg: ServerMsg): void {
-        if (this.ws.readyState !== this.ws.OPEN) return;
+        if (!this.ws.isOpen) return;
         this.ws.send(JSON.stringify(msg));
     }
 }

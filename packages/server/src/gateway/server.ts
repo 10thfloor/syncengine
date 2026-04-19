@@ -1,49 +1,27 @@
-// packages/server/src/gateway/server.ts
+// Node `ws`-backed adapter over @syncengine/gateway-core. Purely glue:
+// every WebSocket that lands here becomes a GatewayCore session and
+// every protocol concern lives in gateway-core.
+
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
-import { WorkspaceBridge } from './workspace-bridge.js';
-import { ClientSession } from './client-session.js';
-import { isValidClientMsg } from './protocol.js';
-import type { ClientMsg, ClientInitMessage } from './protocol.js';
+import {
+    GatewayCore,
+    type GatewayClientWs,
+    type GatewayConfig,
+    type GatewaySessionHandle,
+} from '@syncengine/gateway-core';
 
-export interface GatewayConfig {
-    natsUrl: string;
-    restateUrl: string;
-}
+// Re-export the config shape so existing imports keep working.
+export type { GatewayConfig };
 
 export class GatewayServer {
-    private readonly config: GatewayConfig;
-    private readonly bridges = new Map<string, WorkspaceBridge>();
-    private readonly bridgeCreating = new Map<string, Promise<WorkspaceBridge>>();
+    private readonly core: GatewayCore;
     private readonly wss: WebSocketServer;
-    private readonly allSessions = new Set<ClientSession>();
-    private systemNc: NatsConnection | null = null;
-    private systemSub: Subscription | null = null;
 
     constructor(config: GatewayConfig) {
-        this.config = config;
+        this.core = new GatewayCore(config);
         this.wss = new WebSocketServer({ noServer: true });
         this.wss.on('connection', (ws) => this.onConnection(ws));
-        this.subscribeWorkspaceRegistry().catch((err) => {
-            console.warn('[gateway] workspace registry subscription failed:', err);
-        });
-    }
-
-    /** Subscribe to system-level workspace lifecycle events and forward to all clients. */
-    private async subscribeWorkspaceRegistry(): Promise<void> {
-        this.systemNc = await connect({ servers: this.config.natsUrl });
-        this.systemSub = this.systemNc.subscribe('syncengine.workspaces');
-        (async () => {
-            for await (const msg of this.systemSub!) {
-                try {
-                    const data = msg.json<Record<string, unknown>>();
-                    for (const session of this.allSessions) {
-                        session.send({ type: 'workspace-registry', ...data });
-                    }
-                } catch { /* decode error */ }
-            }
-        })().catch(() => { /* sub closed */ });
     }
 
     /** Handle an HTTP upgrade request. Call from server.on('upgrade'). */
@@ -80,163 +58,28 @@ export class GatewayServer {
     }
 
     async shutdown(): Promise<void> {
-        if (this.systemSub) this.systemSub.unsubscribe();
-        if (this.systemNc && !this.systemNc.isClosed()) await this.systemNc.drain();
-        for (const [, bridge] of this.bridges) {
-            await bridge.stop();
-        }
-        this.bridges.clear();
-        this.allSessions.clear();
+        await this.core.shutdown();
         this.wss.close();
     }
 
     private onConnection(ws: WebSocket): void {
-        let session: ClientSession | null = null;
-        let bridge: WorkspaceBridge | null = null;
-        let authToken: string | undefined;
+        const session: GatewaySessionHandle = this.core.attach(wrapWs(ws));
 
-        // The whole async body is wrapped in try/catch so any downstream
-        // throw (notably provisionWorkspace → HTTP 404 before the Restate
-        // deployment is registered) becomes a graceful `error` frame +
-        // close, rather than an unhandled rejection that crashes the
-        // process. Without this, a single too-early client connection
-        // can take down the handlers container.
-        ws.on('message', async (data) => {
-          try {
-            let msg: ClientMsg;
-            try {
-                const parsed: unknown = JSON.parse(data.toString());
-                if (!isValidClientMsg(parsed)) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
-                    return;
-                }
-                msg = parsed;
-            } catch {
-                ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
-                return;
-            }
-
-            if (msg.type === 'init') {
-                if (session) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Already initialized', code: 'REINIT' }));
-                    return;
-                }
-                const init = msg as ClientInitMessage;
-                session = new ClientSession(init.clientId, ws as any);
-                authToken = init.authToken;
-                bridge = await this.getOrCreateBridge(init.workspaceId);
-                bridge.addSession(session);
-
-                await bridge.ensureEntityWritesConsumer();
-                for (const ch of init.channels) {
-                    await bridge.ensureChannelConsumer(ch);
-                }
-
-                this.allSessions.add(session);
-                ws.send(JSON.stringify({ type: 'ready' }));
-                return;
-            }
-
-            if (!session || !bridge) {
-                ws.send(JSON.stringify({ type: 'error', message: 'Must send init first', code: 'NO_INIT' }));
-                return;
-            }
-
-            switch (msg.type) {
-                case 'subscribe':
-                    if (msg.kind === 'channel') {
-                        // Mark replaying BEFORE subscribing interest so the
-                        // live consumer loop skips this session for this channel
-                        // until replay-end is sent.
-                        if (msg.lastSeq != null && msg.lastSeq > 0) {
-                            session.replayingChannels.add(msg.name);
-                        }
-                        session.subscribeChannel(msg.name);
-                        await bridge.ensureChannelConsumer(msg.name);
-                        if (msg.lastSeq != null && msg.lastSeq > 0) {
-                            bridge.replayChannel(session, msg.name, msg.lastSeq);
-                            session.replayingChannels.delete(msg.name);
-                        } else {
-                            session.send({ type: 'replay-end', channel: msg.name });
-                        }
-                    } else if (msg.kind === 'entity') {
-                        session.subscribeEntity(msg.entity, msg.key);
-                    } else if (msg.kind === 'topic') {
-                        session.subscribeTopic(msg.name, msg.key);
-                    }
-                    break;
-
-                case 'unsubscribe':
-                    if (msg.kind === 'channel') session.unsubscribeChannel(msg.name);
-                    else if (msg.kind === 'entity') session.unsubscribeEntity(msg.entity, msg.key);
-                    else if (msg.kind === 'topic') session.unsubscribeTopic(msg.name, msg.key);
-                    break;
-
-                case 'publish':
-                    if (msg.kind === 'delta') {
-                        // Construct NATS subject from channel name — subject stays internal to the bridge
-                        const subject = `ws.${bridge.workspaceId}.ch.${msg.channel}.deltas`;
-                        bridge.publishDelta(subject, msg.payload);
-                    } else if (msg.kind === 'topic') {
-                        // No more split('.') — name and key come directly from the message
-                        bridge.publishTopicLocal(msg.name, msg.key, msg.payload, session.clientId);
-                    } else if (msg.kind === 'authority') {
-                        void bridge.publishAuthority(msg.viewName, msg.deltas, authToken);
-                    }
-                    break;
-            }
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.warn(`[gateway] session error: ${message}`);
-            try {
-                ws.send(JSON.stringify({
-                    type: 'error',
-                    message: `gateway bridge failed: ${message}`,
-                    code: 'BRIDGE_FAILED',
-                }));
-            } catch { /* ws may already be dead */ }
-            try { ws.close(1011, 'bridge failed'); } catch { /* best effort */ }
-          }
+        ws.on('message', (data) => {
+            // ws emits Buffer for binary frames, string for text. The
+            // protocol is JSON so `toString()` is always safe.
+            void session.handleMessage(data.toString());
         });
-
-        ws.on('close', () => {
-            if (session) this.allSessions.delete(session);
-            if (session && bridge) bridge.removeSession(session);
-        });
-
-        ws.on('error', () => {
-            if (session) this.allSessions.delete(session);
-            if (session && bridge) bridge.removeSession(session);
-        });
+        ws.on('close', () => session.handleClose());
+        ws.on('error', () => session.handleClose());
     }
+}
 
-    private getOrCreateBridge(workspaceId: string): Promise<WorkspaceBridge> {
-        const existing = this.bridges.get(workspaceId);
-        if (existing) return Promise.resolve(existing);
-
-        let inflight = this.bridgeCreating.get(workspaceId);
-        if (!inflight) {
-            inflight = this.createBridge(workspaceId).finally(() => {
-                this.bridgeCreating.delete(workspaceId);
-            });
-            this.bridgeCreating.set(workspaceId, inflight);
-        }
-        return inflight;
-    }
-
-    private async createBridge(workspaceId: string): Promise<WorkspaceBridge> {
-        const bridge = new WorkspaceBridge({
-            natsUrl: this.config.natsUrl,
-            restateUrl: this.config.restateUrl,
-            workspaceId,
-        });
-        bridge.onEmpty = () => {
-            // Guard: stop() is idempotent (checks this.closed internally)
-            void bridge.stop();
-            this.bridges.delete(workspaceId);
-        };
-        await bridge.start();
-        this.bridges.set(workspaceId, bridge);
-        return bridge;
-    }
+/** Wrap a Node ws WebSocket in the GatewayClientWs contract. */
+function wrapWs(ws: WebSocket): GatewayClientWs {
+    return {
+        send(data: string): void { ws.send(data); },
+        close(code?: number, reason?: string): void { ws.close(code, reason); },
+        get isOpen(): boolean { return ws.readyState === ws.OPEN; },
+    };
 }

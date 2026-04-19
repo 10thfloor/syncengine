@@ -28,10 +28,7 @@ import { createServer } from './server.ts';
 import { createLogger } from './logger.ts';
 import type { Logger } from './logger.ts';
 import { createShutdownController } from './shutdown.ts';
-import {
-    createGatewayWebsocketHandler,
-    tryUpgradeGateway,
-} from './gateway-proxy.ts';
+import { BunGateway } from './gateway.ts';
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 
@@ -66,12 +63,13 @@ async function main(argv: readonly string[]): Promise<void> {
     // the browser reaches them via the host's published ports.
     const publicNatsUrl = process.env.SYNCENGINE_NATS_PUBLIC_URL;
     const publicRestateUrl = process.env.SYNCENGINE_RESTATE_PUBLIC_URL;
-    // If the gateway WebSocket proxy is active, advertise it to the
-    // client so connectGateway() runs instead of connectNats() and
-    // the browser never touches NATS directly. The proxy itself is
-    // wired below via SYNCENGINE_GATEWAY_UPSTREAM_URL.
-    const gatewayUrl = process.env.SYNCENGINE_GATEWAY_URL
-        ?? (process.env.SYNCENGINE_GATEWAY_UPSTREAM_URL ? '/gateway' : undefined);
+    // The edge always hosts an in-process `/gateway` WebSocket (see
+    // BunGateway below). Advertising it as same-origin by default
+    // means `connectGateway()` wins over `connectNats()` — the browser
+    // never touches NATS directly. SYNCENGINE_GATEWAY_URL overrides
+    // for operators who front the edge with a CDN or want to steer
+    // clients at a dedicated gateway host.
+    const gatewayUrl = process.env.SYNCENGINE_GATEWAY_URL ?? '/gateway';
     if (!natsUrl || !restateUrl) {
         const err = errors.cli(CliCode.ENV_MISSING, {
             message:
@@ -127,14 +125,10 @@ async function main(argv: readonly string[]): Promise<void> {
     // Track inflight requests so SIGTERM can drain them.
     const shutdown = createShutdownController({ drainMs: flags.shutdownDrainMs });
 
-    // Optional gateway reverse-proxy. Enabled by
-    // SYNCENGINE_GATEWAY_UPSTREAM_URL (e.g. ws://handlers:3000/gateway
-    // in docker-compose.serve.yml). When unset, /gateway is treated as
-    // a normal SPA route — single-host deploys don't need the proxy.
-    const gatewayUpstream = process.env.SYNCENGINE_GATEWAY_UPSTREAM_URL;
-    const gatewayProxyOpts = gatewayUpstream
-        ? { upstreamUrl: gatewayUpstream, logger }
-        : null;
+    // The gateway is in-process — no proxy, no second service. A
+    // single GatewayCore instance owns the WebSocket↔NATS bridge for
+    // every connected browser.
+    const gateway = new BunGateway({ natsUrl, restateUrl });
 
     const server = Bun.serve({
         port: flags.port,
@@ -142,10 +136,10 @@ async function main(argv: readonly string[]): Promise<void> {
         maxRequestBodySize: flags.maxBodyBytes,
         async fetch(req: Request): Promise<Response | undefined> {
             const t0 = performance.now();
-            // Try to hijack /gateway for proxying before the normal
-            // fetch path sees it. When upgrade succeeds, Bun takes over
-            // and our fetch handler returns `undefined`.
-            if (gatewayProxyOpts && tryUpgradeGateway(req, server as unknown as Parameters<typeof tryUpgradeGateway>[1], gatewayProxyOpts)) {
+            // Hijack /gateway for WebSocket upgrade before the fetch
+            // path sees it. When upgrade succeeds, Bun takes over and
+            // this handler returns `undefined`.
+            if (gateway.tryUpgrade(req, server as unknown as Parameters<typeof gateway.tryUpgrade>[1])) {
                 logger.info({
                     event: 'gateway.upgrade',
                     path: new URL(req.url).pathname,
@@ -159,16 +153,7 @@ async function main(argv: readonly string[]): Promise<void> {
                 return res;
             });
         },
-        websocket: gatewayProxyOpts
-            ? createGatewayWebsocketHandler(gatewayProxyOpts)
-            : {
-                  // Unused default to satisfy Bun.serve's type when
-                  // gateway proxying isn't configured; no routes end up
-                  // calling upgrade() so these handlers never fire.
-                  message() {},
-                  open() {},
-                  close() {},
-              },
+        websocket: gateway.websocketHandlers(),
     });
 
     logger.info({

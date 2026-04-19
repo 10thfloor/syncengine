@@ -1,10 +1,17 @@
-// packages/server/src/gateway/workspace-bridge.ts
 import { connect, type NatsConnection, type Subscription } from '@nats-io/transport-node';
 import { jetstream, DeliverPolicy, type JetStreamClient } from '@nats-io/jetstream';
-import { RingBuffer } from './ring-buffer.js';
-import { ClientSession } from './client-session.js';
-import { streamName } from '../workspace/workspace.js';
+import { RingBuffer } from './ring-buffer';
+import { ClientSession } from './client-session';
 import { provisionWorkspace } from '@syncengine/core/http';
+
+// Inlined from @syncengine/server to keep this package framework-free.
+// The stream-naming convention is a platform contract (clients compute
+// it identically in data-worker.js); keeping the single source of truth
+// in @syncengine/server would force every gateway consumer to depend on
+// the Node-only Restate SDK transitively.
+function streamName(workspaceId: string): string {
+    return `WS_${workspaceId.replace(/-/g, '_')}`;
+}
 
 const PEER_ACK_INTERVAL_MS = 5 * 60_000;
 const TEARDOWN_GRACE_MS = 30_000;

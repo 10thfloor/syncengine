@@ -23,6 +23,7 @@
     "@nats-io/transport-node": "3.3.1",
     "@restatedev/restate-sdk": "1.13.0",
     "@syncengine/core": "workspace:*",
+    "@syncengine/gateway-core": "workspace:*",
     "@syncengine/http-core": "workspace:*",
     "ws": "^8.20.0"
   },

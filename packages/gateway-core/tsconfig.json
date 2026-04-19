@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "isolatedModules": true,
+    "sourceMap": true,
+    "incremental": true,
+    "declaration": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"],
+  "exclude": ["src/**/__tests__/**"]
+}

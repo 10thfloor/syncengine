@@ -1,6 +1,16 @@
-// packages/server/src/gateway/index.ts
+// Node adapter entry — re-exports the Node-specific GatewayServer and
+// passes the gateway-core types through so callers who previously
+// imported from `@syncengine/server/gateway` keep working.
+
 export { GatewayServer, type GatewayConfig } from './server.js';
-export { WorkspaceBridge, type BridgeConfig } from './workspace-bridge.js';
-export { ClientSession } from './client-session.js';
-export { RingBuffer, type RingEntry } from './ring-buffer.js';
-export type * from './protocol.js';
+export {
+    WorkspaceBridge,
+    ClientSession,
+    RingBuffer,
+    type BridgeConfig,
+} from '@syncengine/gateway-core';
+export type {
+    ClientMsg,
+    ClientInitMessage,
+    ServerMsg,
+} from '@syncengine/gateway-core';

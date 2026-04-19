@@ -1,8 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ClientSession } from '../client-session.js';
+import { ClientSession, type GatewayClientWs } from '../client-session.ts';
 
-function mockWs() {
-    return { send: vi.fn(), readyState: 1, OPEN: 1 } as any;
+function mockWs(): GatewayClientWs & { send: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn>; _open: boolean } {
+    const state = {
+        _open: true,
+        send: vi.fn(),
+        close: vi.fn(),
+        get isOpen() { return state._open; },
+    };
+    return state as GatewayClientWs & typeof state;
 }
 
 describe('ClientSession', () => {
@@ -37,9 +43,9 @@ describe('ClientSession', () => {
         expect(ws.send).toHaveBeenCalledWith('{"type":"ready"}');
     });
 
-    it('send() skips when WebSocket is not open', () => {
+    it('send() skips when WebSocket is closed', () => {
         const ws = mockWs();
-        ws.readyState = 3; // CLOSED
+        ws._open = false;
         const session = new ClientSession('client-1', ws);
         session.send({ type: 'ready' });
         expect(ws.send).not.toHaveBeenCalled();
