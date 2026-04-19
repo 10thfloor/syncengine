@@ -506,6 +506,10 @@ export const EMIT_KEY: unique symbol = Symbol.for("syncengine.emit");
  *  handler's return value. Non-enumerable, invisible to JSON.stringify. */
 export const TRIGGER_KEY: unique symbol = Symbol.for("syncengine.trigger");
 
+/** Well-known Symbol key used to carry emitted bus publishes on the
+ *  handler's return value. Mirrors EMIT_KEY + TRIGGER_KEY. */
+export const PUBLISH_KEY: unique symbol = Symbol.for("syncengine.publish");
+
 /** A workflow trigger attached to a handler's return value via TRIGGER_KEY. */
 export interface EmitTrigger {
     readonly workflow: string;
@@ -573,6 +577,34 @@ export function trigger<TInput>(
     return { $effect: 'trigger', workflow, input };
 }
 
+/** An emitted bus publish attached to a handler's return value via PUBLISH_KEY. */
+export interface EmitPublish<T = unknown> {
+    readonly $effect: 'publish';
+    /** Minimal shape — dodges the cross-import to @syncengine/core's bus.ts
+     *  to avoid circular type references. Runtime shape is the full BusRef. */
+    readonly bus: {
+        readonly $tag: 'bus';
+        readonly $name: string;
+        readonly $schema: { safeParse(v: unknown): { success: true; data: T } | { success: false; error: Error } };
+    };
+    readonly payload: T;
+}
+
+/** Create a typed publish effect for use in `emit({ state, effects })`.
+ *  Payload is validated against the bus schema at call time. */
+export function publish<T>(
+    bus: EmitPublish<T>['bus'],
+    payload: T,
+): EmitPublish<T> {
+    const parsed = bus.$schema.safeParse(payload);
+    if (!parsed.success) {
+        throw new Error(
+            `publish(${bus.$name}): invalid bus payload — ${parsed.error.message}`,
+        );
+    }
+    return { $effect: 'publish', bus, payload: parsed.data };
+}
+
 /**
  * Wrap a handler's return state with table inserts that the entity
  * runtime will publish to the sync pipeline. The returned object IS
@@ -622,9 +654,10 @@ export function emit<S extends Record<string, unknown>>(
     const { state, effects } = stateOrOpts as { state: S; effects: ReadonlyArray<{ readonly $effect: string; [key: string]: unknown }> };
     const wrapped = { ...state };
 
-    // Separate effects into inserts and triggers
+    // Separate effects into inserts, triggers, and publishes
     const insertEffects: EmitInsert[] = [];
     const triggerEffects: EmitTrigger[] = [];
+    const publishEffects: EmitPublish[] = [];
 
     for (const effect of effects) {
       if (effect.$effect === 'insert') {
@@ -633,6 +666,8 @@ export function emit<S extends Record<string, unknown>>(
       } else if (effect.$effect === 'trigger') {
         const typed = effect as unknown as { workflow: { $name: string }; input: unknown };
         triggerEffects.push({ workflow: typed.workflow.$name, input: typed.input });
+      } else if (effect.$effect === 'publish') {
+        publishEffects.push(effect as unknown as EmitPublish);
       }
     }
 
@@ -647,6 +682,14 @@ export function emit<S extends Record<string, unknown>>(
     if (triggerEffects.length > 0) {
       Object.defineProperty(wrapped, TRIGGER_KEY, {
         value: triggerEffects,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+
+    if (publishEffects.length > 0) {
+      Object.defineProperty(wrapped, PUBLISH_KEY, {
+        value: publishEffects,
         enumerable: false,
         configurable: true,
       });
@@ -686,6 +729,19 @@ export function extractTriggers(
 ): EmitTrigger[] | undefined {
   return (state as Record<symbol, unknown>)[TRIGGER_KEY] as
     | EmitTrigger[]
+    | undefined;
+}
+
+/** Extract bus publishes from a handler return value, if any. Mirrors
+ *  `extractEmits` / `extractTriggers` — keeps the three effect types
+ *  as parallel extractors rather than a single multi-shape function,
+ *  matching the existing pattern the server + vite-plugin runtimes
+ *  already consume. */
+export function extractPublishes(
+  state: Record<string, unknown>,
+): EmitPublish[] | undefined {
+  return (state as Record<symbol, unknown>)[PUBLISH_KEY] as
+    | EmitPublish[]
     | undefined;
 }
 

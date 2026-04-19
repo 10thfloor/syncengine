@@ -236,3 +236,7 @@ export type {
     BusPublisher,
     DeadEvent,
 } from './bus';
+
+// ── publish() effect — third effect type in emit({ effects }) ──────────────
+export { publish, extractPublishes, PUBLISH_KEY } from './entity';
+export type { EmitPublish } from './entity';
