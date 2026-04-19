@@ -28,6 +28,10 @@ import { createServer } from './server.ts';
 import { createLogger } from './logger.ts';
 import type { Logger } from './logger.ts';
 import { createShutdownController } from './shutdown.ts';
+import {
+    createGatewayWebsocketHandler,
+    tryUpgradeGateway,
+} from './gateway-proxy.ts';
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 
@@ -111,18 +115,48 @@ async function main(argv: readonly string[]): Promise<void> {
     // Track inflight requests so SIGTERM can drain them.
     const shutdown = createShutdownController({ drainMs: flags.shutdownDrainMs });
 
+    // Optional gateway reverse-proxy. Enabled by
+    // SYNCENGINE_GATEWAY_UPSTREAM_URL (e.g. ws://handlers:3000/gateway
+    // in docker-compose.serve.yml). When unset, /gateway is treated as
+    // a normal SPA route — single-host deploys don't need the proxy.
+    const gatewayUpstream = process.env.SYNCENGINE_GATEWAY_UPSTREAM_URL;
+    const gatewayProxyOpts = gatewayUpstream
+        ? { upstreamUrl: gatewayUpstream, logger }
+        : null;
+
     const server = Bun.serve({
         port: flags.port,
         hostname: flags.host,
         maxRequestBodySize: flags.maxBodyBytes,
-        async fetch(req: Request): Promise<Response> {
+        async fetch(req: Request): Promise<Response | undefined> {
             const t0 = performance.now();
+            // Try to hijack /gateway for proxying before the normal
+            // fetch path sees it. When upgrade succeeds, Bun takes over
+            // and our fetch handler returns `undefined`.
+            if (gatewayProxyOpts && tryUpgradeGateway(req, server as unknown as Parameters<typeof tryUpgradeGateway>[1], gatewayProxyOpts)) {
+                logger.info({
+                    event: 'gateway.upgrade',
+                    path: new URL(req.url).pathname,
+                    duration_ms: Math.round((performance.now() - t0) * 100) / 100,
+                });
+                return undefined;
+            }
             const work = handle.fetch(req);
             return shutdown.track(work).then((res) => {
                 logRequest(logger, req, res, t0);
                 return res;
             });
         },
+        websocket: gatewayProxyOpts
+            ? createGatewayWebsocketHandler(gatewayProxyOpts)
+            : {
+                  // Unused default to satisfy Bun.serve's type when
+                  // gateway proxying isn't configured; no routes end up
+                  // calling upgrade() so these handlers never fire.
+                  message() {},
+                  open() {},
+                  close() {},
+              },
     });
 
     logger.info({

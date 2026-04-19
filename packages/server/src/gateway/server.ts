@@ -95,7 +95,14 @@ export class GatewayServer {
         let bridge: WorkspaceBridge | null = null;
         let authToken: string | undefined;
 
+        // The whole async body is wrapped in try/catch so any downstream
+        // throw (notably provisionWorkspace → HTTP 404 before the Restate
+        // deployment is registered) becomes a graceful `error` frame +
+        // close, rather than an unhandled rejection that crashes the
+        // process. Without this, a single too-early client connection
+        // can take down the handlers container.
         ws.on('message', async (data) => {
+          try {
             let msg: ClientMsg;
             try {
                 const parsed: unknown = JSON.parse(data.toString());
@@ -178,6 +185,18 @@ export class GatewayServer {
                     }
                     break;
             }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn(`[gateway] session error: ${message}`);
+            try {
+                ws.send(JSON.stringify({
+                    type: 'error',
+                    message: `gateway bridge failed: ${message}`,
+                    code: 'BRIDGE_FAILED',
+                }));
+            } catch { /* ws may already be dead */ }
+            try { ws.close(1011, 'bridge failed'); } catch { /* best effort */ }
+          }
         });
 
         ws.on('close', () => {

@@ -39,7 +39,10 @@ export const heartbeatStatus = defineEntity(HEARTBEAT_STATUS_ENTITY_NAME, {
         currentSession: text(),
     },
     transitions: {
-        idle: ['running'],
+        // 'idle' self-loops because reset() is idempotent — clicking
+        // reset on an already-idle status is a legal no-op, not a
+        // transition error.
+        idle: ['idle', 'running'],
         // 'running' self-loops on every tick; exits to 'done' when
         // maxRuns is reached or 'idle' when the user stops.
         running: ['running', 'done', 'idle'],

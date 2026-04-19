@@ -50,9 +50,10 @@ services:
       timeout: 2s
       retries: 30
 
-  # Node bundle in handlers-only mode — registers the Restate endpoint
-  # on :9080 and nothing else. Not reachable from the host; only the
-  # edge + restate containers need to talk to it.
+  # Full Node bundle — registers the Restate endpoint on :9080 AND
+  # serves /gateway WebSocket on :3000. Not published to the host;
+  # only the edge + restate containers need to reach it over the
+  # compose network.
   handlers:
     build:
       context: ${APP_DIR:-apps/test}
@@ -68,6 +69,7 @@ services:
         condition: service_healthy
     expose:
       - "9080"
+      - "3000"
 
   # Bun `syncengine-serve` binary — serves HTML + static + /_health +
   # /_ready. Browser-facing. Points at the handlers service for
@@ -85,6 +87,13 @@ services:
       # rationale on the split internal/public URLs.
       SYNCENGINE_NATS_PUBLIC_URL: "ws://localhost:${NATS_WS_HOST_PORT:-19222}"
       SYNCENGINE_RESTATE_PUBLIC_URL: "http://localhost:${RESTATE_INGRESS_HOST_PORT:-18080}"
+      # Enable the /gateway WebSocket reverse proxy to the handlers
+      # service. The browser connects to ws://<edge>/gateway (same
+      # origin as HTML); the edge pipes frames to the full gateway
+      # server inside the handlers container. Leaving this unset turns
+      # the edge into a static-only server, which is fine for demos
+      # but breaks real-time sync.
+      SYNCENGINE_GATEWAY_UPSTREAM_URL: "ws://handlers:3000/gateway"
     depends_on:
       handlers:
         condition: service_started

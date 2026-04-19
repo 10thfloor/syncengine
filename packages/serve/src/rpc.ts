@@ -75,8 +75,12 @@ export function createRpcHandler(opts: RpcProxyOptions) {
         const requestId =
             req.headers.get('x-request-id') ?? crypto.randomUUID();
 
-        // Stream the body through unchanged. Restate's ingress accepts
-        // JSON POSTs; the edge doesn't parse it.
+        // Read the body eagerly. RPC payloads are small JSON (< 1 KB
+        // typical); streaming with `duplex: 'half'` adds noticeable
+        // latency for no benefit and behaves inconsistently across
+        // fetch implementations.
+        const bodyText = await req.text();
+
         let upstream: Response;
         try {
             upstream = await fetch(target.url, {
@@ -90,10 +94,8 @@ export function createRpcHandler(opts: RpcProxyOptions) {
                     'x-syncengine-workspace': wsResult,
                     'x-request-id': requestId,
                 },
-                body: req.body,
-                // Bun requires duplex: 'half' when body is a stream.
-                ...(req.body ? { duplex: 'half' as const } : {}),
-            } as RequestInit);
+                body: bodyText,
+            });
         } catch (err) {
             return plainText(
                 502,
@@ -105,13 +107,16 @@ export function createRpcHandler(opts: RpcProxyOptions) {
         }
 
         // Pass-through the Restate response. Preserve status + content
-        // type; stamp request-id for log correlation.
+        // type; stamp request-id for log correlation. Buffer the body
+        // for the same reason we buffer the request — small JSON, and
+        // streaming proxies through Bun have shown adverse latency.
+        const responseText = await upstream.text();
         const headers = new Headers();
         const ct = upstream.headers.get('content-type');
         if (ct) headers.set('content-type', ct);
         headers.set('x-request-id', requestId);
 
-        return new Response(upstream.body, {
+        return new Response(responseText, {
             status: upstream.status,
             headers,
         });
