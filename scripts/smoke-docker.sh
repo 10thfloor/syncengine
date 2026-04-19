@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Production smoke test — boot the docker-compose stack, register the
-# app's Restate endpoint, hit /?ws=alice and /?ws=bob, assert each
+# app's Restate endpoint, hit /?${WS_PARAM}=alice and /?${WS_PARAM}=bob, assert each
 # receives a distinct injected `syncengine-workspace-id` meta tag.
 #
 # Exits non-zero on any failure. Logs from the `app` container are
@@ -13,6 +13,15 @@ cd "$(dirname "$0")/.."
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 ADMIN_URL="${ADMIN_URL:-http://localhost:9070}"
 BUILD="${BUILD:-1}"
+# Which app to smoke. Each app directory needs a Dockerfile and a
+# `build` script that emits dist/server/index.mjs. docker-compose
+# reads APP_DIR too (build context).
+APP_DIR="${APP_DIR:-apps/test}"
+# Each app's syncengine.config.ts picks its own query-string key for
+# workspace routing; apps/test uses `ws`, apps/notepad uses `workspace`.
+# Override with `WS_PARAM=workspace bash scripts/smoke-docker.sh`.
+WS_PARAM="${WS_PARAM:-ws}"
+export APP_DIR
 
 log() { printf "▸ %s\n" "$*"; }
 fail() { printf "✘ %s\n" "$*" >&2; exit 1; }
@@ -21,21 +30,28 @@ cleanup() {
     local rc=$?
     echo "--- app logs ---"
     docker compose logs --tail=200 app || true
-    docker compose down -v >/dev/null 2>&1 || true
+    if [ "${KEEP_UP:-0}" != "1" ]; then
+        docker compose down -v >/dev/null 2>&1 || true
+    else
+        printf "\n▸ stack left running (KEEP_UP=1). Open %s/?%s=alice\n" "$BASE_URL" "$WS_PARAM"
+    fi
     exit "$rc"
 }
 trap cleanup EXIT
 
 if [ "$BUILD" = "1" ]; then
-    log "building apps/test/dist"
-    pnpm -s build
+    log "building $APP_DIR/dist"
+    ( cd "$APP_DIR" && pnpm exec syncengine build )
 fi
 
-if [ ! -f apps/test/dist/server/index.mjs ]; then
-    fail "apps/test/dist/server/index.mjs missing — run pnpm build first (or set BUILD=1)"
+if [ ! -f "$APP_DIR/dist/server/index.mjs" ]; then
+    fail "$APP_DIR/dist/server/index.mjs missing — run syncengine build first (or set BUILD=1)"
+fi
+if [ ! -f "$APP_DIR/Dockerfile" ]; then
+    fail "$APP_DIR/Dockerfile missing — copy apps/test/Dockerfile alongside"
 fi
 
-log "docker compose up -d --build"
+log "docker compose up -d --build (APP_DIR=$APP_DIR)"
 docker compose up -d --build
 
 log "waiting for app /_ready (90s)"
@@ -64,13 +80,13 @@ extract_ws() {
         | sed -E 's/.*content="([^"]+)"/\1/'
 }
 
-log "GET /?ws=alice"
-ALICE_HTML=$(curl -sSf "$BASE_URL/?ws=alice")
+log "GET /?${WS_PARAM}=alice"
+ALICE_HTML=$(curl -sSf "$BASE_URL/?${WS_PARAM}=alice")
 ALICE_WS=$(extract_ws "$ALICE_HTML")
 [ -n "$ALICE_WS" ] || fail "alice response missing syncengine-workspace-id meta tag"
 
-log "GET /?ws=bob"
-BOB_HTML=$(curl -sSf "$BASE_URL/?ws=bob")
+log "GET /?${WS_PARAM}=bob"
+BOB_HTML=$(curl -sSf "$BASE_URL/?${WS_PARAM}=bob")
 BOB_WS=$(extract_ws "$BOB_HTML")
 [ -n "$BOB_WS" ] || fail "bob response missing syncengine-workspace-id meta tag"
 
@@ -78,8 +94,8 @@ if [ "$ALICE_WS" = "$BOB_WS" ]; then
     fail "expected different wsKey per workspace — got $ALICE_WS for both"
 fi
 
-log "GET /?ws=alice again → expect same wsKey as first alice call"
-ALICE_HTML_2=$(curl -sSf "$BASE_URL/?ws=alice")
+log "GET /?${WS_PARAM}=alice again → expect same wsKey as first alice call"
+ALICE_HTML_2=$(curl -sSf "$BASE_URL/?${WS_PARAM}=alice")
 ALICE_WS_2=$(extract_ws "$ALICE_HTML_2")
 if [ "$ALICE_WS" != "$ALICE_WS_2" ]; then
     fail "alice wsKey differs between calls: $ALICE_WS vs $ALICE_WS_2"

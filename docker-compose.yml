@@ -49,7 +49,10 @@ services:
 
   app:
     build:
-      context: apps/test
+      # Swap apps via `APP_DIR=apps/notepad docker compose up --build`
+      # (scripts/smoke-docker.sh forwards APP_DIR too). Each app must
+      # ship its own Dockerfile at the context root.
+      context: ${APP_DIR:-apps/test}
       dockerfile: Dockerfile
     environment:
       # Browser clients use the ws:// URL (injected into HTML meta tag).
