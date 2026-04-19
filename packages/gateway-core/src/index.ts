@@ -18,3 +18,15 @@ export type {
     ClientInitMessage,
     ServerMsg,
 } from './protocol';
+
+// ── Event bus dispatcher (Phase 1, Task 7) ─────────────────────────────────
+// Durable JetStream consumer → Restate ingress, with DLQ on terminal error.
+// See `bus-dispatcher.ts` for the retry-ownership contract.
+export { BusDispatcher, postToRestate } from './bus-dispatcher';
+export type { BusDispatcherConfig } from './bus-dispatcher';
+export { retryToBackoffArray } from './bus-backoff';
+export type { BackoffSchedule } from './bus-backoff';
+export { cursorToDeliverPolicy } from './bus-cursor';
+export type { CursorConfig } from './bus-cursor';
+export { publishDeadEvent } from './bus-dlq';
+export { connectNats } from './nats-connect';
