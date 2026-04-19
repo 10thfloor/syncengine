@@ -16,7 +16,8 @@
   "dependencies": {
     "@nats-io/jetstream": "3.3.1",
     "@nats-io/transport-node": "3.3.1",
-    "@syncengine/core": "workspace:*"
+    "@syncengine/core": "workspace:*",
+    "@syncengine/observe": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

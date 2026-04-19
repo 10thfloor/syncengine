@@ -37,6 +37,9 @@ export type {
     RequestAttrs,
     RpcAttrs,
     RpcKind,
+    BusPublishAttrs,
+    BusConsumeAttrs,
+    TraceCarrier,
 } from './internal';
 
 export { makeObservabilityCtx, type ObservabilityCtxScope } from './ctx';

@@ -24,6 +24,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { MsgHdrs, NatsConnection } from '@nats-io/transport-node';
 import { setBusPublisher, type BusPublishCtx } from '@syncengine/core';
+import { instrument } from '@syncengine/observe';
 import type { InMemoryBusDriver } from './in-memory-bus.js';
 
 export interface BusContext {
@@ -110,7 +111,17 @@ export function installBusPublisher(
                     `Pass { inMemoryDriver, modeOf } to installBusPublisher(...) at boot.`,
                 );
             }
-            await opts.inMemoryDriver.fanOut(busName, payload, ctx);
+            // In-memory mode stays in-process, so the OTel ALS context
+            // already propagates — no carrier / header injection needed.
+            // We still emit a PRODUCER span for consistency with the
+            // NATS path; the in-memory driver receives the message in
+            // the same task and inherits the active span naturally.
+            await instrument.busPublish(
+                { busName, workspace: resolveWorkspaceForMetrics(busContextStorage.getStore()) },
+                async () => {
+                    await opts.inMemoryDriver!.fanOut(busName, payload, ctx);
+                },
+            );
             return;
         }
 
@@ -123,18 +134,41 @@ export function installBusPublisher(
         }
         const subject = `ws.${bc.workspaceId}.bus.${busName}`;
         const body = JSON.stringify(payload);
-        if (bc.requestId) {
-            const h = buildHeaders(bc.requestId);
-            bc.nc.publish(subject, body, { headers: h as MsgHdrs });
-        } else {
-            bc.nc.publish(subject, body);
-        }
+
+        await instrument.busPublish(
+            { busName, workspace: bc.workspaceId },
+            async (carrier) => {
+                // Inject traceparent + optional request-id onto a single
+                // MsgHdrs instance. We skip `nc.publish(..., { headers })`
+                // entirely when neither is present — the existing tests
+                // assert that bare publishes don't create a Headers object.
+                const hasTrace = carrier['traceparent'] !== undefined;
+                const hasRequestId = bc.requestId !== undefined;
+                if (hasTrace || hasRequestId) {
+                    const h = buildHeaders({
+                        requestId: bc.requestId,
+                        carrier,
+                    });
+                    bc.nc.publish(subject, body, { headers: h as MsgHdrs });
+                } else {
+                    bc.nc.publish(subject, body);
+                }
+            },
+        );
     });
 }
 
 export function uninstallBusPublisher(): void {
     installedNc = null;
     setBusPublisher(null);
+}
+
+/** For in-memory publishes that originate outside a BusContext frame
+ *  (e.g. direct test harnesses), there's no workspace to tag. The
+ *  observe span still fires for symmetry with the NATS path; we use
+ *  an empty string so span attrs stay a string type. */
+function resolveWorkspaceForMetrics(bc: BusContext | undefined): string {
+    return bc?.workspaceId ?? '';
 }
 
 // The real `headers()` signature is `headers(code?: number, description?: string)`
@@ -144,7 +178,12 @@ export function uninstallBusPublisher(): void {
 // pattern used in packages/gateway-core/src/bus-dlq.ts.
 type MsgHdrsLike = { set(key: string, value: string): void };
 let headersFactory: (() => MsgHdrsLike) | null = null;
-function buildHeaders(requestId: string): MsgHdrsLike {
+
+interface BuildHeadersInput {
+    readonly requestId?: string;
+    readonly carrier: Readonly<Record<string, string>>;
+}
+function buildHeaders({ requestId, carrier }: BuildHeadersInput): MsgHdrsLike {
     if (!headersFactory) {
         // @nats-io/transport-node re-exports core primitives.
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -157,6 +196,9 @@ function buildHeaders(requestId: string): MsgHdrsLike {
         headersFactory = mod.headers;
     }
     const h = headersFactory();
-    h.set('x-request-id', requestId);
+    if (requestId !== undefined) h.set('x-request-id', requestId);
+    for (const [k, v] of Object.entries(carrier)) {
+        h.set(k, v);
+    }
     return h;
 }

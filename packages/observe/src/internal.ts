@@ -17,6 +17,8 @@
 import {
     SpanKind,
     SpanStatusCode,
+    context,
+    propagation,
     trace,
     type Attributes,
 } from '@opentelemetry/api';
@@ -25,6 +27,7 @@ import {
     ATTR_NAME,
     ATTR_OP,
     ATTR_PRIMITIVE,
+    ATTR_TOPIC,
     ATTR_USER,
     ATTR_WORKSPACE,
 } from './semantic';
@@ -186,8 +189,123 @@ async function rpc<T>(
     );
 }
 
+export interface BusPublishAttrs {
+    readonly busName: string;
+    readonly workspace: string;
+}
+
+/** W3C TraceContext carrier handed to the busPublish callback. Callers
+ *  copy these entries onto outbound NATS message headers so downstream
+ *  consumers can extract the parent span context. */
+export type TraceCarrier = Record<string, string>;
+
+/**
+ * Wrap a bus publish in a PRODUCER-kind span and expose a trace-context
+ * carrier the caller injects into the outbound message headers. The
+ * carrier is only populated when the SDK is enabled — on the disabled
+ * path it's an empty object, so callers can unconditionally forward
+ * whatever's in it without polluting NATS messages with stale headers.
+ */
+async function busPublish<T>(
+    attrs: BusPublishAttrs,
+    fn: (carrier: TraceCarrier) => Promise<T> | T,
+): Promise<T> {
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `bus.${attrs.busName} publish`,
+        {
+            kind: SpanKind.PRODUCER,
+            attributes: {
+                'messaging.system': 'nats',
+                'messaging.destination.name': attrs.busName,
+                'messaging.operation': 'publish',
+                [ATTR_PRIMITIVE]: 'bus',
+                [ATTR_NAME]: attrs.busName,
+                [ATTR_TOPIC]: attrs.busName,
+                [ATTR_WORKSPACE]: attrs.workspace,
+            },
+        },
+        async (span) => {
+            const carrier: TraceCarrier = {};
+            propagation.inject(context.active(), carrier);
+            try {
+                return await fn(carrier);
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
+export interface BusConsumeAttrs {
+    readonly busName: string;
+    /** Durable consumer / subscriber name — the logical "who's
+     *  listening" identifier used for messaging.consumer.group.name. */
+    readonly subscriber: string;
+    readonly workspace: string;
+    /** W3C traceparent extracted from the inbound NATS message headers.
+     *  Absent when the publisher side wasn't instrumented (pre-rollout
+     *  producers, external tooling) — consume becomes a new trace root. */
+    readonly traceparent?: string;
+    /** Optional tracestate companion. */
+    readonly tracestate?: string;
+}
+
+/**
+ * Wrap a bus consume callback in a CONSUMER-kind span. If a
+ * `traceparent` is supplied, the span nests under the producer span so
+ * the full producer→consumer trace continuity is preserved across the
+ * NATS hop.
+ */
+async function busConsume<T>(
+    attrs: BusConsumeAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const carrier: TraceCarrier = {};
+    if (attrs.traceparent) carrier['traceparent'] = attrs.traceparent;
+    if (attrs.tracestate) carrier['tracestate'] = attrs.tracestate;
+    const parentCtx = propagation.extract(context.active(), carrier);
+
+    const tracer = trace.getTracer(TRACER_NAME);
+    return context.with(parentCtx, () =>
+        tracer.startActiveSpan(
+            `bus.${attrs.busName} consume`,
+            {
+                kind: SpanKind.CONSUMER,
+                attributes: {
+                    'messaging.system': 'nats',
+                    'messaging.destination.name': attrs.busName,
+                    'messaging.operation': 'receive',
+                    'messaging.consumer.group.name': attrs.subscriber,
+                    [ATTR_PRIMITIVE]: 'bus',
+                    [ATTR_NAME]: attrs.busName,
+                    [ATTR_TOPIC]: attrs.busName,
+                    [ATTR_WORKSPACE]: attrs.workspace,
+                },
+            },
+            async (span) => {
+                try {
+                    return await fn();
+                } catch (err) {
+                    span.recordException(err as Error);
+                    span.setStatus({ code: SpanStatusCode.ERROR });
+                    throw err;
+                } finally {
+                    span.end();
+                }
+            },
+        ),
+    );
+}
+
 export const instrument = {
     entityEffect,
     request,
     rpc,
+    busPublish,
+    busConsume,
 };

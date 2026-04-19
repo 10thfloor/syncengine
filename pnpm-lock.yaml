@@ -218,6 +218,9 @@ importers:
       '@syncengine/core':
         specifier: workspace:*
         version: link:../core
+      '@syncengine/observe':
+        specifier: workspace:*
+        version: link:../observe
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

@@ -36,6 +36,7 @@ import {
 } from '@nats-io/jetstream';
 import type { NatsConnection } from '@nats-io/transport-node';
 import type { DeadEvent, RetryConfig, ConcurrencyConfig, RateConfig } from '@syncengine/core';
+import { instrument } from '@syncengine/observe';
 import { connectNats } from './nats-connect';
 import { retryToBackoffArray } from './bus-backoff';
 import { cursorToDeliverPolicy, type CursorConfig } from './bus-cursor';
@@ -293,6 +294,24 @@ export class BusDispatcher {
     }
 
     private async handleMessage(m: JsMsg): Promise<void> {
+        // Wrap the entire dispatch in a CONSUMER-kind span that nests
+        // under the producer's span via W3C traceparent propagation.
+        // The ack / nak paths inside handleMessageInner happen within
+        // this span so their outcome (terminal / retry / DLQ) tags
+        // directly onto the consume attempt the APM shows.
+        return instrument.busConsume(
+            {
+                busName: this.config.busName,
+                subscriber: this.config.subscriberName,
+                workspace: this.config.workspaceId,
+                ...(readTraceparent(m) !== undefined && { traceparent: readTraceparent(m)! }),
+                ...(readTracestate(m) !== undefined && { tracestate: readTracestate(m)! }),
+            },
+            () => this.handleMessageInner(m),
+        );
+    }
+
+    private async handleMessageInner(m: JsMsg): Promise<void> {
         const busName = this.config.busName;
         const subscriber = this.config.subscriberName;
         let event: unknown;
@@ -408,10 +427,22 @@ export class BusDispatcher {
 }
 
 function readRequestId(m: JsMsg): string | undefined {
+    return readHeader(m, 'x-request-id');
+}
+
+function readTraceparent(m: JsMsg): string | undefined {
+    return readHeader(m, 'traceparent');
+}
+
+function readTracestate(m: JsMsg): string | undefined {
+    return readHeader(m, 'tracestate');
+}
+
+function readHeader(m: JsMsg, key: string): string | undefined {
     if (!m.headers) return undefined;
     try {
-        if (m.headers.has('x-request-id')) {
-            const v = m.headers.get('x-request-id');
+        if (m.headers.has(key)) {
+            const v = m.headers.get(key);
             return v.length > 0 ? v : undefined;
         }
     } catch {
