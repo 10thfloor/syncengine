@@ -87,6 +87,7 @@ export interface SyncenginePluginOptions {
  */
 export default function syncengine(opts: SyncenginePluginOptions = {}) {
     return [
+        suppressServerWarningsPlugin(),
         wasmPlugin(),
         wasm(),
         topLevelAwait(),
@@ -156,6 +157,32 @@ function schemaReloadPlugin(): Plugin {
             );
             server.ws.send({ type: 'full-reload' });
             return [];
+        },
+    };
+}
+
+/**
+ * Suppress noisy warnings from server-side deps that Vite's import
+ * analysis walks but never includes in the client bundle. The vite
+ * plugin imports @syncengine/server (for actor discovery) and the
+ * devtools plugin imports @nats-io/transport-node — both are
+ * server-only but Vite warns about every `node:*` module it finds.
+ */
+function suppressServerWarningsPlugin(): Plugin {
+    return {
+        name: 'syncengine:suppress-server-warnings',
+        config() {
+            return {
+                build: {
+                    rollupOptions: {
+                        onwarn(warning, defaultHandler) {
+                            // Suppress "Module X has been externalized for browser compatibility"
+                            if (warning.message?.includes('has been externalized for browser compatibility')) return;
+                            defaultHandler(warning);
+                        },
+                    },
+                },
+            };
         },
     };
 }

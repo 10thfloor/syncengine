@@ -92,7 +92,7 @@ export async function loadDefinitions(appDir: string): Promise<{
 
     for (const file of allFiles) {
         try {
-            const mod = (await import(file)) as Record<string, unknown>;
+            const mod = (await import(/* @vite-ignore */ file)) as Record<string, unknown>;
             for (const value of Object.values(mod)) {
                 if (isEntity(value)) {
                     if (value.$name === HEARTBEAT_STATUS_ENTITY_NAME) {
