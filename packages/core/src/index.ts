@@ -205,3 +205,11 @@ export {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 export * from './constants';
+
+// ── Duration + Bytes branded factories ──────────────────────────────────────
+// Dimensional values for bus / JetStream config. Plain numbers are rejected
+// at the type level so `retention: days(30)` is the only path to correctness.
+export { milliseconds, seconds, minutes, hours, days } from './duration';
+export type { Duration } from './duration';
+export { bytes } from './bytes';
+export type { Bytes } from './bytes';
