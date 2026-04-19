@@ -575,6 +575,9 @@ export const notify = webhook<'notify', NotifyPayload>('notify', {
     // ── Hex: services directory (empty placeholder)
     write(target, 'src/services/.gitkeep', '');
 
+    // ── Hex: events directory for bus() declarations
+    write(target, 'src/events/.gitkeep', '');
+
     // ── src/components/WorkspaceSwitcher.tsx
     write(target, 'src/components/WorkspaceSwitcher.tsx', `\
 import { useState, useEffect, useMemo, useRef } from 'react';

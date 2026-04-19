@@ -81,6 +81,7 @@ function printHelp(): void {
 Usage:
   syncengine init [dir]           Scaffold a new project
   syncengine add service <name>   Generate a new service file
+  syncengine add bus <name>       Generate a new event-bus file
   syncengine dev [--fresh]        Start NATS + Restate + workspace + Vite
   syncengine build                Production build (client + server bundles)
   syncengine start                Run the production server
