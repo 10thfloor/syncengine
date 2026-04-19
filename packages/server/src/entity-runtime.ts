@@ -31,6 +31,7 @@ import {
     isEntity,
     applyHandler,
     extractEmits,
+    extractTriggers,
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
@@ -40,8 +41,10 @@ import {
     SchemaCode,
     type AnyEntity,
     type EmitInsert,
+    type EmitTrigger,
 } from "@syncengine/core";
 import { splitObjectKey, ENTITY_OBJECT_PREFIX } from './entity-keys.js';
+import { WORKFLOW_OBJECT_PREFIX } from './workflow.js';
 
 const NATS_URL = process.env.NATS_URL || "nats://nats:4222";
 
@@ -106,6 +109,7 @@ async function runHandler(
     // Resolve '$key' placeholders in record values to the actual entity key
     // so published rows have the real key in SQLite, not the literal '$key'.
     const rawEmits = extractEmits(validated);
+    const rawTriggers = extractTriggers(validated);
     const emits = rawEmits?.map((ins) => {
         const hasPlaceholder = Object.values(ins.record).some((v) => v === '$key');
         if (!hasPlaceholder) return ins;
@@ -136,6 +140,11 @@ async function runHandler(
     // Publish emitted table deltas to the entity-writes subject
     if (emits && emits.length > 0) {
         await publishTableDeltas(ctx, workspaceId, emits);
+    }
+
+    // Dispatch workflow triggers from emit() effects
+    if (rawTriggers && rawTriggers.length > 0) {
+        dispatchWorkflowTriggers(ctx, rawTriggers);
     }
 
     return { state: broadcastState };
@@ -195,6 +204,25 @@ async function publishTableDeltas(
         await nc.flush();
         await nc.close();
     });
+}
+
+/** Dispatch workflow invocations triggered by emit() effects.
+ *  Each trigger creates a new workflow execution keyed by a unique id.
+ *  Uses Restate's workflowSendClient for fire-and-forget dispatch —
+ *  the workflow runs asynchronously after the entity handler returns. */
+function dispatchWorkflowTriggers(
+    ctx: restate.ObjectContext,
+    triggers: readonly EmitTrigger[],
+): void {
+    for (const t of triggers) {
+        const workflowName = `${WORKFLOW_OBJECT_PREFIX}${t.workflow}`;
+        const workflowKey = `${ctx.key}-${ctx.rand.uuidv4()}`;
+        const wfClient = ctx.workflowSendClient(
+            { name: workflowName },
+            workflowKey,
+        ) as unknown as { run(input: unknown): void };
+        wfClient.run(t.input);
+    }
 }
 
 /** Build the Restate handler bag for one entity. Each user handler becomes
