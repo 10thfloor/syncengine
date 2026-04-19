@@ -74,9 +74,19 @@ export interface AuthConfig {
     ) => SyncengineUser | null | undefined | Promise<SyncengineUser | null | undefined>;
 }
 
+export interface ServicesConfig {
+    /**
+     * Lazy import that returns a module of ServiceOverride exports.
+     * Used to swap service adapters for test/staging environments.
+     * The framework matches overrides to services by name.
+     */
+    readonly overrides?: () => Promise<Record<string, unknown>>;
+}
+
 export interface SyncengineConfig {
     readonly workspaces: WorkspacesConfig;
     readonly auth?: AuthConfig;
+    readonly services?: ServicesConfig;
 }
 
 /**

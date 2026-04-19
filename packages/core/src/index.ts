@@ -126,6 +126,7 @@ export type {
     WorkspaceResolveContext,
     AuthConfig,
     AuthVerifyContext,
+    ServicesConfig,
 } from './config';
 export type {
     EmitInsert,

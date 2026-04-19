@@ -103,3 +103,25 @@ describe('override()', () => {
             .toThrow(/must be a function/);
     });
 });
+
+import { defineConfig } from '../config';
+
+describe('SyncengineConfig.services', () => {
+    it('accepts services.overrides as a lazy import', () => {
+        const cfg = defineConfig({
+            workspaces: { resolve: () => 'default' },
+            services: {
+                overrides: () => Promise.resolve({}),
+            },
+        });
+        expect(cfg.services).toBeDefined();
+        expect(typeof cfg.services!.overrides).toBe('function');
+    });
+
+    it('works without services (backwards compat)', () => {
+        const cfg: import('../config').SyncengineConfig = defineConfig({
+            workspaces: { resolve: () => 'default' },
+        });
+        expect(cfg.services).toBeUndefined();
+    });
+});
