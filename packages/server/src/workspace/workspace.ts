@@ -234,8 +234,11 @@ export const workspace = restate.object({
         console.log(`[nats] created stream ${stream} for subjects ${subjects}`);
       });
 
-      state.status = "active";
-      ctx.set(Keys.STATE, state);
+      // Build a new object rather than mutating `state` — the SDK may in
+      // future lazily serialize ctx.set inputs, which would retroactively
+      // overwrite the provisioning record with "active".
+      const activeState: WorkspaceState = { ...state, status: "active" };
+      ctx.set(Keys.STATE, activeState);
 
       if (req.creatorUserId) {
         const memberAddedAt = await ctx.run(
@@ -258,7 +261,7 @@ export const workspace = restate.object({
       await fireBootHeartbeats(ctx, workspaceId);
 
       ctx.console.log(`Workspace ${workspaceId} provisioned`);
-      return state;
+      return activeState;
     },
 
     // ── State queries ─────────────────────────────────────────────────────
@@ -338,7 +341,8 @@ export const workspace = restate.object({
         return { stored: false, seq: existing.seq };
       }
 
-      ctx.set(Keys.SNAPSHOT_META, { seq: req.seq, schemaVersion: req.schemaVersion, storedAt: Date.now() });
+      const storedAt = await ctx.run('snapshot-stored-at', async () => Date.now());
+      ctx.set(Keys.SNAPSHOT_META, { seq: req.seq, schemaVersion: req.schemaVersion, storedAt });
       ctx.set(Keys.SNAPSHOT_TABLES, req.tables);
       if (req.hlcState) ctx.set(Keys.SNAPSHOT_HLC, req.hlcState);
       if (req.mergeClocks) ctx.set(Keys.SNAPSHOT_MERGE_CLOCKS, req.mergeClocks);
@@ -385,7 +389,8 @@ export const workspace = restate.object({
 
       const members = await getMembers(ctx);
       const filtered = members.filter(m => m.userId !== req.userId);
-      filtered.push({ userId: req.userId, role: req.role, addedAt: new Date().toISOString() });
+      const addedAt = await ctx.run('add-member-added-at', async () => new Date().toISOString());
+      filtered.push({ userId: req.userId, role: req.role, addedAt });
       ctx.set(Keys.MEMBERS, filtered);
 
       ctx.console.log(`Added ${req.userId} as ${req.role} to workspace ${ctx.key}`);
@@ -430,10 +435,13 @@ export const workspace = restate.object({
       await requireActive(ctx);
 
       const peers = (await ctx.get<Record<string, PeerAck>>(Keys.GC_PEERS)) ?? {};
-      peers[req.clientId] = { lastSeq: req.lastSeq, userId: req.userId, lastAck: Date.now() };
+      // Journal wall-clock once; the ack timestamp AND the staleness
+      // cutoff both derive from the same recorded `now` so a replay
+      // produces byte-identical journal writes.
+      const now = await ctx.run('peer-seq-now', async () => Date.now());
+      peers[req.clientId] = { lastSeq: req.lastSeq, userId: req.userId, lastAck: now };
       ctx.set(Keys.GC_PEERS, peers);
 
-      const now = Date.now();
       const activeSeqs = Object.values(peers)
         .filter(p => (now - p.lastAck) < PEER_STALE_MS)
         .map(p => p.lastSeq);
@@ -569,12 +577,16 @@ export const workspace = restate.object({
         await jsm.streams.add(streamConfig(stream, subjects));
       });
 
+      const createdAt = await ctx.run(
+        'reset-created-at',
+        async () => new Date().toISOString(),
+      );
       const state: WorkspaceState = {
         workspaceId,
         tenantId: req.tenantId ?? "default",
         schemaVersion: 1,
         streamName: stream,
-        createdAt: new Date().toISOString(),
+        createdAt,
         status: "active",
       };
       ctx.set(Keys.STATE, state);
