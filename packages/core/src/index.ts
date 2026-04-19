@@ -107,6 +107,7 @@ export type { Brand, Branded, ValueType, ScalarValueDef, ScalarValueOptions } fr
 // ── Auth foundation ───────────────────────────────────────────────────────
 export { Access, USER_PLACEHOLDER } from './auth';
 export type { AuthUser, AccessContext, AccessPolicy, RoleEnumCarrier } from './auth';
+export type { AuthProvider, AuthVerifyResult } from './auth-provider';
 
 // ── Entity DSL (Phase 4 — actor model on Restate virtual objects) ─────────
 export {
