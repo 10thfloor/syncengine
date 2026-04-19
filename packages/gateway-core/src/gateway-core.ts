@@ -19,10 +19,16 @@ import { WorkspaceBridge } from './workspace-bridge';
 import { connectNats } from './nats-connect';
 import { isValidClientMsg } from './protocol';
 import type { ClientInitMessage, ClientMsg } from './protocol';
+import { PASSTHROUGH_AUTH_HOOK, type AuthHook } from './auth-hook';
 
 export interface GatewayConfig {
     readonly natsUrl: string;
     readonly restateUrl: string;
+    /** Auth injection point — defaults to PASSTHROUGH_AUTH_HOOK, which
+     *  preserves pre-Plan-4 behavior (no token verification, every
+     *  channel subscription allowed). Apps with auth declared in their
+     *  SyncengineConfig wire a real hook via @syncengine/server. */
+    readonly authHook?: AuthHook;
 }
 
 export interface GatewaySessionHandle {
@@ -34,6 +40,7 @@ export interface GatewaySessionHandle {
 
 export class GatewayCore {
     private readonly config: GatewayConfig;
+    private readonly authHook: AuthHook;
     private readonly bridges = new Map<string, WorkspaceBridge>();
     private readonly bridgeCreating = new Map<string, Promise<WorkspaceBridge>>();
     private readonly allSessions = new Set<ClientSession>();
@@ -42,6 +49,7 @@ export class GatewayCore {
 
     constructor(config: GatewayConfig) {
         this.config = config;
+        this.authHook = config.authHook ?? PASSTHROUGH_AUTH_HOOK;
         // Start the system-level workspace-registry broadcast
         // subscription in the background. If NATS is unreachable at
         // boot we log and keep going — new-workspace notifications
@@ -88,13 +96,47 @@ export class GatewayCore {
                             return;
                         }
                         const init = msg as ClientInitMessage;
+
+                        // Plan 4: verify the auth token via the injected
+                        // hook. Fail closed if a token was provided but
+                        // the hook rejects it. Absence of a token is OK
+                        // — the session stays anonymous (user = null) and
+                        // only Access.public channels will subscribe.
+                        const verifiedUser = await this.authHook.verifyInit(
+                            init.authToken,
+                            init.workspaceId,
+                        );
+                        if (init.authToken && verifiedUser === null) {
+                            closeWith('Unauthorized', 'UNAUTHORIZED');
+                            return;
+                        }
+
                         session = new ClientSession(init.clientId, ws);
+                        session.user = verifiedUser;
+                        session.workspaceId = init.workspaceId;
                         authToken = init.authToken;
                         bridge = await this.getOrCreateBridge(init.workspaceId);
                         bridge.addSession(session);
 
                         await bridge.ensureEntityWritesConsumer();
+                        // Authorize each init-time channel BEFORE spinning
+                        // up its consumer. Rejected channels are silently
+                        // skipped — the client's `channels` config is a
+                        // hint, not a contract.
                         for (const ch of init.channels) {
+                            const allowed = await this.authHook.authorizeChannel(
+                                verifiedUser,
+                                init.workspaceId,
+                                ch,
+                            );
+                            if (!allowed) {
+                                ws.send(JSON.stringify({
+                                    type: 'error',
+                                    message: `Access denied for channel '${ch}'`,
+                                    code: 'ACCESS_DENIED',
+                                }));
+                                continue;
+                            }
                             await bridge.ensureChannelConsumer(ch);
                         }
 
@@ -111,6 +153,24 @@ export class GatewayCore {
                     switch (msg.type) {
                         case 'subscribe':
                             if (msg.kind === 'channel') {
+                                // Plan 4: authorize the channel subscription
+                                // before any NATS consumer spins up. If the
+                                // policy rejects, send ACCESS_DENIED and
+                                // skip — no data flows to this session for
+                                // this channel.
+                                const allowed = await this.authHook.authorizeChannel(
+                                    session.user,
+                                    session.workspaceId,
+                                    msg.name,
+                                );
+                                if (!allowed) {
+                                    ws.send(JSON.stringify({
+                                        type: 'error',
+                                        message: `Access denied for channel '${msg.name}'`,
+                                        code: 'ACCESS_DENIED',
+                                    }));
+                                    break;
+                                }
                                 // Mark replaying BEFORE subscribing so the live
                                 // consumer skips this session until replay-end.
                                 if (msg.lastSeq != null && msg.lastSeq > 0) {
