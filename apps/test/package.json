@@ -11,14 +11,16 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@restatedev/restate-sdk": "1.13.0",
     "@syncengine/client": "workspace:*",
     "@syncengine/core": "workspace:*",
+    "@syncengine/server": "workspace:*",
     "@syncengine/test-utils": "workspace:*",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@syncengine/server": "workspace:*",
     "@syncengine/vite-plugin": "workspace:*",
     "@syncengine/cli": "workspace:*",
     "@types/react": "^19.0.0",

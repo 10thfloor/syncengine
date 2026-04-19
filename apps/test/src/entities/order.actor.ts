@@ -36,10 +36,11 @@
 //     OrdersTab uses `useView({ allOrders })` to list orders, then each
 //     row opens its own `useEntity` subscription for live status updates.
 
-import { entity, integer, real, text, emit } from '@syncengine/core';
+import { entity, integer, real, text, emit, publish } from '@syncengine/core';
 import { orderIndex } from '../schema';
+import { orderEvents, OrderEvent } from '../events/orders.bus';
 
-const STATUSES = ['draft', 'placed', 'packed', 'shipped', 'delivered', 'cancelled'] as const;
+const STATUSES = ['draft', 'placed', 'paid', 'packed', 'shipped', 'delivered', 'cancelled'] as const;
 
 export const order = entity('order', {
   state: {
@@ -47,11 +48,22 @@ export const order = entity('order', {
     productSlug: text(),
     userId: text(),
     price: real(),
+    // `total` and `customerEmail` support the event-bus demo (T13):
+    // `pay()` publishes an OrderPaid event carrying `total`, and the
+    // subscriber workflow (`shipOnPay`) reads `orderId` + `total` off
+    // the bus payload. Defaulted to 0 / '' so existing handlers that
+    // don't set them still pass validateEntityState.
+    total: real(),
+    customerEmail: text(),
     createdAt: integer(),
   },
   transitions: {
     draft:     ['placed', 'cancelled'],
-    placed:    ['packed', 'cancelled'],
+    // 'paid' added as a new branch off 'placed' for the event-bus demo.
+    // The existing checkout saga still flows placed → packed → shipped;
+    // the bus demo uses placed → paid → shipped (via markShipped).
+    placed:    ['packed', 'paid', 'cancelled'],
+    paid:      ['shipped', 'cancelled'],
     packed:    ['shipped'],
     shipped:   ['delivered'],
     delivered: [],
@@ -101,6 +113,34 @@ export const order = entity('order', {
       return { ...state, status: 'delivered' as const };
     },
 
+    // ── Event-bus demo handlers (T13) ───────────────────────────────
+    //
+    // `pay()` is the canonical declarative publisher: it transitions
+    // the state machine (placed → paid) AND declares a bus publish in
+    // the same atomic emit. Entity handlers are pure — they can't read
+    // Date.now() or ctx.key — so the caller supplies `orderId` and
+    // `at` via the request argument. `publish()` validates the payload
+    // against `orderEvents` schema at call time.
+    pay(state, req: { orderId: string; at: number }) {
+      return emit({
+        state: { ...state, status: 'paid' as const },
+        effects: [
+          publish(orderEvents, {
+            orderId: req.orderId,
+            event: OrderEvent.enum.paid,
+            total: state.total,
+            at: req.at,
+          }),
+        ],
+      }) as unknown as typeof state;
+    },
+
+    // Parallel branch: after the subscriber workflow successfully ships,
+    // the framework calls this to advance the state machine.
+    markShipped(state) {
+      return { ...state, status: 'shipped' as const };
+    },
+
     cancel(state) {
       return { ...state, status: 'cancelled' as const };
     },
@@ -111,6 +151,7 @@ export const order = entity('order', {
 export const NEXT_ACTION: Record<string, string | null> = {
   draft: null,
   placed: 'pack',
+  paid: 'markShipped',
   packed: 'ship',
   shipped: 'deliver',
   delivered: null,
@@ -121,6 +162,7 @@ export const NEXT_ACTION: Record<string, string | null> = {
 export const STATUS_COLORS: Record<string, string> = {
   draft: '#525252',
   placed: '#3b82f6',
+  paid: '#14b8a6',
   packed: '#eab308',
   shipped: '#a855f7',
   delivered: '#22c55e',

@@ -33,7 +33,7 @@ describe('Entity Handlers', () => {
         it('place transitions to placed and emits to orderIndex', () => {
             const t = createTestStore({ tables: [orderIndex], views: { allOrders } });
             const result = t.applyHandler(order, 'place',
-                { status: 'draft', productSlug: '', userId: '', price: 0, createdAt: 0 },
+                { status: 'draft', productSlug: '', userId: '', price: 0, total: 0, customerEmail: '', createdAt: 0 },
                 ['alice', 'keyboard', 79, 1000]);
             expect(result.state.status).toBe('placed');
 
@@ -44,7 +44,7 @@ describe('Entity Handlers', () => {
 
         it('cancel from placed succeeds', () => {
             const result = createTestStore({ tables: [], views: {} }).applyHandler(order, 'cancel',
-                { status: 'placed', productSlug: 'kb', userId: 'a', price: 79, createdAt: 1 }, []);
+                { status: 'placed', productSlug: 'kb', userId: 'a', price: 79, total: 79, customerEmail: '', createdAt: 1 }, []);
             expect(result.state.status).toBe('cancelled');
         });
 
@@ -52,7 +52,7 @@ describe('Entity Handlers', () => {
             const t = createTestStore({ tables: [], views: {} });
             expect(() =>
                 t.applyHandler(order, 'deliver',
-                    { status: 'placed', productSlug: 'kb', userId: 'a', price: 79, createdAt: 1 }, []),
+                    { status: 'placed', productSlug: 'kb', userId: 'a', price: 79, total: 79, customerEmail: '', createdAt: 1 }, []),
             ).toThrow(SyncEngineError);
         });
     });

@@ -66,12 +66,18 @@ importers:
 
   apps/test:
     dependencies:
+      '@restatedev/restate-sdk':
+        specifier: 1.13.0
+        version: 1.13.0
       '@syncengine/client':
         specifier: workspace:*
         version: link:../../packages/client
       '@syncengine/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@syncengine/server':
+        specifier: workspace:*
+        version: link:../../packages/server
       '@syncengine/test-utils':
         specifier: workspace:*
         version: link:../../packages/test-utils
@@ -81,13 +87,13 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.4(react@19.2.4)
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
     devDependencies:
       '@syncengine/cli':
         specifier: workspace:*
         version: link:../../packages/cli
-      '@syncengine/server':
-        specifier: workspace:*
-        version: link:../../packages/server
       '@syncengine/vite-plugin':
         specifier: workspace:*
         version: link:../../packages/vite-plugin

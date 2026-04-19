@@ -7,7 +7,7 @@ import { order } from '../entities/order.actor';
 
 // Initial states
 const INV_INITIAL = { stock: 0, reserved: 0, reservedBy: '', reservedAt: 0 };
-const ORD_INITIAL = { status: 'draft', productSlug: '', userId: '', price: 0, createdAt: 0 };
+const ORD_INITIAL = { status: 'draft', productSlug: '', userId: '', price: 0, total: 0, customerEmail: '', createdAt: 0 };
 
 describe('Workflows', () => {
   // ── Checkout happy path ────────────────────────────────────────────

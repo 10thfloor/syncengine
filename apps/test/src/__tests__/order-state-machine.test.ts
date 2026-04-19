@@ -5,7 +5,7 @@ import { orderIndex, allOrders } from '../schema';
 import { order } from '../entities/order.actor';
 
 // Initial state for a fresh order entity.
-const DRAFT = { status: 'draft', productSlug: '', userId: '', price: 0, createdAt: 0 };
+const DRAFT = { status: 'draft', productSlug: '', userId: '', price: 0, total: 0, customerEmail: '', createdAt: 0 };
 
 // Helpers to build intermediate states.
 const placed = (base = DRAFT) => ({
