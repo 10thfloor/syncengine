@@ -31,4 +31,35 @@ export default config({
         ? () => import('./src/events/test')
         : undefined,
   },
+  observability: {
+    // Set OTEL_EXPORTER_OTLP_ENDPOINT in your shell to point at a
+    // collector (Jaeger at http://localhost:4318, Honeycomb, Grafana
+    // Tempo, etc.) and every framework seam — HTTP, RPC, entity,
+    // bus, webhook, heartbeat, gateway — starts emitting spans
+    // without further code changes. `*.metrics.ts` files (see
+    // src/orders.metrics.ts) auto-load at boot and their declared
+    // handles ship readings through the same OTLP pipeline.
+    //
+    // Quick start (Jaeger all-in-one):
+    //   docker run -d -p 4318:4318 -p 16686:16686 \
+    //     -e COLLECTOR_OTLP_ENABLED=true \
+    //     jaegertracing/all-in-one:latest
+    //   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 pnpm dev
+    //
+    serviceName: 'syncengine-kitchen-sink',
+
+    // Parent-based sampling ratio. Default is 1.0 in non-production,
+    // 0.1 in production. Override here if you want a different
+    // dev-time rate — e.g. `sampling: { ratio: 0.5 }` to keep half.
+    // sampling: { ratio: 1.0 },
+
+    // Set `exporter: false` to disable telemetry entirely. The OTel
+    // SDK is never imported; seam helpers become zero-cost no-ops.
+    // exporter: false,
+
+    // Opt-in outbound-fetch instrumentation. When set, Node-runtime
+    // `fetch()` calls (Vite dev server) produce a CLIENT span and
+    // auto-propagate traceparent onto the request. Off by default.
+    // autoInstrument: ['fetch'],
+  },
 });

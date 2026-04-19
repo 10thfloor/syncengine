@@ -20,6 +20,7 @@
 import { defineWorkflow, on } from '@syncengine/server';
 import { Concurrency } from '@syncengine/core';
 import { orderEvents, type OrderEventPayload } from '../events/orders.bus';
+import { ordersAudited } from '../orders.metrics';
 
 export const auditOrder = defineWorkflow(
     'auditOrder',
@@ -30,5 +31,10 @@ export const auditOrder = defineWorkflow(
     },
     async (_ctx, event: OrderEventPayload) => {
         console.log(`[audit] order=${event.orderId} event=${event.event} at=${event.at}`);
+        // Bus subscribers run inside `instrument.busConsume`, which
+        // installs an observe scope frame. `.add()` below auto-tags
+        // with workspace + primitive='bus' + name=<busName> — no need
+        // to thread ctx attributes through by hand.
+        ordersAudited.add(1, { event: event.event });
     },
 );
