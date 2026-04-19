@@ -36,6 +36,7 @@ import {
     mergeSourceIntoState,
     pickUserState,
     applySourceDeltas,
+    AccessDeniedError,
     EntityError,
     SyncEngineError,
     errors,
@@ -89,17 +90,28 @@ async function runHandler(
 
     let validated: Record<string, unknown>;
     try {
-        validated = applyHandler(entity, handlerName, merged, args);
+        // Plan 2: thread auth context to applyHandler so $access policies
+        // are enforced server-side. user is stubbed null until Plan 3 wires
+        // the authenticated identity from the Restate/WebSocket connection.
+        validated = applyHandler(entity, handlerName, merged, args, {
+            user: null,
+            key: entityKey,
+        });
     } catch (err) {
+        // AccessDenied gets its own prefix so the client can distinguish
+        // permission-denied from business-logic rejection on the rebase path.
+        if (err instanceof AccessDeniedError) {
+            throw new restate.TerminalError(`[${err.code}] ${err.message}`);
+        }
         // Typed errors carry structured fields; encode them into the
         // TerminalError message so they survive the Restate wire boundary.
         // hint/context drop here — clients that need structure must parse
         // the message format. See docs/.../error-system.md.
-        if (err instanceof SyncEngineError) {
-            throw new restate.TerminalError(`[${err.category}::${err.code}] ${err.message}`);
-        }
         if (err instanceof EntityError) {
             throw new restate.TerminalError(`[${err.code}] ${err.message}`);
+        }
+        if (err instanceof SyncEngineError) {
+            throw new restate.TerminalError(`[${err.category}::${err.code}] ${err.message}`);
         }
         // applyHandler wraps everything else as UserHandlerError (a
         // SyncEngineError), so this fallback is defensive only.
@@ -107,21 +119,16 @@ async function runHandler(
         throw new restate.TerminalError(message);
     }
 
-    // Extract emitted table inserts (Symbol key, invisible to JSON)
-    // Resolve '$key' placeholders in record values to the actual entity key
-    // so published rows have the real key in SQLite, not the literal '$key'.
+    // Extract emitted table inserts (Symbol key, invisible to JSON) and
+    // resolve '$key' / '$user' placeholders. Plan 3 will wire a real user
+    // id here; for now the server stubs userId as null, so '$user' slots
+    // left by the handler stay as the literal string in the published row.
     const rawEmits = extractEmits(validated);
     const rawTriggers = extractTriggers(validated);
     const rawPublishes = extractPublishes(validated);
-    const emits = rawEmits?.map((ins) => {
-        const hasPlaceholder = Object.values(ins.record).some((v) => v === '$key');
-        if (!hasPlaceholder) return ins;
-        const resolved: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(ins.record)) {
-            resolved[k] = v === '$key' ? entityKey : v;
-        }
-        return { table: ins.table, record: resolved };
-    });
+    const emits = rawEmits
+        ? resolveEmitPlaceholders(rawEmits, { entityKey, userId: null })
+        : undefined;
 
     // Split: persist user state fields only (not projection fields)
     const userState = hasSource ? pickUserState(validated, entity.$state) : validated;
@@ -130,7 +137,7 @@ async function runHandler(
     // Update projections incrementally from emitted deltas
     let updatedProjections = projections;
     if (hasSource && emits && emits.length > 0) {
-        updatedProjections = applySourceDeltas(projections, entity.$source, emits, entityKey);
+        updatedProjections = applySourceDeltas(projections, entity.$source, [...emits], entityKey);
         ctx.set(SOURCE_KEY, updatedProjections);
     }
 
@@ -158,6 +165,31 @@ async function runHandler(
     }
 
     return { state: broadcastState };
+}
+
+/**
+ * Resolve `'$key'` and `'$user'` placeholders in emitted insert records.
+ * `'$key'` always resolves to the entity instance key. `'$user'` resolves
+ * to the authenticated user id when available, otherwise remains as the
+ * literal string (Plan 3 wires the real user id).
+ */
+export function resolveEmitPlaceholders(
+    inserts: readonly EmitInsert[],
+    ctx: { readonly entityKey: string; readonly userId: string | null },
+): readonly EmitInsert[] {
+    return inserts.map((ins) => {
+        const values = Object.values(ins.record);
+        const hasKeyPh = values.some((v) => v === '$key');
+        const hasUserPh = ctx.userId !== null && values.some((v) => v === '$user');
+        if (!hasKeyPh && !hasUserPh) return ins;
+        const resolved: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(ins.record)) {
+            if (v === '$key') resolved[k] = ctx.entityKey;
+            else if (v === '$user' && ctx.userId !== null) resolved[k] = ctx.userId;
+            else resolved[k] = v;
+        }
+        return { table: ins.table, record: resolved };
+    });
 }
 
 /** Publish every `publish(bus, payload)` effect to NATS JetStream. The

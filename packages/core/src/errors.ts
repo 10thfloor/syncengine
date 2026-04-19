@@ -47,6 +47,7 @@ export const SchemaCode = Object.freeze({
     TRANSITION_NOT_EXHAUSTIVE: 'TRANSITION_NOT_EXHAUSTIVE',
     TRANSITION_AMBIGUOUS: 'TRANSITION_AMBIGUOUS',
     TRANSITION_NO_MATCH: 'TRANSITION_NO_MATCH',
+    INVALID_ENTITY_ACCESS: 'INVALID_ENTITY_ACCESS',
     UNKNOWN_MIGRATION_OP: 'UNKNOWN_MIGRATION_OP',
     CONFIG_LOAD_FAILED: 'CONFIG_LOAD_FAILED',
     CONFIG_NO_DEFAULT_EXPORT: 'CONFIG_NO_DEFAULT_EXPORT',
@@ -95,6 +96,12 @@ export const HandlerCode = Object.freeze({
 
 export type HandlerCodeValue = typeof HandlerCode[keyof typeof HandlerCode];
 
+export const AuthCode = Object.freeze({
+    ACCESS_DENIED: 'ACCESS_DENIED',
+} as const);
+
+export type AuthCodeValue = typeof AuthCode[keyof typeof AuthCode];
+
 export const CliCode = Object.freeze({
     STACK_NOT_RUNNING: 'STACK_NOT_RUNNING',
     STACK_ALREADY_RUNNING: 'STACK_ALREADY_RUNNING',
@@ -120,12 +127,12 @@ export type CliCodeValue = typeof CliCode[keyof typeof CliCode];
 
 // ── Error classes ──────────────────────────────────────────────────────────
 
-export type ErrorCategory = 'schema' | 'entity' | 'store' | 'connection' | 'handler' | 'cli';
+export type ErrorCategory = 'schema' | 'entity' | 'store' | 'connection' | 'handler' | 'cli' | 'auth';
 export type ErrorSeverity = 'fatal' | 'warning' | 'info';
 
 type AnyCode =
     | SchemaCodeValue | EntityCodeValue | StoreCodeValue
-    | ConnectionCodeValue | HandlerCodeValue | CliCodeValue;
+    | ConnectionCodeValue | HandlerCodeValue | CliCodeValue | AuthCodeValue;
 
 export interface SyncEngineErrorInit {
     code: AnyCode;
@@ -172,6 +179,27 @@ export class UserHandlerError extends SyncEngineError {
             cause: init.cause,
         });
         this.name = 'UserHandlerError';
+    }
+}
+
+export interface AccessDeniedErrorInit {
+    message: string;
+    hint?: string;
+    context?: Record<string, unknown>;
+}
+
+export class AccessDeniedError extends SyncEngineError {
+    constructor(init: AccessDeniedErrorInit) {
+        super({
+            code: AuthCode.ACCESS_DENIED,
+            category: 'auth',
+            severity: 'fatal',
+            message: init.message,
+            hint: init.hint,
+            context: init.context,
+        });
+        this.name = 'AccessDeniedError';
+        Object.setPrototypeOf(this, AccessDeniedError.prototype);
     }
 }
 
@@ -237,6 +265,15 @@ export const errors = {
     handler,
     cli(code: CliCodeValue, opts: ErrorOpts): SyncEngineError {
         return make(code, 'cli', 'fatal', opts);
+    },
+    accessDenied(_code: AuthCodeValue, opts: ErrorOpts): AccessDeniedError {
+        // _code is kept for API symmetry with other factories; there is only
+        // one AuthCode today (ACCESS_DENIED) so nothing branches on it yet.
+        return new AccessDeniedError({
+            message: opts.message,
+            hint: opts.hint,
+            context: opts.context,
+        });
     },
 };
 
