@@ -41,6 +41,7 @@ export type {
     BusConsumeAttrs,
     WebhookInboundAttrs,
     WebhookRunAttrs,
+    HeartbeatTickAttrs,
     RemoteHeaders,
     TraceCarrier,
 } from './internal';

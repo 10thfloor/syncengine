@@ -408,6 +408,49 @@ function markWebhookWorkspace(workspace: string): void {
     trace.getActiveSpan()?.setAttribute(ATTR_WORKSPACE, workspace);
 }
 
+export interface HeartbeatTickAttrs {
+    readonly name: string;
+    readonly workspace: string;
+    /** 1-based run index within the scheduler loop — tagged so APM
+     *  queries can distinguish the first tick (often slower due to
+     *  cold caches) from steady state. */
+    readonly runNumber: number;
+}
+
+/**
+ * Wrap a heartbeat's user-handler invocation in a span. Emitted once
+ * per scheduler tick so APM timing reflects the handler body, not the
+ * surrounding sleep / status-check loop.
+ */
+async function heartbeatTick<T>(
+    attrs: HeartbeatTickAttrs,
+    fn: () => Promise<T> | T,
+): Promise<T> {
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(
+        `heartbeat.${attrs.name}.tick`,
+        {
+            attributes: {
+                [ATTR_PRIMITIVE]: 'heartbeat',
+                [ATTR_NAME]: attrs.name,
+                [ATTR_WORKSPACE]: attrs.workspace,
+                'syncengine.run_number': attrs.runNumber,
+            },
+        },
+        async (span) => {
+            try {
+                return await fn();
+            } catch (err) {
+                span.recordException(err as Error);
+                span.setStatus({ code: SpanStatusCode.ERROR });
+                throw err;
+            } finally {
+                span.end();
+            }
+        },
+    );
+}
+
 export interface WebhookRunAttrs {
     readonly name: string;
     readonly workspace: string;
@@ -476,4 +519,5 @@ export const instrument = {
     webhookRun,
     markWebhookDedup,
     markWebhookWorkspace,
+    heartbeatTick,
 };

@@ -19,6 +19,7 @@
 // exit a workflow mid-interval without needing Restate cancellation.
 
 import * as restate from '@restatedev/restate-sdk';
+import { instrument } from '@syncengine/observe';
 import type { HeartbeatDef, HeartbeatContext, HeartbeatScope, HeartbeatTrigger } from './heartbeat.js';
 import { HEARTBEAT_WORKFLOW_PREFIX, computeSleepMs } from './heartbeat.js';
 import { heartbeatStatus } from '@syncengine/core';
@@ -93,9 +94,15 @@ export function buildHeartbeatWorkflow(
                     if (s2.status !== 'running') return;
 
                     try {
-                        const hbCtx = buildHeartbeatContext(ctx, def, scopeKey, runNumber, trigger);
-                        (hbCtx as unknown as { services: typeof resolvedServices }).services = resolvedServices;
-                        await def.$handler(hbCtx);
+                        const { workspaceId } = splitObjectKey(ctx.key);
+                        await instrument.heartbeatTick(
+                            { name: def.$name, workspace: workspaceId, runNumber },
+                            async () => {
+                                const hbCtx = buildHeartbeatContext(ctx, def, scopeKey, runNumber, trigger);
+                                (hbCtx as unknown as { services: typeof resolvedServices }).services = resolvedServices;
+                                await def.$handler(hbCtx);
+                            },
+                        );
                         const now = await ctx.date.now();
                         const nextAt = now + computeSleepMs(def.$every, now);
                         await status.recordRun(runNumber, now, nextAt);
