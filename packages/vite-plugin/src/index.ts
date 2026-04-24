@@ -201,14 +201,17 @@ function suppressServerWarningsPlugin(): Plugin {
  * data-worker) 403 at dev time.
  */
 function fsAllowPlugin(): Plugin {
+    const cachePath = join(homedir(), '.syncengine', 'source');
     return {
         name: 'syncengine:fs-allow',
-        config() {
-            return {
-                server: {
-                    fs: { allow: [join(homedir(), '.syncengine', 'source')] },
-                },
-            };
+        configResolved(config) {
+            // Append, don't replace — Vite's default `fs.allow` already
+            // includes the workspace root (detected via searchForWorkspaceRoot).
+            // Returning `server.fs.allow` from `config()` would override that
+            // default and break serving the user's own project files.
+            if (!config.server.fs.allow.includes(cachePath)) {
+                config.server.fs.allow.push(cachePath);
+            }
         },
     };
 }

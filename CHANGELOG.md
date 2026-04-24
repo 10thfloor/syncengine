@@ -9,6 +9,16 @@ and will be called out explicitly below.
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-04-23
+
+### Fixed
+
+- **Vite `fs.allow` now appends instead of replaces.** v0.1.2 set
+  `server.fs.allow` via the plugin's `config()` hook, which replaced
+  Vite's default (the workspace root) — causing the project's own
+  `index.html` to 403. Switched to `configResolved()` and push the
+  cache path onto the already-resolved allow list.
+
 ## [0.1.2] — 2026-04-23
 
 ### Fixed
