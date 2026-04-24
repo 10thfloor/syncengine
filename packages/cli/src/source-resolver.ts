@@ -277,6 +277,19 @@ async function downloadAndExtract(version: string, repo: string, destDir: string
     });
 
     rmSync(tarPath, { force: true });
+
+    // Materialize framework deps (restate-sdk, nats clients, etc.) inside
+    // the cache so Node's symlink-following resolution finds them when a
+    // user project imports from `node_modules/@syncengine/server`.
+    process.stdout.write(`  installing framework deps into cache...\n`);
+    await new Promise<void>((ok, fail) => {
+        const child = spawn('pnpm', ['install', '--frozen-lockfile', '--ignore-scripts'], { cwd: destDir, stdio: 'inherit' });
+        child.on('exit', (code) => (code === 0 ? ok() : fail(errors.cli(CliCode.DEPENDENCY_NOT_FOUND, {
+            message: `pnpm install in ${destDir} exited with code ${code}`,
+            hint: `Ensure pnpm is on PATH. Try: corepack enable && pnpm --version`,
+        }))));
+        child.on('error', fail);
+    });
 }
 
 function hashFile(path: string): string {

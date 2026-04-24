@@ -31,6 +31,15 @@ jobs:
       - name: setup wasm-pack
         run: cargo install wasm-pack --version 0.13.1 --locked
 
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
       - name: build dbsp wasm
         working-directory: packages/dbsp-engine
         run: wasm-pack build --target bundler --out-dir pkg --scope syncengine
@@ -43,9 +52,11 @@ jobs:
           set -euo pipefail
           V="${REF_NAME#v}"
           mkdir -p _release
-          # The tarball layout is `syncengine-source-<v>/packages/<pkg>/...`
-          # so `tar -xzf` into ~/.syncengine/source/<v>/ leaves a
-          # predictable `<cache>/packages/*` path for the symlink layer.
+          # The tarball layout is `syncengine-source-<v>/{packages,
+          # package.json, pnpm-workspace.yaml, pnpm-lock.yaml}` — a
+          # standalone pnpm workspace the CLI can `pnpm install` inside
+          # to materialize runtime deps (restate-sdk, nats clients, etc.)
+          # in ~/.syncengine/source/<v>/node_modules/.
           staging="_staging/syncengine-source-${V}"
           mkdir -p "${staging}/packages"
           for pkg in core client server vite-plugin http-core gateway-core observe; do
@@ -53,11 +64,40 @@ jobs:
           done
           mkdir -p "${staging}/packages/dbsp-engine"
           cp -R packages/dbsp-engine/pkg "${staging}/packages/dbsp-engine/pkg"
+          cp -R packages/dbsp-engine/package.json "${staging}/packages/dbsp-engine/package.json"
+          # Standalone workspace root: minimal package.json + workspace
+          # manifest scoped to the framework packages. Lockfile carries
+          # the resolved dep tree so install is deterministic.
+          cat > "${staging}/package.json" <<'JSON'
+          {
+            "name": "syncengine-source-cache",
+            "private": true,
+            "version": "0.0.0",
+            "packageManager": "pnpm@10.6.4"
+          }
+          JSON
+          cat > "${staging}/pnpm-workspace.yaml" <<'YAML'
+          packages:
+            - 'packages/*'
+            - 'packages/dbsp-engine/pkg'
+          YAML
           # Strip tests + dev-only files to keep the tarball lean.
+          # Done before lockfile generation so pnpm only resolves prod deps.
           find "${staging}" -type d -name '__tests__' -prune -exec rm -rf {} +
           find "${staging}" -type f \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' \) -delete
           find "${staging}" -type d -name 'node_modules' -prune -exec rm -rf {} +
           find "${staging}" -type d -name 'dist' -prune -exec rm -rf {} +
+          # Strip devDependencies + scripts from every framework package.json
+          # so the generated lockfile + cache install carry only runtime deps.
+          # Test files referencing devDeps (vitest, typescript, tsx) were
+          # removed above, so nothing at runtime imports from devDeps.
+          while IFS= read -r -d '' pj; do
+            node -e "const fs=require('fs');const p='${pj//\'/\\\'}';const j=JSON.parse(fs.readFileSync(p,'utf8'));delete j.devDependencies;delete j.scripts;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          done < <(find "${staging}/packages" -maxdepth 2 -name package.json -print0)
+          # Generate a cache-scoped lockfile (NOT the repo's root lockfile
+          # — that's scoped to apps/, cli, etc. which aren't in the tarball).
+          # User CLI will run `pnpm install --frozen-lockfile` against this.
+          (cd "${staging}" && pnpm install --lockfile-only --ignore-scripts)
           tar -czf "_release/syncengine-source-${V}.tar.gz" -C "_staging" "syncengine-source-${V}"
 
       - name: upload artifact

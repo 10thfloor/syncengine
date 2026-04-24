@@ -9,6 +9,19 @@ and will be called out explicitly below.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-23
+
+### Fixed
+
+- **Source tarball is now self-contained.** v0.1.0's tarball shipped
+  framework source only; when a user project imported through the
+  symlinked `node_modules/@syncengine/server`, Node followed the link
+  to the cache's real path and failed to resolve transitive deps like
+  `@restatedev/restate-sdk`. The release workflow now strips devDeps,
+  generates a cache-scoped `pnpm-lock.yaml`, and ships it inside the
+  tarball; the CLI runs `pnpm install --frozen-lockfile` inside the
+  cache on first extract so transitive deps resolve cleanly.
+
 ### Added (experimental)
 
 - **`edge(name, from, to, { cardinality?, props? })` — @experimental.**
