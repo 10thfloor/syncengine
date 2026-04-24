@@ -88,7 +88,9 @@ main() {
   fi
 
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  # Defensive against `set -u`: the trap fires after main() returns, so
+  # tolerate the variable being unset by then.
+  trap 'rm -rf "${tmpdir:-}"' EXIT
 
   step "downloading binary"
   log "${DIM}${url}${RESET}"

@@ -14,6 +14,7 @@
  */
 
 import { formatError } from '@syncengine/core';
+import { VERSION } from './version';
 import { initCommand } from './init';
 import { devCommand } from './dev';
 import { buildCommand } from './build';
@@ -62,6 +63,10 @@ async function main(): Promise<void> {
         case 'entity':
             await entityCommand(args.slice(1));
             break;
+        case '--version':
+        case '-V':
+            process.stdout.write(`syncengine ${VERSION}\n`);
+            break;
         case undefined:
         case 'help':
         case '--help':
@@ -91,6 +96,7 @@ Usage:
   syncengine workspace <verb>     Workspace admin (see \`workspace help\`)
   syncengine entity get <n> <k>  Read entity instance state from Restate
   syncengine help                 Show this message
+  syncengine --version            Print the CLI version
 
 Flags:
   --fresh                         Wipe .syncengine/dev/ before starting (dev only)
