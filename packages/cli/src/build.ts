@@ -18,6 +18,7 @@ import { banner, note } from './runner';
 import { findAppRoot } from './state';
 import { errors, CliCode } from '@syncengine/core';
 import { buildConfigBundle } from './config-bundle';
+import { setupAppForRun } from './source-resolver';
 
 interface Manifest {
     actors: string[];
@@ -36,6 +37,9 @@ export async function buildCommand(_args: string[]): Promise<void> {
         });
     }
     note(`app directory: ${relative(repoRoot, appDir)}`);
+
+    // Ensure framework source is linked before building.
+    await setupAppForRun(appDir);
 
     const distDir = join(appDir, 'dist');
 

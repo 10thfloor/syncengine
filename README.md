@@ -7,7 +7,6 @@
 You write pure domain logic. The framework handles sync, state, orchestration, and durability.
 
 [![ci](https://github.com/10thfloor/syncengine/actions/workflows/ci.yml/badge.svg)](https://github.com/10thfloor/syncengine/actions/workflows/ci.yml)
-[![jsr](https://jsr.io/badges/@syncengine)](https://jsr.io/@syncengine)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 [Documentation](./docs/guides/README.md) · [Examples](./apps) · [License](./LICENSE)
@@ -18,8 +17,8 @@ You write pure domain logic. The framework handles sync, state, orchestration, a
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/10thfloor/syncengine/main/install/install.sh | bash
-syncengine init my-app
-cd my-app
+syncengine init my-platform
+cd my-platform
 pnpm install
 pnpm dev
 ```
@@ -482,13 +481,13 @@ src/
 
 | Suffix            | Runs on                                   |
 |-------------------|-------------------------------------------|
-| `.actor.ts`       | client (optimistic) + server (authoritative) |
-| `.bus.ts`         | declaration shared; publish from either side  |
-| `.workflow.ts`    | **server only** — stubbed on the client       |
-| `.webhook.ts`     | **server only** — stubbed on the client       |
-| `.heartbeat.ts`   | **server only** — stubbed on the client       |
-| `.metrics.ts`     | **server only** — observability hooks         |
-| (no suffix)       | isomorphic — schema, views, services, values  |
+| [`.actor.ts`](docs/guides/entities.md)         | client (optimistic) + server (authoritative)  |
+| [`.bus.ts`](docs/guides/event-bus.md)          | declaration shared; publish from either side  |
+| [`.workflow.ts`](docs/guides/workflows.md)     | **server only** — stubbed on the client       |
+| [`.webhook.ts`](docs/guides/webhooks.md)       | **server only** — stubbed on the client       |
+| [`.heartbeat.ts`](docs/guides/heartbeats.md)   | **server only** — stubbed on the client       |
+| [`.metrics.ts`](docs/guides/observability.md)  | **server only** — observability hooks         |
+| (no suffix)                                    | isomorphic — schema, views, services, values  |
 
 Server-only suffixes resolve to an empty shell on the client and full
 code on the server — no separate `server/` and `client/` directories to

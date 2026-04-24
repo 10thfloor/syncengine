@@ -26,6 +26,7 @@ import { join, resolve, sep } from 'node:path';
 
 import { binaryPath as natsBinary } from '@syncengine/nats-bin';
 import { binaryPath as restateBinary } from '@syncengine/restate-bin';
+import { setupAppForRun } from './source-resolver';
 
 import {
     banner,
@@ -215,6 +216,11 @@ async function boot(
             hint: `Create a syncengine.config.ts in your project root.`,
         });
     }
+
+    // 3b. Ensure the framework source is cached and node_modules/@syncengine/*
+    //     symlinks point at it. No-op inside a pnpm workspace (workspace:*
+    //     already populated them).
+    await setupAppForRun(appDir);
 
     // 4. Workspace service (tsx directly — going through pnpm breaks the
     //    process-group kill cascade on shutdown)
@@ -552,16 +558,17 @@ logtime: true
 // ── Package resolution ────────────────────────────────────────────────────
 
 /**
- * Find `@syncengine/server`'s source directory. In a monorepo with
- * `workspace:*` links this resolves through the symlink in node_modules;
- * for an external user it resolves into their real node_modules copy.
+ * Find `@syncengine/server`'s source directory. Inside a pnpm workspace,
+ * workspace:* resolution populates node_modules/@syncengine/server;
+ * outside, the CLI's source-resolver symlinks it into place during
+ * setupAppForRun. In both cases the resolved path is the same.
  */
 function resolveServerDir(appDir: string): string {
     const candidate = join(appDir, 'node_modules', '@syncengine', 'server');
     if (existsSync(candidate)) return resolve(candidate);
     throw errors.cli(CliCode.DEPENDENCY_NOT_FOUND, {
         message: `Cannot find @syncengine/server from ${appDir}.`,
-        hint: `Make sure it's installed: pnpm add @syncengine/server`,
+        hint: `Run \`syncengine init\` to link the framework source, or verify .syncengine/release is pinned to an available version.`,
         context: { package: '@syncengine/server', appDir },
     });
 }
@@ -580,8 +587,8 @@ function resolveLocalBin(name: string, appDir: string): string {
         if (existsSync(bin)) return bin;
     }
     throw errors.cli(CliCode.DEPENDENCY_NOT_FOUND, {
-        message: `Cannot find ${name} binary. Install tsx as a devDependency.`,
-        hint: `Run: pnpm add -D tsx`,
+        message: `Cannot find ${name} binary in ${appDir}.`,
+        hint: `Add ${name} as a devDependency (pnpm add -D ${name}, or equivalent for your package manager).`,
         context: { binary: name },
     });
 }

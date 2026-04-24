@@ -88,6 +88,6 @@ Initial public release.
 ### Distribution
 
 - CLI binary: GitHub Releases (curl-installed to `~/.syncengine/bin/`)
-- Libraries: [JSR](https://jsr.io/@syncengine) as `@syncengine/core`, `@syncengine/client`, `@syncengine/server`, `@syncengine/vite-plugin`
+- Framework source: attached to each Release as `syncengine-source-<version>.tar.gz`; downloaded on demand and linked into projects by the CLI. No npm, no JSR.
 
-Getting started: `curl -fsSL https://raw.githubusercontent.com/10thfloor/syncengine/main/install/install.sh | bash && syncengine init my-app`.
+Getting started: `curl -fsSL https://raw.githubusercontent.com/10thfloor/syncengine/main/install/install.sh | bash && syncengine init my-platform`.

@@ -9,8 +9,8 @@
  * Open two tabs, type in one, see it in the other — and see the other
  * tab's peer bubble light up in the header. ~70 lines of app code.
  *
- *   syncengine init my-app
- *   cd my-app
+ *   syncengine init my-platform
+ *   cd my-platform
  *   syncengine dev
  */
 
@@ -18,6 +18,12 @@ import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, resolve, basename, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { errors, CliCode } from '@syncengine/core';
+import { VERSION } from './version';
+import {
+    ensureSourceCached,
+    linkSourceIntoProject,
+    writeRelease,
+} from './source-resolver';
 
 // ── ANSI helpers ─────────────────────────────────────────────────────────
 
@@ -128,15 +134,12 @@ function write(dir: string, relPath: string, content: string): void {
 // ── Scaffold project ─────────────────────────────────────────────────────
 
 function scaffoldProject(target: string, name: string, useWorkspace: boolean): void {
-    // Inside the monorepo: resolve to the live source via workspace:*.
-    // Outside: resolve from JSR via npm's `npm:@jsr/...` compat specifier.
-    // The compat form works on every package manager (pnpm/npm/yarn/bun)
-    // without requiring JSR-aware versions. Deno users can swap in
-    // `jsr:@syncengine/core@^0.1.0` by hand.
-    const coreDep       = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__core@^0.1.0';
-    const clientDep     = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__client@^0.1.0';
-    const serverDep     = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__server@^0.1.0';
-    const vitePluginDep = useWorkspace ? 'workspace:*' : 'npm:@jsr/syncengine__vite-plugin@^0.1.0';
+    // Framework packages are NOT deps of the user's project. The CLI
+    // downloads the matching source tarball on first `syncengine dev`
+    // and symlinks `node_modules/@syncengine/*` to the cached source.
+    // Inside the monorepo, pnpm's workspace:* resolution already
+    // handles this, and we leave the setup alone.
+    void useWorkspace;
 
     // ── package.json
     write(target, 'package.json', JSON.stringify({
@@ -150,21 +153,16 @@ function scaffoldProject(target: string, name: string, useWorkspace: boolean): v
             start: 'syncengine start',
         },
         dependencies: {
-            '@syncengine/client': clientDep,
-            '@syncengine/core': coreDep,
-            '@syncengine/server': serverDep,
             'react': '^19.0.0',
             'react-dom': '^19.0.0',
         },
         devDependencies: {
-            '@syncengine/vite-plugin': vitePluginDep,
             '@types/react': '^19.0.0',
             '@types/react-dom': '^19.0.0',
             '@vitejs/plugin-react': '^4.0.0',
             // tsx is required by the CLI's `syncengine dev` to run the
             // workspace service and gateway processes. The CLI itself
-            // is a global binary (install via curl; see install.sh) and
-            // is not a project dependency.
+            // is a global binary (install via curl; see install.sh).
             'tsx': '^4.19.0',
             'typescript': '~5.9.0',
             'vite': '6.4.2',
@@ -668,7 +666,7 @@ function printInstallFailed(pm: PM): void {
 // ── Entry ────────────────────────────────────────────────────────────────
 
 export async function initCommand(args: string[]): Promise<void> {
-    const rawArg = args[0] ?? '.';
+    const rawArg = args[0] ?? 'my-platform';
     const target = resolve(rawArg);
     const name = basename(target);
     // Show whatever the user typed for `cd`, so absolute paths and `.` round-trip faithfully.
@@ -704,6 +702,30 @@ export async function initCommand(args: string[]): Promise<void> {
     if (!ok) {
         printInstallFailed(pm);
         return;
+    }
+
+    // Link the framework source into node_modules/@syncengine/*. Two paths:
+    //   - Inside the monorepo: symlink to the live packages/* dirs for
+    //     instant-feedback dev against local changes.
+    //   - Standalone: pin `.syncengine/release` to the CLI version and
+    //     link to the cached source tarball (downloaded if missing).
+    try {
+        const { setupAppForRun } = await import('./source-resolver');
+        if (useWorkspace) {
+            await setupAppForRun(target);
+            process.stdout.write(`${check} Linked framework source (workspace mode)\n`);
+        } else {
+            writeRelease(target, VERSION);
+            const spinner = startSpinner(`Fetching syncengine v${VERSION}...`);
+            const layout = await ensureSourceCached(VERSION);
+            spinner.stop(`Cached syncengine v${VERSION}`);
+            linkSourceIntoProject(target, layout);
+            process.stdout.write(`${check} Linked framework source\n`);
+        }
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`\n  ${DIM}Warning: framework source not linked yet — ${msg}${RESET}\n`);
+        process.stderr.write(`  ${DIM}Run \`syncengine dev\` to retry.${RESET}\n\n`);
     }
 
     printSuccess(cdArg, pm);

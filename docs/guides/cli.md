@@ -28,8 +28,8 @@ syncengine entity         Entity admin (inspect, rpc)
 Scaffolds a new project. Interactive — asks for app name, picks starter, runs `pnpm install`:
 
 ```bash
-syncengine init my-app
-cd my-app
+syncengine init my-platform
+cd my-platform
 syncengine dev
 ```
 

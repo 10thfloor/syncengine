@@ -132,7 +132,7 @@ main() {
 
   printf "${BOLD}${GREEN}syncengine is installed.${RESET}\n\n"
   printf "Verify:     ${BOLD}syncengine --version${RESET}\n"
-  printf "Get going:  ${BOLD}syncengine init my-app${RESET}\n\n"
+  printf "Get going:  ${BOLD}syncengine init my-platform${RESET}\n\n"
 }
 
 main "$@"

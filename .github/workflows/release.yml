@@ -19,6 +19,54 @@ permissions:
   contents: write
 
 jobs:
+  source:
+    name: build source tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: setup wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: build dbsp wasm
+        working-directory: packages/dbsp-engine
+        run: wasm-pack build --target bundler --out-dir pkg --scope syncengine
+
+      - name: package source tarball
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${REF_NAME#v}"
+          mkdir -p _release
+          # The tarball layout is `syncengine-source-<v>/packages/<pkg>/...`
+          # so `tar -xzf` into ~/.syncengine/source/<v>/ leaves a
+          # predictable `<cache>/packages/*` path for the symlink layer.
+          staging="_staging/syncengine-source-${V}"
+          mkdir -p "${staging}/packages"
+          for pkg in core client server vite-plugin http-core gateway-core observe; do
+            cp -R "packages/${pkg}" "${staging}/packages/${pkg}"
+          done
+          mkdir -p "${staging}/packages/dbsp-engine"
+          cp -R packages/dbsp-engine/pkg "${staging}/packages/dbsp-engine/pkg"
+          # Strip tests + dev-only files to keep the tarball lean.
+          find "${staging}" -type d -name '__tests__' -prune -exec rm -rf {} +
+          find "${staging}" -type f \( -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' \) -delete
+          find "${staging}" -type d -name 'node_modules' -prune -exec rm -rf {} +
+          find "${staging}" -type d -name 'dist' -prune -exec rm -rf {} +
+          tar -czf "_release/syncengine-source-${V}.tar.gz" -C "_staging" "syncengine-source-${V}"
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncengine-source
+          path: _release/*.tar.gz
+          if-no-files-found: error
+
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -97,7 +145,7 @@ jobs:
   publish:
     name: attach artifacts to release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, source]
     steps:
       - uses: actions/checkout@v4
 
