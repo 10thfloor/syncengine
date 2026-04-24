@@ -1,6 +1,7 @@
 {
   "name": "@syncengine/client",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "syncengine browser runtime — useStore, useEntity, useTable, useTopic hooks",
   "exports": {
     ".": "./src/index.ts",

@@ -1,6 +1,7 @@
 {
   "name": "@syncengine/server",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "syncengine server runtime — defineWorkflow, heartbeat, webhook, entity runtime, bus dispatcher",
   "exports": {
     ".": "./src/index.ts",

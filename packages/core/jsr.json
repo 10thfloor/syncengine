@@ -1,6 +1,7 @@
 {
   "name": "@syncengine/core",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "syncengine core primitives — entity, bus, table, topic, workflow, service, value",
   "exports": {
     ".": "./src/index.ts",

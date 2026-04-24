@@ -1,6 +1,7 @@
 {
   "name": "@syncengine/vite-plugin",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "syncengine Vite plugin — actor discovery, workspace resolution, dev-server wiring",
   "exports": {
     ".": "./src/index.ts"
