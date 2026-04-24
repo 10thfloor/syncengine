@@ -9,6 +9,22 @@ and will be called out explicitly below.
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-04-23
+
+### Changed
+
+- **`syncengine start` is now turnkey.** It spawns `nats-server` +
+  `restate-server` from the bin cache (same pattern as `syncengine dev`),
+  runs the pre-built `dist/server/index.mjs`, POSTs the deployment to
+  Restate admin, and provisions the default workspace — everything the
+  prod bundle needs to serve requests. Ports and state dir are shared
+  with `dev`, so only one stack (dev OR prod) runs at a time;
+  attempting to start a second instance fails with
+  `STACK_ALREADY_RUNNING`. `syncengine down` tears down either.
+  Cloud deploys using the scaffolded Dockerfile still bring their own
+  NATS + Restate via env vars — `start` is for local smoke testing and
+  single-box deploys.
+
 ## [0.1.3] — 2026-04-23
 
 ### Fixed
