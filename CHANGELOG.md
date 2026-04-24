@@ -9,6 +9,20 @@ and will be called out explicitly below.
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-04-23
+
+### Fixed
+
+- **Vite `fs.allow` auto-configured.** `@syncengine/vite-plugin` now
+  adds `~/.syncengine/source/` to `server.fs.allow`, so dev-mode
+  requests for framework worker files (e.g. `data-worker.js`) no
+  longer 403 when Vite dereferences the project-local `.syncengine/source`
+  symlink into the cache's real path.
+- **v0.1.1 release tarball never materialized** — the CI workflow tried
+  to copy a non-existent `packages/dbsp-engine/package.json`. v0.1.2
+  ships the fix alongside the tarball-self-containment work that was
+  intended for v0.1.1.
+
 ## [0.1.1] — 2026-04-23
 
 ### Fixed

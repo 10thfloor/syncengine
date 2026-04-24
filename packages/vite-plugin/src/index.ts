@@ -24,6 +24,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 
 import type { Plugin, ViteDevServer } from 'vite';
 import wasm from 'vite-plugin-wasm';
@@ -89,6 +90,7 @@ export interface SyncenginePluginOptions {
 export default function syncengine(opts: SyncenginePluginOptions = {}) {
     return [
         suppressServerWarningsPlugin(),
+        fsAllowPlugin(),
         wasmPlugin(),
         wasm(),
         topLevelAwait(),
@@ -183,6 +185,28 @@ function suppressServerWarningsPlugin(): Plugin {
                             defaultHandler(warning);
                         },
                     },
+                },
+            };
+        },
+    };
+}
+
+/**
+ * Allows Vite to serve framework source from `~/.syncengine/source/`.
+ *
+ * Standalone projects get `.syncengine/source` as a symlink into the
+ * machine-wide cache; Vite dereferences the symlink and checks the real
+ * path against `server.fs.allow`, which defaults to the project root.
+ * Without this plugin, requests for worker files (e.g. @syncengine/client's
+ * data-worker) 403 at dev time.
+ */
+function fsAllowPlugin(): Plugin {
+    return {
+        name: 'syncengine:fs-allow',
+        config() {
+            return {
+                server: {
+                    fs: { allow: [join(homedir(), '.syncengine', 'source')] },
                 },
             };
         },

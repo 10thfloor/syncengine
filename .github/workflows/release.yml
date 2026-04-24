@@ -64,7 +64,6 @@ jobs:
           done
           mkdir -p "${staging}/packages/dbsp-engine"
           cp -R packages/dbsp-engine/pkg "${staging}/packages/dbsp-engine/pkg"
-          cp -R packages/dbsp-engine/package.json "${staging}/packages/dbsp-engine/package.json"
           # Standalone workspace root: minimal package.json + workspace
           # manifest scoped to the framework packages. Lockfile carries
           # the resolved dep tree so install is deterministic.
