@@ -35,6 +35,18 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # @syncengine/test-utils has a `file:../dbsp-engine/pkg` dep that
+      # pnpm resolves at install time — pkg/ has to exist first.
+      - name: setup rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: setup wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: build dbsp wasm
+        working-directory: packages/dbsp-engine
+        run: wasm-pack build --target bundler --out-dir pkg --scope syncengine
+
       - name: install
         run: pnpm install --frozen-lockfile
 
